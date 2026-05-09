@@ -1,5 +1,5 @@
 group "default" {
-  targets = ["base", "claude", "codex", "gemini", "acpx", "opencode"]
+  targets = ["base", "claude", "codex", "gemini", "acpx", "opencode", "pi"]
 }
 
 variable "VERSION" { default = "dev" }
@@ -57,6 +57,16 @@ target "opencode" {
   dockerfile = "docker/agent-runtime/Dockerfile.opencode"
   platforms = ["linux/amd64", "linux/arm64"]
   tags = ["${REGISTRY}/agent-runtime-opencode:${VERSION}"]
+  contexts = {
+    "paperclipai/agent-runtime-base:${VERSION}" = "target:base"
+  }
+}
+
+target "pi" {
+  context = "."
+  dockerfile = "docker/agent-runtime/Dockerfile.pi"
+  platforms = ["linux/amd64", "linux/arm64"]
+  tags = ["${REGISTRY}/agent-runtime-pi:${VERSION}"]
   contexts = {
     "paperclipai/agent-runtime-base:${VERSION}" = "target:base"
   }

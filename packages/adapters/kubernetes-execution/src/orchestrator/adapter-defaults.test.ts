@@ -61,4 +61,15 @@ describe("adapter defaults registry", () => {
     expect(d.envKeys).toContain("OPENAI_API_KEY");
     expect(d.allowFqdns).toContain("api.openai.com");
   });
+
+  it("pi_local has expected env + fqdn defaults", () => {
+    const d = getAdapterDefaults("pi_local");
+    expect(d.runtimeImage).toMatch(/agent-runtime-pi/);
+    expect(d.envKeys).toEqual(
+      expect.arrayContaining(["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY"]),
+    );
+    expect(d.allowFqdns).toEqual(
+      expect.arrayContaining(["api.anthropic.com", "api.openai.com", "api.x.ai"]),
+    );
+  });
 });
