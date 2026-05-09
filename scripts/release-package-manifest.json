@@ -30,6 +30,11 @@
     "publishFromCi": true
   },
   {
+    "dir": "packages/adapters/kubernetes-execution",
+    "name": "@paperclipai/execution-target-kubernetes",
+    "publishFromCi": true
+  },
+  {
     "dir": "packages/adapters/opencode-local",
     "name": "@paperclipai/adapter-opencode-local",
     "publishFromCi": true
