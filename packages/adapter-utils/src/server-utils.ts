@@ -84,46 +84,6 @@ const DEFAULT_PAPERCLIP_SPACE_ID = "default";
 const PAPERCLIP_CONFIG_BASENAME = "config.json";
 const PATH_SEGMENT_RE = /^[a-zA-Z0-9_-]+$/;
 
-function expandHomePrefix(value: string): string {
-  if (value === "~") return os.homedir();
-  if (value.startsWith("~/")) return path.resolve(os.homedir(), value.slice(2));
-  return value;
-}
-
-function resolvePaperclipHomeDirForAdapter(homeOverride?: string, env: NodeJS.ProcessEnv = process.env): string {
-  const raw = homeOverride?.trim() || env.PAPERCLIP_HOME?.trim();
-  if (raw) return path.resolve(expandHomePrefix(raw));
-  return path.resolve(os.homedir(), ".paperclip");
-}
-
-function resolvePaperclipInstanceIdForAdapter(instanceIdOverride?: string, env: NodeJS.ProcessEnv = process.env): string {
-  const raw = instanceIdOverride?.trim() || env.PAPERCLIP_INSTANCE_ID?.trim() || DEFAULT_PAPERCLIP_INSTANCE_ID;
-  if (!PATH_SEGMENT_RE.test(raw)) {
-    throw new Error(`Invalid PAPERCLIP_INSTANCE_ID '${raw}'.`);
-  }
-  return raw;
-}
-
-function resolvePaperclipInstanceRootForAdapter(input: {
-  homeDir?: string;
-  instanceId?: string;
-  env?: NodeJS.ProcessEnv;
-} = {}): string {
-  return path.resolve(
-    resolvePaperclipHomeDirForAdapter(input.homeDir, input.env),
-    "instances",
-    resolvePaperclipInstanceIdForAdapter(input.instanceId, input.env),
-  );
-}
-
-function resolvePaperclipInstanceConfigPathForAdapter(input: {
-  homeDir?: string;
-  instanceId?: string;
-  env?: NodeJS.ProcessEnv;
-} = {}): string {
-  return path.resolve(resolvePaperclipInstanceRootForAdapter(input), PAPERCLIP_CONFIG_BASENAME);
-}
-
 function readJsonIfPresent(filePath: string): unknown | null {
   if (!existsSync(filePath)) return null;
   try {
@@ -141,58 +101,40 @@ function isPaperclipRuntimeConfig(value: unknown): boolean {
   return isObject(value) && isObject(value.database) && isObject(value.server);
 }
 
-function readActiveSpaceIdFromRegistry(instanceConfigPath: string): string | null {
-  const parsed = readJsonIfPresent(instanceConfigPath);
-  if (!isObject(parsed) || isPaperclipRuntimeConfig(parsed)) return null;
-  const activeSpaceId = parsed.activeSpaceId;
-  return typeof activeSpaceId === "string" && PATH_SEGMENT_RE.test(activeSpaceId) ? activeSpaceId : null;
-}
-
-function hasLegacyDefaultSpaceInstall(input: {
-  homeDir?: string;
-  instanceId?: string;
-  env?: NodeJS.ProcessEnv;
-} = {}): boolean {
-  return isPaperclipRuntimeConfig(readJsonIfPresent(resolvePaperclipInstanceConfigPathForAdapter(input)));
-}
-
-function resolvePaperclipSpaceIdForAdapter(input: {
-  homeDir?: string;
-  instanceId?: string;
-  spaceId?: string;
-  env?: NodeJS.ProcessEnv;
-} = {}): string {
-  const raw =
-    input.spaceId?.trim() ||
-    input.env?.PAPERCLIP_SPACE_ID?.trim() ||
-    process.env.PAPERCLIP_SPACE_ID?.trim() ||
-    readActiveSpaceIdFromRegistry(resolvePaperclipInstanceConfigPathForAdapter(input)) ||
-    DEFAULT_PAPERCLIP_SPACE_ID;
-  if (!PATH_SEGMENT_RE.test(raw)) {
-    throw new Error(`Invalid PAPERCLIP_SPACE_ID '${raw}'.`);
-  }
-  return raw;
-}
-
-function resolvePaperclipSpacesRootForAdapter(input: {
-  homeDir?: string;
-  instanceId?: string;
-  env?: NodeJS.ProcessEnv;
-} = {}): string {
-  return path.resolve(resolvePaperclipInstanceRootForAdapter(input), "spaces");
-}
-
 export function resolvePaperclipSpaceRootForAdapter(input: {
   homeDir?: string;
   instanceId?: string;
   spaceId?: string;
   env?: NodeJS.ProcessEnv;
 } = {}): string {
-  const spaceId = resolvePaperclipSpaceIdForAdapter(input);
-  if (spaceId === DEFAULT_PAPERCLIP_SPACE_ID && hasLegacyDefaultSpaceInstall(input)) {
-    return resolvePaperclipInstanceRootForAdapter(input);
+  const env = input.env ?? process.env;
+  const homeRaw = input.homeDir?.trim() || env.PAPERCLIP_HOME?.trim();
+  const expandedHome =
+    homeRaw === "~"
+      ? os.homedir()
+      : homeRaw?.startsWith("~/")
+        ? path.resolve(os.homedir(), homeRaw.slice(2))
+        : homeRaw;
+  const homeDir = path.resolve(expandedHome || path.resolve(os.homedir(), ".paperclip"));
+  const instanceId = input.instanceId?.trim() || env.PAPERCLIP_INSTANCE_ID?.trim() || DEFAULT_PAPERCLIP_INSTANCE_ID;
+  if (!PATH_SEGMENT_RE.test(instanceId)) throw new Error(`Invalid PAPERCLIP_INSTANCE_ID '${instanceId}'.`);
+
+  const instanceRoot = path.resolve(homeDir, "instances", instanceId);
+  const instanceConfigPath = path.resolve(instanceRoot, PAPERCLIP_CONFIG_BASENAME);
+  const instanceConfig = readJsonIfPresent(instanceConfigPath);
+  const registrySpaceId = isObject(instanceConfig) && !isPaperclipRuntimeConfig(instanceConfig)
+    ? instanceConfig.activeSpaceId
+    : null;
+  const spaceId = input.spaceId?.trim() ||
+    env.PAPERCLIP_SPACE_ID?.trim() ||
+    (typeof registrySpaceId === "string" && PATH_SEGMENT_RE.test(registrySpaceId) ? registrySpaceId : null) ||
+    DEFAULT_PAPERCLIP_SPACE_ID;
+  if (!PATH_SEGMENT_RE.test(spaceId)) throw new Error(`Invalid PAPERCLIP_SPACE_ID '${spaceId}'.`);
+
+  if (spaceId === DEFAULT_PAPERCLIP_SPACE_ID && isPaperclipRuntimeConfig(instanceConfig)) {
+    return instanceRoot;
   }
-  return path.resolve(resolvePaperclipSpacesRootForAdapter(input), spaceId);
+  return path.resolve(instanceRoot, "spaces", spaceId);
 }
 const SENSITIVE_ENV_KEY = /(key|token|secret|password|passwd|authorization|cookie)/i;
 const REDACTED_LOG_VALUE = "***REDACTED***";

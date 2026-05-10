@@ -889,9 +889,6 @@ export function buildHostServices(
         });
         const status = await inspectStoredLocalFolder(companyId, params.folderKey);
         assertWritableConfiguredLocalFolder(status);
-        if (status.access !== "readWrite" || !status.writable) {
-          throw new Error("Local folder is not configured for writes");
-        }
         await writePluginLocalFolderTextAtomic(status.realPath!, params.relativePath, params.contents);
         return inspectStoredLocalFolder(companyId, params.folderKey);
       },
@@ -900,9 +897,6 @@ export function buildHostServices(
         const companyId = ensureCompanyId(params.companyId);
         const status = await inspectStoredLocalFolder(companyId, params.folderKey);
         assertWritableConfiguredLocalFolder(status);
-        if (status.access !== "readWrite" || !status.writable) {
-          throw new Error("Local folder is not configured for writes");
-        }
         await deletePluginLocalFolderFile(status.realPath!, params.relativePath);
         return inspectStoredLocalFolder(companyId, params.folderKey);
       },

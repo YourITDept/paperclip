@@ -113,6 +113,8 @@ describe("resolveDatabaseTarget", () => {
     process.env.PAPERCLIP_HOME = home;
     delete process.env.PAPERCLIP_CONFIG;
     delete process.env.DATABASE_URL;
+    delete process.env.PAPERCLIP_INSTANCE_ID;
+    delete process.env.PAPERCLIP_SPACE_ID;
 
     const target = resolveDatabaseTarget();
 
