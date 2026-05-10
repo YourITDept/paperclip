@@ -25,8 +25,15 @@ export {
   resolvePaperclipSpaceRoot,
 };
 
+const defaultConfigPathCache = new Map<string, string>();
+
 export function resolveDefaultConfigPath(): string {
-  return resolvePaperclipConfigPathForInstance();
+  const cacheKey = `${process.env.PAPERCLIP_HOME ?? ""}\0${process.env.PAPERCLIP_INSTANCE_ID ?? ""}`;
+  const cached = defaultConfigPathCache.get(cacheKey);
+  if (cached) return cached;
+  const resolved = resolvePaperclipConfigPathForInstance();
+  defaultConfigPathCache.set(cacheKey, resolved);
+  return resolved;
 }
 
 export function resolveDefaultEmbeddedPostgresDir(): string {

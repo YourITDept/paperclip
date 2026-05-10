@@ -541,6 +541,7 @@ export async function writePluginLocalFolderTextAtomic(
 export async function deletePluginLocalFolderFile(
   rootPath: string,
   relativePath: string,
+  folderKey: string,
 ) {
   const rootRealPath = await fs.realpath(rootPath);
   let resolved: Awaited<ReturnType<typeof resolvePluginLocalFolderPath>>;
@@ -553,7 +554,7 @@ export async function deletePluginLocalFolderFile(
     const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "";
     if (code !== "ENOENT") throw error;
     return inspectPluginLocalFolder({
-      folderKey: "delete-result",
+      folderKey,
       storedConfig: {
         path: rootPath,
         access: "readWrite",
@@ -578,7 +579,7 @@ export async function deletePluginLocalFolderFile(
   }
 
   return inspectPluginLocalFolder({
-    folderKey: "delete-result",
+    folderKey,
     storedConfig: {
       path: rootPath,
       access: "readWrite",

@@ -897,7 +897,7 @@ export function buildHostServices(
         const companyId = ensureCompanyId(params.companyId);
         const status = await inspectStoredLocalFolder(companyId, params.folderKey);
         assertWritableConfiguredLocalFolder(status);
-        await deletePluginLocalFolderFile(status.realPath!, params.relativePath);
+        await deletePluginLocalFolderFile(status.realPath!, params.relativePath, params.folderKey);
         return inspectStoredLocalFolder(companyId, params.folderKey);
       },
     },
