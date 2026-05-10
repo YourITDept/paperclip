@@ -109,7 +109,7 @@ export function oauthRoutes(deps: OAuthRouteDeps): Router {
     }
     if (deps.connectFloodLimiter) {
       const floodOk = await deps.connectFloodLimiter.check(
-        `connect-flood:${req.params.companyId}`,
+        `connect-flood:${(req.params as unknown as { companyId: string }).companyId}`,
       );
       if (!floodOk) {
         res.status(429).json({ errorCode: "connect_flood" });

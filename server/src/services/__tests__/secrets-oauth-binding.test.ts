@@ -96,6 +96,7 @@ describeEmbeddedPostgres("resolveAdapterConfigForRuntime — oauth_token binding
     companyId: string;
     accessSecretId: string;
     status: "active" | "expired" | "revoked" | "error";
+    accessTokenExpiresAt?: Date;
   }) {
     const connectionId = randomUUID();
     await db.insert(oauthConnections).values({
@@ -108,7 +109,8 @@ describeEmbeddedPostgres("resolveAdapterConfigForRuntime — oauth_token binding
       accountId: "acct-42",
       accountLabel: "Octo",
       scopes: ["repo"],
-      accessTokenExpiresAt: new Date(Date.now() + 3600_000),
+      accessTokenExpiresAt:
+        input.accessTokenExpiresAt ?? new Date(Date.now() + 3600_000),
       lastError: null,
       lastErrorAt: null,
       lastRefreshedAt: new Date(),
@@ -202,6 +204,29 @@ describeEmbeddedPostgres("resolveAdapterConfigForRuntime — oauth_token binding
         },
       }),
     ).rejects.toMatchObject({ errorCode: "oauth_connection_missing" });
+  });
+
+  it("rejects an expired oauth_token when no refresh secret is on file", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db, makeOauthDeps());
+    const accessSecret = await svc.upsertSecretByName(companyId, {
+      name: `oauth:github:acct-42:access-${randomUUID()}`,
+      value: "EXPIRED-PLAINTEXT",
+    });
+    const connectionId = await seedConnection({
+      companyId,
+      accessSecretId: accessSecret.id,
+      status: "active",
+      accessTokenExpiresAt: new Date(Date.now() - 60_000), // expired 1 minute ago
+    });
+
+    await expect(
+      svc.resolveAdapterConfigForRuntime(companyId, {
+        env: {
+          GITHUB_TOKEN: { type: "oauth_token", connectionId, field: "access" },
+        },
+      }),
+    ).rejects.toMatchObject({ errorCode: "oauth_access_token_expired" });
   });
 
   it("throws unprocessable when oauthDeps is not wired", async () => {

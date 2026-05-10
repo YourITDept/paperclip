@@ -2310,6 +2310,22 @@ export function secretService(db: Db, oauthDeps?: SecretServiceOAuthDeps) {
           const needsRefresh =
             !!conn.refreshTokenSecretId && expiresInMs < LAZY_WINDOW_MS;
 
+          // When the access token is already expired AND there is no refresh
+          // token to recover with, fail loudly. The previous behaviour fell
+          // through and returned the expired plaintext, so agents hit the
+          // upstream provider with a guaranteed-401 token.
+          if (
+            !conn.refreshTokenSecretId &&
+            conn.accessTokenExpiresAt &&
+            expiresInMs <= 0
+          ) {
+            const e = new Error(
+              `oauth_access_token_expired: ${conn.providerId}`,
+            ) as Error & { errorCode: string };
+            e.errorCode = "oauth_access_token_expired";
+            throw e;
+          }
+
           let resolvedAccessToken: string | null = null;
           if (needsRefresh) {
             if (!oauthDeps.refreshFn) {

@@ -50,6 +50,7 @@ import { oauthLogger } from "./oauth/logger.js";
 import { oauthRoutes } from "./routes/oauth.js";
 import { oauthCallbackRoute } from "./routes/oauth-callback.js";
 import { oauthMarkRevokedRoute } from "./routes/oauth-mark-revoked.js";
+import { runJwtMiddleware } from "./middleware/run-jwt.js";
 import { startRefreshWorker } from "./oauth/refresh-worker.js";
 import { refreshConnection as refreshConnectionImpl } from "./oauth/refresh.js";
 import { startStateSweeper } from "./oauth/state-sweeper.js";
@@ -383,9 +384,12 @@ export async function createApp(
       secretService: oauthSecretService,
     }),
   );
-  // run-JWT middleware threaded in T31 (Phase 4)
+  // Bearer-token run-JWT middleware: extracts oauth.connectionIds claim from
+  // the Authorization header and puts it on req.runJwt. The mark-revoked
+  // handler enforces 401/403 based on its presence + connection scoping.
   api.use(
     "/oauth/connections/:id/mark-revoked",
+    runJwtMiddleware(),
     oauthMarkRevokedRoute({ db }),
   );
 
