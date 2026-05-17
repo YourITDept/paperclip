@@ -1762,6 +1762,8 @@ export function issueRoutes(
       ? Number.parseInt(rawOffset, 10)
       : null;
     const attention = req.query.attention as string | undefined;
+    const sortField = req.query.sortField as string | undefined;
+    const sortDir = req.query.sortDir as string | undefined;
 
     if (assigneeUserFilterRaw === "me" && (!assigneeUserId || req.actor.type !== "board")) {
       res.status(403).json({ error: "assigneeUserId=me requires board authentication" });
@@ -1789,6 +1791,14 @@ export function issueRoutes(
     }
     if (rawOffset !== undefined && (parsedOffset === null || !Number.isInteger(parsedOffset) || parsedOffset < 0)) {
       res.status(400).json({ error: "offset must be a non-negative integer" });
+      return;
+    }
+    if (sortField !== undefined && sortField !== "updated") {
+      res.status(400).json({ error: "sortField must be 'updated' when provided" });
+      return;
+    }
+    if (sortDir !== undefined && sortDir !== "asc" && sortDir !== "desc") {
+      res.status(400).json({ error: "sortDir must be 'asc' or 'desc' when provided" });
       return;
     }
     const offset = parsedOffset ?? 0;
@@ -1823,6 +1833,8 @@ export function issueRoutes(
       q: req.query.q as string | undefined,
       limit,
       offset,
+      sortField: sortField === "updated" ? "updated" : undefined,
+      sortDir: sortDir === "asc" || sortDir === "desc" ? sortDir : undefined,
     });
     const issueIds = result.map((issue) => issue.id);
     const [handoffStates, recoveryActionByIssue] = await Promise.all([
