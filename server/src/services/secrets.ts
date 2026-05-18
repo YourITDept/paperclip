@@ -1134,6 +1134,13 @@ export function secretService(db: Db) {
         .then((rows) => rows[0] ?? null);
     },
 
+    removeProviderConfig: async (id: string) =>
+      db
+        .delete(companySecretProviderConfigs)
+        .where(eq(companySecretProviderConfigs.id, id))
+        .returning()
+        .then((rows) => rows[0] ?? null),
+
     setDefaultProviderConfig: async (id: string) => {
       const existing = await getProviderConfigById(id);
       if (!existing) return null;

@@ -172,27 +172,27 @@ export function secretRoutes(db: Db) {
     }
     assertCompanyAccess(req, existing.companyId);
 
-    const disabled = await svc.disableProviderConfig(id);
-    if (!disabled) {
+    const removed = await svc.removeProviderConfig(id);
+    if (!removed) {
       res.status(404).json({ error: "Provider vault not found" });
       return;
     }
 
     await logActivity(db, {
-      companyId: disabled.companyId,
+      companyId: removed.companyId,
       actorType: "user",
       actorId: req.actor.userId ?? "board",
-      action: "secret_provider_config.disabled",
+      action: "secret_provider_config.removed",
       entityType: "secret_provider_config",
-      entityId: disabled.id,
+      entityId: removed.id,
       details: {
-        provider: disabled.provider,
-        displayName: disabled.displayName,
-        status: disabled.status,
+        provider: removed.provider,
+        displayName: removed.displayName,
+        remoteDeleted: false,
       },
     });
 
-    res.json(disabled);
+    res.json(removed);
   });
 
   router.post("/secret-provider-configs/:id/default", async (req, res) => {

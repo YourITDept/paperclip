@@ -492,6 +492,35 @@ describeEmbeddedPostgres("secretService", () => {
     );
   });
 
+  it("removes provider vault config locally without deleting remote AWS secrets", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+    const vault = await svc.createProviderConfig(companyId, {
+      provider: "aws_secrets_manager",
+      displayName: "AWS production",
+      config: { region: "us-east-1", namespace: "prod-use1" },
+    });
+    const secret = await svc.create(companyId, {
+      name: `external-${randomUUID()}`,
+      provider: "aws_secrets_manager",
+      providerConfigId: vault.id,
+      managedMode: "external_reference",
+      externalRef: "arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/external",
+    });
+    const deleteSpy = vi.spyOn(awsSecretsManagerProvider, "deleteOrArchive").mockResolvedValue();
+
+    const removed = await svc.removeProviderConfig(vault.id);
+
+    expect(removed?.id).toBe(vault.id);
+    await expect(svc.getProviderConfigById(vault.id)).resolves.toBeNull();
+    const [persistedSecret] = await db
+      .select()
+      .from(companySecrets)
+      .where(eq(companySecrets.id, secret.id));
+    expect(persistedSecret?.providerConfigId).toBeNull();
+    expect(deleteSpy).not.toHaveBeenCalled();
+  });
+
   it("hides soft-deleted secrets and allows name/key reuse", async () => {
     const companyId = await seedCompany();
     const svc = secretService(db);

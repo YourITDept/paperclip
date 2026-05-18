@@ -384,6 +384,7 @@ export function Secrets() {
   const [deleteConfirm, setDeleteConfirm] = useState<CompanySecret | null>(null);
   const [vaultDialogOpen, setVaultDialogOpen] = useState(false);
   const [editingVault, setEditingVault] = useState<CompanySecretProviderConfig | null>(null);
+  const [removeVaultConfirm, setRemoveVaultConfirm] = useState<CompanySecretProviderConfig | null>(null);
   const [vaultForm, setVaultForm] = useState<ProviderVaultForm>(() => emptyProviderVaultForm());
   const [vaultError, setVaultError] = useState<string | null>(null);
   const [vaultDiscovery, setVaultDiscovery] =
@@ -696,6 +697,26 @@ export function Secrets() {
     },
   });
 
+  const removeVaultMutation = useMutation({
+    mutationFn: (id: string) => secretsApi.removeProviderConfig(id),
+    onSuccess: (removed) => {
+      pushToast({
+        title: "Provider vault removed",
+        body: `${removed.displayName} was removed from Paperclip only.`,
+        tone: "info",
+      });
+      setRemoveVaultConfirm(null);
+      invalidateAll();
+    },
+    onError: (error) => {
+      pushToast({
+        title: "Remove failed",
+        body: error instanceof Error ? error.message : "Try again",
+        tone: "error",
+      });
+    },
+  });
+
   const defaultVaultMutation = useMutation({
     mutationFn: (id: string) => secretsApi.setDefaultProviderConfig(id),
     onSuccess: (updated) => {
@@ -975,10 +996,12 @@ export function Secrets() {
             onCreate={openCreateVault}
             onEdit={openEditVault}
             onDisable={(config) => disableVaultMutation.mutate(config.id)}
+            onRemove={(config) => setRemoveVaultConfirm(config)}
             onSetDefault={(config) => defaultVaultMutation.mutate(config.id)}
             onHealthCheck={(config) => healthVaultMutation.mutate(config.id)}
             pendingActionId={
               disableVaultMutation.variables ??
+              removeVaultMutation.variables ??
               defaultVaultMutation.variables ??
               healthVaultMutation.variables ??
               null
@@ -1579,6 +1602,32 @@ export function Secrets() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Dialog open={Boolean(removeVaultConfirm)} onOpenChange={(open) => !open && setRemoveVaultConfirm(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Remove provider vault</DialogTitle>
+            <DialogDescription>
+              Removes <strong>{removeVaultConfirm?.displayName}</strong> from Paperclip only.{" "}
+              {removeVaultConfirm?.provider === "aws_secrets_manager"
+                ? "This does not delete the remote AWS Secrets Manager vault, secrets, or any AWS data."
+                : "This does not delete any remote provider data."}{" "}
+              Secrets using this vault will lose the vault association until you assign another one.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRemoveVaultConfirm(null)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              onClick={() => removeVaultConfirm && removeVaultMutation.mutate(removeVaultConfirm.id)}
+              disabled={removeVaultMutation.isPending}
+            >
+              {removeVaultMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" /> : null}
+              Remove from Paperclip
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -1817,6 +1866,7 @@ export function ProviderVaultsTab({
   onCreate,
   onEdit,
   onDisable,
+  onRemove,
   onSetDefault,
   onHealthCheck,
   pendingActionId,
@@ -1829,6 +1879,7 @@ export function ProviderVaultsTab({
   onCreate: (provider: SecretProvider) => void;
   onEdit: (config: CompanySecretProviderConfig) => void;
   onDisable: (config: CompanySecretProviderConfig) => void;
+  onRemove: (config: CompanySecretProviderConfig) => void;
   onSetDefault: (config: CompanySecretProviderConfig) => void;
   onHealthCheck: (config: CompanySecretProviderConfig) => void;
   pendingActionId: string | null;
@@ -1909,6 +1960,7 @@ export function ProviderVaultsTab({
                     pending={pendingActionId === config.id}
                     onEdit={() => onEdit(config)}
                     onDisable={() => onDisable(config)}
+                    onRemove={() => onRemove(config)}
                     onSetDefault={() => onSetDefault(config)}
                     onHealthCheck={() => onHealthCheck(config)}
                   />
@@ -1927,6 +1979,7 @@ function ProviderVaultCard({
   pending,
   onEdit,
   onDisable,
+  onRemove,
   onSetDefault,
   onHealthCheck,
 }: {
@@ -1934,6 +1987,7 @@ function ProviderVaultCard({
   pending: boolean;
   onEdit: () => void;
   onDisable: () => void;
+  onRemove: () => void;
   onSetDefault: () => void;
   onHealthCheck: () => void;
 }) {
@@ -2004,6 +2058,16 @@ function ProviderVaultCard({
         >
           <Ban className="h-3.5 w-3.5 mr-1" />
           Disable
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="text-destructive hover:text-destructive"
+          onClick={onRemove}
+          disabled={pending}
+        >
+          <Trash2 className="h-3.5 w-3.5 mr-1" />
+          Remove
         </Button>
       </div>
     </div>

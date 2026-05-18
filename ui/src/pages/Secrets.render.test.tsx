@@ -22,6 +22,7 @@ const mockSecretsApi = vi.hoisted(() => ({
   createProviderConfig: vi.fn(),
   updateProviderConfig: vi.fn(),
   disableProviderConfig: vi.fn(),
+  removeProviderConfig: vi.fn(),
   setDefaultProviderConfig: vi.fn(),
   checkProviderConfigHealth: vi.fn(),
   create: vi.fn(),
@@ -280,6 +281,7 @@ describe("Secrets page layout", () => {
           onCreate={vi.fn()}
           onEdit={vi.fn()}
           onDisable={vi.fn()}
+          onRemove={vi.fn()}
           onSetDefault={vi.fn()}
           onHealthCheck={vi.fn()}
           pendingActionId={null}
@@ -295,6 +297,64 @@ describe("Secrets page layout", () => {
 
     await act(async () => {
       vaultRoot.unmount();
+    });
+  });
+
+  it("warns that removing a provider vault only removes Paperclip config", async () => {
+    mockSecretsApi.removeProviderConfig.mockResolvedValueOnce(providerConfigs[1]);
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <QueryClientProvider client={queryClient}>
+            <Secrets />
+          </QueryClientProvider>
+        </MemoryRouter>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    const vaultTabButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent?.includes("Provider vaults"),
+    ) as HTMLButtonElement | undefined;
+    await act(async () => {
+      vaultTabButton?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+      vaultTabButton?.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }));
+      vaultTabButton?.click();
+    });
+    await flushReact();
+
+    const removeButtons = [...document.querySelectorAll("button")].filter(
+      (button) => button.textContent?.trim() === "Remove",
+    ) as HTMLButtonElement[];
+    await act(async () => {
+      removeButtons[1]?.click();
+    });
+    await flushReact();
+
+    expect(document.body.textContent).toContain("Remove provider vault");
+    expect(document.body.textContent).toContain("from Paperclip only");
+    expect(document.body.textContent).toContain("does not delete");
+    expect(document.body.textContent).toContain("AWS Secrets Manager");
+
+    const confirmButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent?.includes("Remove from Paperclip"),
+    ) as HTMLButtonElement | undefined;
+    await act(async () => {
+      confirmButton?.click();
+    });
+    await flushReact();
+
+    expect(mockSecretsApi.removeProviderConfig).toHaveBeenCalledWith("vault-aws");
+    expect(mockSecretsApi.disableProviderConfig).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.unmount();
     });
   });
 

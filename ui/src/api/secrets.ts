@@ -125,6 +125,8 @@ export const secretsApi = {
   updateProviderConfig: (id: string, data: UpdateSecretProviderConfigInput) =>
     api.patch<CompanySecretProviderConfig>(`/secret-provider-configs/${id}`, data),
   disableProviderConfig: (id: string) =>
+    api.patch<CompanySecretProviderConfig>(`/secret-provider-configs/${id}`, { status: "disabled" }),
+  removeProviderConfig: (id: string) =>
     api.delete<CompanySecretProviderConfig>(`/secret-provider-configs/${id}`),
   setDefaultProviderConfig: (id: string) =>
     api.post<CompanySecretProviderConfig>(`/secret-provider-configs/${id}/default`, {}),
