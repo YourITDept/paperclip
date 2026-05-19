@@ -1343,14 +1343,18 @@ export function issueRoutes(
     );
   }
 
-  async function assertDeliverableMutationAllowedByRunContext(
-    req: Request,
-    res: Response,
-    issue: { id: string; companyId: string },
-  ) {
-    if (req.actor.type !== "agent") return true;
+  function requestsCheapIssueAssigneeModelProfile(input: { assigneeAdapterOverrides?: unknown }) {
+    const overrides = input.assigneeAdapterOverrides;
+    return !!overrides &&
+      typeof overrides === "object" &&
+      !Array.isArray(overrides) &&
+      (overrides as Record<string, unknown>).modelProfile === "cheap";
+  }
+
+  async function loadActorRunContext(req: Request, companyId: string) {
+    if (req.actor.type !== "agent") return null;
     const runId = req.actor.runId?.trim();
-    if (!runId) return true;
+    if (!runId) return null;
     const run = await db
       .select({
         id: heartbeatRuns.id,
@@ -1361,14 +1365,47 @@ export function issueRoutes(
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
-    if (!run || run.companyId !== issue.companyId || run.agentId !== req.actor.agentId) return true;
+    if (!run || run.companyId !== companyId || run.agentId !== req.actor.agentId) return null;
+    return run;
+  }
+
+  async function assertCheapRecoveryIssueAssigneeProfileAllowed(
+    req: Request,
+    res: Response,
+    issue: { id?: string; companyId: string },
+    input: { assigneeAdapterOverrides?: unknown },
+  ) {
+    if (!requestsCheapIssueAssigneeModelProfile(input)) return true;
+    const run = await loadActorRunContext(req, issue.companyId);
+    if (!run || !isStatusOnlyCheapRecoveryContext(run.contextSnapshot)) return true;
+
+    res.status(403).json({
+      error: "Cheap status-only recovery runs cannot assign downstream issue work to the cheap model profile",
+      details: {
+        issueId: issue.id ?? null,
+        runId: run.id,
+        modelProfile: "cheap",
+        recoveryIntent: "status_only",
+        resumeRequiresNormalModel: true,
+      },
+    });
+    return false;
+  }
+
+  async function assertDeliverableMutationAllowedByRunContext(
+    req: Request,
+    res: Response,
+    issue: { id: string; companyId: string },
+  ) {
+    const run = await loadActorRunContext(req, issue.companyId);
+    if (!run) return true;
     if (!isStatusOnlyCheapRecoveryContext(run.contextSnapshot)) return true;
 
     res.status(403).json({
       error: "Cheap status-only recovery runs cannot update issue documents, plans, or deliverable artifacts",
       details: {
         issueId: issue.id,
-        runId,
+        runId: run.id,
         modelProfile: "cheap",
         recoveryIntent: "status_only",
         resumeRequiresNormalModel: true,
@@ -3049,6 +3086,7 @@ export function issueRoutes(
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
+    if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, { companyId }, req.body))) return;
     if (req.body.assigneeAgentId || req.body.assigneeUserId) {
       await assertCanAssignTasks(req, companyId);
     }
@@ -3144,6 +3182,7 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, parent.companyId);
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
+    if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, parent, req.body))) return;
     if (req.body.assigneeAgentId || req.body.assigneeUserId) {
       await assertCanAssignTasks(req, parent.companyId);
     }
@@ -3290,6 +3329,7 @@ export function issueRoutes(
     assertCompanyAccess(req, existing.companyId);
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
+    if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, existing, req.body))) return;
 
     const actor = getActorInfo(req);
     const isClosed = isClosedIssueStatus(existing.status);

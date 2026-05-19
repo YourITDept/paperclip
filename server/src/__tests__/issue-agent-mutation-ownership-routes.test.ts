@@ -13,6 +13,8 @@ const recoveryActionId = "77777777-7777-4777-8777-777777777777";
 const mockIssueService = vi.hoisted(() => ({
   addComment: vi.fn(),
   assertCheckoutOwner: vi.fn(),
+  create: vi.fn(),
+  createChild: vi.fn(),
   getAttachmentById: vi.fn(),
   getByIdentifier: vi.fn(),
   getById: vi.fn(),
@@ -280,6 +282,8 @@ describe("agent issue mutation checkout ownership", () => {
     mockCompanyService.getById.mockReset();
     mockIssueService.addComment.mockReset();
     mockIssueService.assertCheckoutOwner.mockReset();
+    mockIssueService.create.mockReset();
+    mockIssueService.createChild.mockReset();
     mockIssueService.getAttachmentById.mockReset();
     mockIssueService.getByIdentifier.mockReset();
     mockIssueService.getById.mockReset();
@@ -357,6 +361,28 @@ describe("agent issue mutation checkout ownership", () => {
     mockIssueService.getById.mockResolvedValue(makeIssue());
     mockIssueService.getByIdentifier.mockResolvedValue(null);
     mockIssueService.assertCheckoutOwner.mockResolvedValue({ adoptedFromRunId: null });
+    mockIssueService.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
+      ...makeIssue({
+        id: "88888888-8888-4888-8888-888888888888",
+        status: "todo",
+        assigneeAgentId: null,
+      }),
+      ...input,
+      companyId,
+    }));
+    mockIssueService.createChild.mockImplementation(async (_parentId: string, input: Record<string, unknown>) => ({
+      issue: {
+        ...makeIssue({
+          id: "99999999-9999-4999-8999-999999999999",
+          status: "todo",
+          parentId: issueId,
+          assigneeAgentId: null,
+        }),
+        ...input,
+        companyId,
+      },
+      parentBlockerAdded: false,
+    }));
     mockIssueService.getRelationSummaries.mockResolvedValue({ blockedBy: [], blocks: [] });
     mockIssueService.listWakeableBlockedDependents.mockResolvedValue([]);
     mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
@@ -537,6 +563,67 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockStorageService.putFile).not.toHaveBeenCalled();
     expect(mockStorageService.deleteObject).not.toHaveBeenCalled();
     expect(mockIssueService.removeAttachment).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "issue create",
+      (app: express.Express) =>
+        request(app).post(`/api/companies/${companyId}/issues`).send({
+          title: "Downstream source work",
+          assigneeAdapterOverrides: { modelProfile: "cheap" },
+        }),
+    ],
+    [
+      "child issue create",
+      (app: express.Express) =>
+        request(app).post(`/api/issues/${issueId}/children`).send({
+          title: "Downstream child source work",
+          assigneeAdapterOverrides: { modelProfile: "cheap" },
+        }),
+    ],
+    [
+      "issue update",
+      (app: express.Express) =>
+        request(app).patch(`/api/issues/${issueId}`).send({
+          assigneeAdapterOverrides: { modelProfile: "cheap" },
+        }),
+    ],
+  ])("blocks cheap status-only recovery runs from propagating cheap profile through %s", async (_name, sendRequest) => {
+    const app = await createApp(
+      ownerActor(),
+      createRunContextDb({
+        modelProfile: "cheap",
+        recoveryIntent: "status_only",
+        allowDeliverableWork: false,
+        allowDocumentUpdates: false,
+        resumeRequiresNormalModel: true,
+      }),
+    );
+
+    const res = await sendRequest(app);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toContain("cannot assign downstream issue work to the cheap model profile");
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+    expect(mockIssueService.createChild).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("allows board users to set explicit cheap issue assignee profile overrides", async () => {
+    const app = await createApp(boardActor());
+
+    await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({ assigneeAdapterOverrides: { modelProfile: "cheap" } })
+      .expect(200);
+
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      issueId,
+      expect.objectContaining({
+        assigneeAdapterOverrides: { modelProfile: "cheap" },
+      }),
+    );
   });
 
   it("preserves committed issue updates, comments, documents, and work product writes when recovery revalidation fails", async () => {
