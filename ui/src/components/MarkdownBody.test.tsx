@@ -457,6 +457,15 @@ describe("MarkdownBody", () => {
     expect(html).toContain("lucide-copy");
   });
 
+  it("renders code block actions for indented preformatted markdown blocks", () => {
+    const html = renderMarkdown("Plan:\n\n    source fetch/sync -> signal inbox");
+
+    expect(html).toContain("paperclip-markdown-codeblock");
+    expect(html).toContain("paperclip-markdown-codeblock-wrap");
+    expect(html).toContain('aria-label="Wrap lines"');
+    expect(html).toContain("paperclip-markdown-codeblock-copy");
+  });
+
   it("does not render a copy button on inline code", () => {
     const html = renderMarkdown("Reference `inline-code` here.");
 
