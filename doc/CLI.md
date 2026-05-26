@@ -143,6 +143,38 @@ pnpm paperclipai agent local-cli codexcoder --company-id <company-id>
 pnpm paperclipai agent local-cli claudecoder --company-id <company-id>
 ```
 
+## Skills Commands
+
+Company skills are company-scoped records managed through the Paperclip API.
+Agent skill commands update an agent's desired company skill set and then report
+the adapter runtime snapshot. `sync` replaces the non-required desired skill set;
+required Paperclip skills remain enforced by the server.
+
+```sh
+pnpm paperclipai skills list --company-id <company-id>
+pnpm paperclipai skills show <skill-id-or-key-or-slug> --company-id <company-id>
+pnpm paperclipai skills file <skill-id-or-key-or-slug> [--path SKILL.md] --company-id <company-id>
+pnpm paperclipai skills import <source> --company-id <company-id>
+pnpm paperclipai skills create --name "Review PRs" [--slug review-prs] [--description "..."] [--body-file SKILL.md] --company-id <company-id>
+pnpm paperclipai skills scan-projects [--project-id <id>...] [--workspace-id <id>...] --company-id <company-id>
+pnpm paperclipai skills check [skill-id-or-key-or-slug] --company-id <company-id>
+pnpm paperclipai skills update <skill-id-or-key-or-slug> --company-id <company-id>
+pnpm paperclipai skills update --all --company-id <company-id>
+pnpm paperclipai skills remove <skill-id-or-key-or-slug> --yes --company-id <company-id>
+pnpm paperclipai skills agent list <agent-id-or-shortname> --company-id <company-id>
+pnpm paperclipai skills agent sync <agent-id-or-shortname> --skill <skill-id-or-key-or-slug> [--skill <skill-id-or-key-or-slug>...] --company-id <company-id>
+pnpm paperclipai skills agent clear <agent-id-or-shortname> --yes --company-id <company-id>
+```
+
+Notes:
+
+- Skill references accept company skill `id`, canonical `key`, or unique `slug`.
+- `skills file` prints raw file content in human mode so it can be piped.
+- `skills create --body-file -` reads the skill markdown body from stdin.
+- `skills remove` and `skills agent clear` prompt in a terminal and require
+  `--yes` in non-interactive use.
+- `--json` prints the raw API result for each command.
+
 ## Secrets Commands
 
 ```sh
