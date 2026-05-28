@@ -1241,6 +1241,8 @@ function SkillList({
       {filteredSkills.map((skill) => {
         const expanded = expandedSkillId === skill.id;
         const tree = buildTree(skill.fileInventory);
+        const source = sourceMeta(skill.sourceBadge, skill.sourceLabel);
+        const SourceIcon = source.icon;
 
         return (
           <div key={skill.id} className="border-b border-border">
@@ -1255,7 +1257,16 @@ function SkillList({
                 className="flex min-w-0 items-center self-stretch pr-2 text-left no-underline"
                 onClick={() => onSelectSkill(skill.id)}
               >
-                <span className="flex min-w-0 items-center self-center">
+                <span className="flex min-w-0 items-center gap-2 self-center">
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="flex h-4 w-4 shrink-0 items-center justify-center text-muted-foreground opacity-75 transition-opacity group-hover:opacity-100">
+                        <SourceIcon className="h-3.5 w-3.5" />
+                        <span className="sr-only">{source.managedLabel}</span>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">{source.managedLabel}</TooltipContent>
+                  </Tooltip>
                   <span className="min-w-0 overflow-hidden text-[13px] font-medium leading-5 [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:3]">
                     {skill.name}
                   </span>
@@ -2267,11 +2278,11 @@ export function CompanySkills() {
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 pt-3 pb-[5px]">
           <Tabs value={activeView} onValueChange={(value) => setViewParam(value === "catalog" ? "catalog" : "installed")}>
             <TabsList variant="line" className="p-0">
-              <TabsTrigger value="installed" className="px-0 pr-4">
+              <TabsTrigger value="installed" className="px-3">
                 <span>Installed</span>
                 <span className="ml-1.5 text-[11px] text-muted-foreground">{installedSkills.length}</span>
               </TabsTrigger>
-              <TabsTrigger value="catalog" className="px-0 pr-4">
+              <TabsTrigger value="catalog" className="px-3">
                 <span>Catalog</span>
                 <span className="ml-1.5 text-[11px] text-muted-foreground">{catalogListQuery.data?.length ?? 0}</span>
               </TabsTrigger>
@@ -2329,14 +2340,7 @@ export function CompanySkills() {
           <div className="grid flex-1 gap-0 xl:grid-cols-[19rem_minmax(0,1fr)]">
             <aside className="border-r border-border">
               <div className="border-b border-border px-4 py-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div>
-                    <h2 className="text-base font-semibold">Installed</h2>
-                    <p className="text-xs text-muted-foreground">{installedSkills.length} skill{installedSkills.length === 1 ? "" : "s"}</p>
-                  </div>
-                </div>
-
-                <div className="mt-3 flex items-center gap-2 border-b border-border pb-2">
+                <div className="flex items-center gap-2 border-b border-border pb-2">
                   <Search className="h-4 w-4 text-muted-foreground" />
                   <input
                     value={skillFilter}
@@ -2458,14 +2462,7 @@ export function CompanySkills() {
           <div className="grid flex-1 gap-0 xl:grid-cols-[19rem_minmax(0,1fr)]">
             <aside className="border-r border-border">
               <div className="border-b border-border px-4 py-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div>
-                    <h2 className="text-base font-semibold">Catalog</h2>
-                    <p className="text-xs text-muted-foreground">{catalogListQuery.data?.length ?? 0} skill{(catalogListQuery.data?.length ?? 0) === 1 ? "" : "s"}</p>
-                  </div>
-                </div>
-
-                <div className="mt-3 flex items-center gap-2 border-b border-border pb-2">
+                <div className="flex items-center gap-2 border-b border-border pb-2">
                   <Search className="h-4 w-4 text-muted-foreground" />
                   <input
                     value={catalogFilter}
