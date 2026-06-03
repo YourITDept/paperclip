@@ -152,7 +152,7 @@ describe("Sidebar", () => {
     expect(workSection?.textContent).toContain("Plugin launcher outlet");
     const workSectionContainer = workSection?.parentElement?.parentElement;
     expect(workSectionContainer?.textContent).toContain("Work");
-    expect(workSectionContainer?.textContent).toContain("Issues");
+    expect(workSectionContainer?.textContent).toContain("Tasks");
     expect(workSectionContainer?.textContent).toContain("Goals");
 
     await act(async () => {
