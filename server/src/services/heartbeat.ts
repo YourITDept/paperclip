@@ -8100,15 +8100,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           )
         : [];
     })();
+    assertLowTrustRuntimeServicesAllowed({
+      resolution: trustPreset,
+      runtimeServiceCount: runtimeServiceIntents.length,
+    });
     if (runtimeServiceIntents.length > 0) {
       context.paperclipRuntimeServiceIntents = runtimeServiceIntents;
     } else {
       delete context.paperclipRuntimeServiceIntents;
     }
-    assertLowTrustRuntimeServicesAllowed({
-      resolution: trustPreset,
-      runtimeServiceCount: runtimeServiceIntents.length,
-    });
     if (executionWorkspace.projectId && !readNonEmptyString(context.projectId)) {
       context.projectId = executionWorkspace.projectId;
     }

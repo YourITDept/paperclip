@@ -6,6 +6,7 @@ import {
   type SourceTrustMetadata,
 } from "@paperclipai/shared";
 import { forbidden } from "../errors.js";
+import { readObject } from "../lib/objects.js";
 import { resolveCoreTrustPreset } from "./trust-preset-resolver.js";
 
 export const LOW_TRUST_QUARANTINED_BODY =
@@ -68,12 +69,6 @@ export function buildLowTrustSourceTrust(input: {
     sourceRunId: input.runId ?? null,
     sourceAgentId: input.agentId ?? null,
   };
-}
-
-function readObject(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
 }
 
 export function buildPromotedSourceTrust(input: {

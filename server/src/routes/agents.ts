@@ -101,6 +101,7 @@ import { getTelemetryClient } from "../telemetry.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { recoveryService } from "../services/recovery/service.js";
 import { resolveCoreTrustPreset } from "../services/trust-preset-resolver.js";
+import { readObject } from "../lib/objects.js";
 
 const RUN_LOG_DEFAULT_LIMIT_BYTES = 256_000;
 const RUN_LOG_MAX_LIMIT_BYTES = 1024 * 1024;
@@ -116,12 +117,6 @@ function readLiveRunsQueryInt(value: unknown, max: number, fallback = 0) {
   if (!Number.isFinite(parsed)) return fallback;
   if (parsed <= 0) return fallback;
   return Math.min(max, Math.trunc(parsed));
-}
-
-function readObject(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
 }
 
 function readRunIssueId(context: Record<string, unknown> | null) {
@@ -1915,6 +1910,17 @@ export function agentRoutes(
     assertCompanyAccess(req, agent.companyId);
     if (!(await assertAgentReadAllowed(req, res, agent))) return;
     const isSelf = req.actor.type === "agent" && req.actor.agentId === id;
+    if (isSelf) {
+      const trustPreset = await resolveAgentSelfTrustPreset(req, agent);
+      if (trustPreset.kind === "denied") {
+        res.status(403).json({ error: trustPreset.detail });
+        return;
+      }
+      if (trustPreset.kind === "low_trust_review") {
+        res.json(buildLowTrustSelfView(agent));
+        return;
+      }
+    }
     const canReadSensitiveDetail = isSelf
       ? true
       : await actorCanReadConfigurationsForCompany(req, agent.companyId);

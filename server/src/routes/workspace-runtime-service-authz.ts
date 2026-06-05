@@ -7,6 +7,7 @@ import { assertCompanyAccess } from "./authz.js";
 import { parseProjectExecutionWorkspacePolicy } from "../services/execution-workspace-policy.js";
 import { isLowTrustRuntimeManagementAllowed } from "../services/low-trust-runtime-containment.js";
 import { resolveCoreTrustPreset, type TrustPresetResolution } from "../services/trust-preset-resolver.js";
+import { readObject } from "../lib/objects.js";
 
 const WORKSPACE_RUNTIME_ELIGIBLE_ISSUE_STATUSES: string[] = [
   "backlog",
@@ -15,12 +16,6 @@ const WORKSPACE_RUNTIME_ELIGIBLE_ISSUE_STATUSES: string[] = [
   "in_review",
   "blocked",
 ];
-
-function readObject(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
 
 function readRunIssueId(context: Record<string, unknown> | null) {
   const directIssueId = context?.issueId;

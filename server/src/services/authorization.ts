@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -618,19 +618,27 @@ export function authorizationService(db: Db) {
   }
 
   async function issueIdIsDescendantOf(issueId: string, rootIssueId: string, companyId: string) {
-    let cursor: string | null = issueId;
-    // Keep list filtering bounded. Deep task trees outside this limit are treated as outside the boundary.
-    for (let depth = 0; cursor && depth < LOW_TRUST_ISSUE_ANCESTRY_MAX_DEPTH; depth += 1) {
-      if (cursor === rootIssueId) return true;
-      const row: { id: string; companyId: string; parentId: string | null } | null = await db
-        .select({ id: issues.id, companyId: issues.companyId, parentId: issues.parentId })
-        .from(issues)
-        .where(eq(issues.id, cursor))
-        .then((rows) => rows[0] ?? null);
-      if (!row || row.companyId !== companyId) return false;
-      cursor = row.parentId;
-    }
-    return false;
+    const rows = await db.execute(sql`
+      WITH RECURSIVE ancestors(id, parent_id, depth) AS (
+        SELECT id, parent_id, 0
+        FROM issues
+        WHERE company_id = ${companyId}
+          AND id = ${issueId}
+        UNION ALL
+        SELECT parent.id, parent.parent_id, ancestors.depth + 1
+        FROM issues parent
+        JOIN ancestors ON parent.id = ancestors.parent_id
+        WHERE parent.company_id = ${companyId}
+          AND ancestors.depth < ${LOW_TRUST_ISSUE_ANCESTRY_MAX_DEPTH - 1}
+      )
+      SELECT EXISTS(SELECT 1 FROM ancestors WHERE id = ${rootIssueId}) AS is_descendant
+    `);
+    const first = Array.isArray(rows) ? rows[0] : null;
+    return Boolean(
+      first &&
+        typeof first === "object" &&
+        (first as Record<string, unknown>).is_descendant === true,
+    );
   }
 
   async function issueResourceWithinLowTrustBoundary(
