@@ -22,6 +22,7 @@ export interface FileViewerContextValue {
   query: string | null;
   browseProjectId: string | null;
   browseWorkspaceId: string | null;
+  folderPath: string | null;
   open(
     ref: Pick<ParsedWorkspaceFileRef, "path" | "line" | "column" | "projectId" | "workspaceId"> & {
       workspace?: WorkspaceFileSelector;
@@ -30,6 +31,11 @@ export interface FileViewerContextValue {
   ): void;
   /** Open (or stay in) browse mode, optionally seeding the search query. */
   openBrowse(opts?: { q?: string }): void;
+  openFolder(
+    ref: Pick<ParsedWorkspaceFileRef, "path" | "projectId" | "workspaceId"> & {
+      workspace?: WorkspaceFileSelector;
+    },
+  ): void;
   /** From a file opened via browse, return to the browse list. */
   backToFiles(): void;
   close(): void;
@@ -72,6 +78,7 @@ export function writeFileViewerStateToSearch(current: string, next: FileViewerUr
   // A direct file open/close is never a browse origin — clear browse params too.
   params.delete("browse");
   params.delete("q");
+  params.delete("folder");
   if (!next) {
     params.delete("file");
     params.delete("line");
@@ -98,6 +105,7 @@ export function writeFileViewerStateToSearch(current: string, next: FileViewerUr
 
 export interface FileViewerBrowseState {
   q: string | null;
+  folderPath: string | null;
   projectId: string | null;
   workspaceId: string | null;
 }
@@ -106,13 +114,39 @@ export function readBrowseStateFromSearch(search: string): FileViewerBrowseState
   const params = new URLSearchParams(search);
   if (params.get("browse") !== "1") return null;
   const q = params.get("q");
+  const folder = params.get("folder");
   const projectId = params.get("projectId");
   const workspaceId = params.get("workspaceId");
   return {
     q: q && q.length > 0 ? q : null,
+    folderPath: folder && folder.length > 0 ? folder : null,
     projectId: projectId || null,
     workspaceId: workspaceId || null,
   };
+}
+
+export function writeFolderViewerStateToSearch(
+  current: string,
+  next: {
+    path: string;
+    projectId: string | null;
+    workspaceId: string | null;
+  },
+): string {
+  const params = new URLSearchParams(current);
+  params.delete("file");
+  params.delete("line");
+  params.delete("column");
+  params.delete("workspace");
+  params.delete("q");
+  params.set("browse", "1");
+  params.set("folder", next.path);
+  if (next.projectId) params.set("projectId", next.projectId);
+  else params.delete("projectId");
+  if (next.workspaceId) params.set("workspaceId", next.workspaceId);
+  else params.delete("workspaceId");
+  const str = params.toString();
+  return str ? `?${str}` : "";
 }
 
 interface FileViewerProviderProps {
@@ -156,7 +190,9 @@ function EnabledFileViewerProvider({ issueId, children }: Omit<FileViewerProvide
         const params = new URLSearchParams(nextSearch);
         params.set("browse", "1");
         const prevQ = new URLSearchParams(location.search).get("q");
+        const prevFolder = new URLSearchParams(location.search).get("folder");
         if (prevQ) params.set("q", prevQ);
+        if (prevFolder) params.set("folder", prevFolder);
         nextSearch = params.toString() ? `?${params.toString()}` : "";
       }
       navigateSearch(nextSearch);
@@ -170,10 +206,23 @@ function EnabledFileViewerProvider({ issueId, children }: Omit<FileViewerProvide
       params.delete("file");
       params.delete("line");
       params.delete("column");
+      params.delete("folder");
       params.set("browse", "1");
       if (typeof opts?.q === "string" && opts.q.length > 0) params.set("q", opts.q);
       else params.delete("q");
       navigateSearch(params.toString() ? `?${params.toString()}` : "");
+    },
+    [location.search, navigateSearch],
+  );
+
+  const openFolder = useCallback<FileViewerContextValue["openFolder"]>(
+    (ref) => {
+      const nextSearch = writeFolderViewerStateToSearch(location.search, {
+        path: ref.path,
+        projectId: ref.projectId ?? null,
+        workspaceId: ref.workspaceId ?? null,
+      });
+      navigateSearch(nextSearch);
     },
     [location.search, navigateSearch],
   );
@@ -192,6 +241,7 @@ function EnabledFileViewerProvider({ issueId, children }: Omit<FileViewerProvide
     const params = new URLSearchParams(writeFileViewerStateToSearch(location.search, null).replace(/^\?/, ""));
     params.delete("browse");
     params.delete("q");
+    params.delete("folder");
     navigateSearch(params.toString() ? `?${params.toString()}` : "");
   }, [location.search, navigateSearch]);
 
@@ -203,12 +253,14 @@ function EnabledFileViewerProvider({ issueId, children }: Omit<FileViewerProvide
       query: browseState?.q ?? null,
       browseProjectId: browseState?.projectId ?? null,
       browseWorkspaceId: browseState?.workspaceId ?? null,
+      folderPath: browseState?.folderPath ?? null,
       open,
       openBrowse,
+      openFolder,
       backToFiles,
       close,
     }),
-    [issueId, state, browseState, open, openBrowse, backToFiles, close],
+    [issueId, state, browseState, open, openBrowse, openFolder, backToFiles, close],
   );
 
   return <FileViewerContext.Provider value={value}>{children}</FileViewerContext.Provider>;

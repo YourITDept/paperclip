@@ -1,11 +1,12 @@
 import type { MouseEvent, ReactNode } from "react";
-import { FileCode2 } from "lucide-react";
+import { FileCode2, FolderOpen } from "lucide-react";
 import { useLocation } from "@/lib/router";
 import { cn } from "@/lib/utils";
 import type { ParsedWorkspaceFileRef } from "@/lib/workspace-file-parser";
 import { formatWorkspaceFileRefDisplay } from "@/lib/workspace-file-parser";
 import {
   useFileViewer,
+  writeFolderViewerStateToSearch,
   writeFileViewerStateToSearch,
 } from "@/context/FileViewerContext";
 
@@ -32,24 +33,31 @@ export function WorkspaceFileLink({
   const location = useLocation();
   const display = typeof label !== "undefined" ? label : formatWorkspaceFileRefDisplay(workspaceFileRef);
   const canOpen = !!(onOpen || viewer);
+  const isDirectory = workspaceFileRef.resourceKind === "directory" || workspaceFileRef.path.endsWith("/");
   const lineSuffix = workspaceFileRef.line
     ? ` line ${workspaceFileRef.line}${workspaceFileRef.column ? ` column ${workspaceFileRef.column}` : ""}`
     : "";
   const ariaLabel = canOpen
-    ? `Open ${workspaceFileRef.path}${lineSuffix} in the file viewer`
-    : `Workspace file ${workspaceFileRef.path}${lineSuffix}`;
+    ? `Open ${workspaceFileRef.path}${lineSuffix} in the ${isDirectory ? "workspace browser" : "file viewer"}`
+    : `Workspace ${isDirectory ? "folder" : "file"} ${workspaceFileRef.path}${lineSuffix}`;
   const tooltip = title ?? (canOpen
-    ? `Open ${workspaceFileRef.path}${lineSuffix} in the file viewer`
-    : `Workspace file ${workspaceFileRef.path}${lineSuffix}`);
+    ? `Open ${workspaceFileRef.path}${lineSuffix} in the ${isDirectory ? "workspace browser" : "file viewer"}`
+    : `Workspace ${isDirectory ? "folder" : "file"} ${workspaceFileRef.path}${lineSuffix}`);
 
-  const deepLinkSearch = writeFileViewerStateToSearch(location.search, {
-    path: workspaceFileRef.path,
-    line: workspaceFileRef.line ?? null,
-    column: workspaceFileRef.column ?? null,
-    workspace: "auto",
-    projectId: workspaceFileRef.projectId ?? null,
-    workspaceId: workspaceFileRef.workspaceId ?? null,
-  });
+  const deepLinkSearch = isDirectory
+    ? writeFolderViewerStateToSearch(location.search, {
+        path: workspaceFileRef.path,
+        projectId: workspaceFileRef.projectId ?? null,
+        workspaceId: workspaceFileRef.workspaceId ?? null,
+      })
+    : writeFileViewerStateToSearch(location.search, {
+        path: workspaceFileRef.path,
+        line: workspaceFileRef.line ?? null,
+        column: workspaceFileRef.column ?? null,
+        workspace: "auto",
+        projectId: workspaceFileRef.projectId ?? null,
+        workspaceId: workspaceFileRef.workspaceId ?? null,
+      });
   const href = canOpen
     ? `${location.pathname}${deepLinkSearch}${location.hash}`
     : "#";
@@ -62,6 +70,7 @@ export function WorkspaceFileLink({
     event.preventDefault();
     if (!canOpen) return;
     if (onOpen) onOpen(workspaceFileRef);
+    else if (isDirectory) viewer?.openFolder(workspaceFileRef);
     else viewer?.open(workspaceFileRef);
   };
 
@@ -79,7 +88,11 @@ export function WorkspaceFileLink({
       )}
       onClick={handleClick}
     >
-      {showIcon ? <FileCode2 aria-hidden="true" className="h-3 w-3 shrink-0 opacity-70" /> : null}
+      {showIcon ? (
+        isDirectory
+          ? <FolderOpen aria-hidden="true" className="h-3 w-3 shrink-0 opacity-70" />
+          : <FileCode2 aria-hidden="true" className="h-3 w-3 shrink-0 opacity-70" />
+      ) : null}
       <span className="truncate max-w-[38ch]">{display}</span>
     </a>
   );

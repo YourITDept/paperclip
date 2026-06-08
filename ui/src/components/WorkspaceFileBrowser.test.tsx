@@ -278,6 +278,51 @@ describe("WorkspaceFileBrowser", () => {
       workspaceId: "workspace-content",
     });
   });
+
+  it("focuses an initial folder in a selected other project workspace", () => {
+    const folderPath = "content-os/cases/active/2026-06-06-pap-10199-bundled-skills/";
+    const contentItem = createItem({
+      relativePath: `${folderPath}README.md`,
+      displayPath: `Paperclip Content / ${folderPath}README.md`,
+      workspaceLabel: "Paperclip Content",
+      workspaceKind: "project_workspace",
+      workspaceId: "workspace-content",
+      projectId: "project-content",
+      projectName: "Paperclip Content",
+    });
+    useQueryMock.mockImplementation((options: { queryKey: readonly unknown[] }) => {
+      if (options.queryKey[0] === "projects") return ok([createProject()]);
+      return ok(availableResponse([contentItem]));
+    });
+
+    const { onOpen } = renderBrowser(vi.fn(), {
+      companyId: "company-1",
+      initialProjectId: "project-content",
+      initialWorkspaceId: "workspace-content",
+      initialFolderPath: folderPath,
+    });
+
+    expect(container.textContent).toContain(folderPath);
+    expect(container.textContent).toContain("Files in folder");
+    const listCall = useQueryMock.mock.calls.find(([options]) => options.queryKey?.[3] === "list");
+    expect(listCall?.[0].queryKey[4]).toMatchObject({
+      workspace: "project",
+      projectId: "project-content",
+      workspaceId: "workspace-content",
+      path: folderPath,
+    });
+
+    const option = container.querySelector('[role="option"]')!;
+    act(() => {
+      option.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(onOpen).toHaveBeenCalledWith({
+      path: `${folderPath}README.md`,
+      workspace: "project",
+      projectId: "project-content",
+      workspaceId: "workspace-content",
+    });
+  });
 });
 
 describe("describeUnavailable", () => {

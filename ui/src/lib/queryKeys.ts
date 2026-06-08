@@ -93,6 +93,7 @@ export const queryKeys = {
         workspace?: string;
         projectId?: string | null;
         workspaceId?: string | null;
+        path?: string | null;
         mode?: string;
         q?: string | null;
         limit?: number;

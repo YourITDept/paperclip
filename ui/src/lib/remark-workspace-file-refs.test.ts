@@ -44,6 +44,7 @@ describe("remarkWorkspaceFileRefs", () => {
     expect(link.url?.startsWith("workspace-file:")).toBe(true);
     const parsed = parseWorkspaceFileHref(link.url);
     expect(parsed?.path).toBe("ui/src/pages/IssueDetail.tsx");
+    expect(parsed?.resourceKind).toBe("file");
     expect(parsed?.line).toBe(42);
   });
 
@@ -66,6 +67,43 @@ describe("remarkWorkspaceFileRefs", () => {
     expect(parsed?.path).toBe("a/b.ts");
     expect(parsed?.line).toBe(5);
     expect(parsed?.column).toBe(2);
+  });
+
+  it("round-trips workspace folder hrefs", () => {
+    const targetPath = "content-os/cases/active/2026-06-06-pap-10199-bundled-skills/";
+    const href = buildWorkspaceFileHref({
+      path: targetPath,
+      resourceKind: "directory",
+      line: null,
+      column: null,
+      raw: targetPath,
+      projectId: "17acae7d-9d0c-46bf-9c82-be9694ac3461",
+      workspaceId: "0de5f74f-a7d4-4f73-a9a0-455a2b968cf2",
+    });
+    const parsed = parseWorkspaceFileHref(href);
+    expect(parsed).toMatchObject({
+      path: targetPath,
+      resourceKind: "directory",
+      line: null,
+      column: null,
+      projectId: "17acae7d-9d0c-46bf-9c82-be9694ac3461",
+      workspaceId: "0de5f74f-a7d4-4f73-a9a0-455a2b968cf2",
+    });
+  });
+
+  it("converts trailing-slash inline code into workspace folder links", () => {
+    const tree = paragraph([
+      textNode("Open "),
+      inlineCode("content-os/cases/active/2026-06-06-pap-10199-bundled-skills/"),
+      textNode("."),
+    ]);
+    runPlugin(tree);
+    const link = tree.children![1];
+    expect(link.type).toBe("link");
+    expect(parseWorkspaceFileHref(link.url)).toMatchObject({
+      path: "content-os/cases/active/2026-06-06-pap-10199-bundled-skills/",
+      resourceKind: "directory",
+    });
   });
 
   it("round-trips explicit project workspace identity", () => {

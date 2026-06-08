@@ -2,7 +2,7 @@ export type WorkspaceFileWorkspaceKind = "execution_workspace" | "project_worksp
 export type WorkspaceFileSelector = "auto" | "execution" | "project";
 export type WorkspaceFileListMode = "all" | "recent" | "changed";
 export type WorkspaceFilePreviewKind = "text" | "image" | "video" | "pdf" | "unsupported";
-export type WorkspaceFileResourceKind = "file" | "remote_resource";
+export type WorkspaceFileResourceKind = "file" | "directory" | "remote_resource";
 export type WorkspaceFileContentEncoding = "utf8" | "base64";
 
 export interface WorkspaceFileRef {
@@ -35,7 +35,7 @@ export interface ResolvedWorkspaceResource {
   capabilities: {
     preview: boolean;
     download: false;
-    listChildren: false;
+    listChildren: boolean;
   };
 }
 
@@ -84,6 +84,7 @@ export interface WorkspaceFileListResponse {
   query: {
     workspace: WorkspaceFileSelector;
     mode: WorkspaceFileListMode;
+    path?: string | null;
     q: string | null;
     limit: number;
   };

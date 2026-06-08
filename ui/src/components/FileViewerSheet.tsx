@@ -654,6 +654,7 @@ export function FileViewerSheet({
               companyId={companyId}
               onOpen={handleBrowseOpen}
               initialQuery={viewer.query}
+              initialFolderPath={viewer.folderPath}
               initialProjectId={viewer.browseProjectId}
               initialWorkspaceId={viewer.browseWorkspaceId}
               className="min-h-0 flex-1 p-4"

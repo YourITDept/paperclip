@@ -1,5 +1,6 @@
 export interface ParsedWorkspaceFileRef {
   path: string;
+  resourceKind?: "file" | "directory";
   line: number | null;
   column: number | null;
   projectId?: string | null;
@@ -26,6 +27,8 @@ const WORKSPACE_FILE_REF_RE =
 
 const BARE_NO_EXT_RE = /^([A-Za-z0-9_.\-+][A-Za-z0-9_./\-+]+\/[A-Za-z0-9_.\-+]+)(?::([1-9]\d*)(?::([1-9]\d*))?|#L([1-9]\d*)(?:C([1-9]\d*))?)?$/;
 
+const WORKSPACE_DIRECTORY_REF_RE = /^([A-Za-z0-9_.\-+][A-Za-z0-9_./\-+]*\/)$/;
+
 const INVALID_PREFIXES = ["/", "./", "../", "~/"];
 
 function toPositiveInt(value: string | undefined): number | null {
@@ -35,13 +38,14 @@ function toPositiveInt(value: string | undefined): number | null {
   return n;
 }
 
-function looksLikeWorkspaceFilePath(path: string): boolean {
-  if (!path || path.length > 512) return false;
-  if (path.includes("\\") || path.includes("\0")) return false;
-  if (path.startsWith("/") || path.startsWith("~") || /^[A-Za-z]:/.test(path)) return false;
-  if (path.includes("//")) return false;
-  if (INVALID_PREFIXES.some((prefix) => path === prefix.slice(0, -1))) return false;
-  if (/^\.+$/.test(path)) return false;
+function looksLikeWorkspacePath(input: string, opts: { allowTrailingSlash: boolean }): boolean {
+  if (!input || input.length > 512) return false;
+  if (input.includes("\\") || input.includes("\0")) return false;
+  if (input.startsWith("/") || input.startsWith("~") || /^[A-Za-z]:/.test(input)) return false;
+  if (input.includes("//")) return false;
+  if (INVALID_PREFIXES.some((prefix) => input === prefix.slice(0, -1))) return false;
+  const path = opts.allowTrailingSlash && input.endsWith("/") ? input.slice(0, -1) : input;
+  if (!path || /^\.+$/.test(path)) return false;
   const segments = path.split("/");
   for (const segment of segments) {
     if (segment === "" || segment === "." || segment === "..") return false;
@@ -58,11 +62,24 @@ export function parseWorkspaceFileRef(input: string): ParsedWorkspaceFileRef | n
   const trimmed = input.trim();
   if (!trimmed) return null;
 
+  const directoryMatch = trimmed.match(WORKSPACE_DIRECTORY_REF_RE);
+  if (directoryMatch) {
+    const [, rawPath] = directoryMatch;
+    if (!rawPath || !looksLikeWorkspacePath(rawPath, { allowTrailingSlash: true })) return null;
+    return {
+      path: rawPath,
+      resourceKind: "directory",
+      line: null,
+      column: null,
+      raw: trimmed,
+    };
+  }
+
   const match = trimmed.match(WORKSPACE_FILE_REF_RE) ?? trimmed.match(BARE_NO_EXT_RE);
   if (!match) return null;
   const [, rawPath, colonLine, colonCol, hashLine, hashCol] = match;
   if (!rawPath) return null;
-  if (!looksLikeWorkspaceFilePath(rawPath)) return null;
+  if (!looksLikeWorkspacePath(rawPath, { allowTrailingSlash: false })) return null;
 
   const line = toPositiveInt(colonLine) ?? toPositiveInt(hashLine);
   const column = toPositiveInt(colonCol) ?? toPositiveInt(hashCol);
@@ -73,6 +90,7 @@ export function parseWorkspaceFileRef(input: string): ParsedWorkspaceFileRef | n
 
   return {
     path: rawPath,
+    resourceKind: "file",
     line,
     column,
     raw: trimmed,

@@ -10,7 +10,7 @@ export const workspaceFileWorkspaceKindSchema = z.enum(["execution_workspace", "
 export const workspaceFileSelectorSchema = z.enum(["auto", "execution", "project"]).default("auto");
 export const workspaceFileListModeSchema = z.enum(["all", "recent", "changed"]).default("all");
 export const workspaceFilePreviewKindSchema = z.enum(["text", "image", "video", "pdf", "unsupported"]);
-export const workspaceFileResourceKindSchema = z.enum(["file", "remote_resource"]);
+export const workspaceFileResourceKindSchema = z.enum(["file", "directory", "remote_resource"]);
 
 export const workspaceFileRefSchema = z.object({
   kind: z.literal("workspace_file"),
@@ -46,6 +46,14 @@ export const workspaceFileListQuerySchema = z.object({
   projectId: z.string().uuid().optional(),
   workspaceId: z.string().uuid().optional(),
   workspace: workspaceFileSelectorSchema.optional(),
+  path: z
+    .string()
+    .min(1)
+    .refine((value) => !/[\x00-\x1f\x7f]/.test(value), {
+      message: "Workspace folder path contains an invalid character",
+      params: { code: "invalid_path" },
+    })
+    .optional(),
   mode: workspaceFileListModeSchema.optional(),
   q: z
     .string()
@@ -82,7 +90,7 @@ export const resolvedWorkspaceResourceSchema = z.object({
   capabilities: z.object({
     preview: z.boolean(),
     download: z.literal(false),
-    listChildren: z.literal(false),
+    listChildren: z.boolean(),
   }),
 });
 

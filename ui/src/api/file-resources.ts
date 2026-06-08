@@ -18,6 +18,7 @@ export interface FileResourceListQuery {
   workspace?: WorkspaceFileSelector;
   projectId?: string | null;
   workspaceId?: string | null;
+  path?: string | null;
   mode?: WorkspaceFileListMode;
   q?: string | null;
   limit?: number;
@@ -29,7 +30,7 @@ function buildQuery(query: FileResourceQuery | FileResourceListQuery): string {
     params.set("projectId", query.projectId);
     params.set("workspaceId", query.workspaceId);
   }
-  if ("path" in query) params.set("path", query.path);
+  if ("path" in query && query.path) params.set("path", query.path);
   if (query.workspace && query.workspace !== "auto") {
     params.set("workspace", query.workspace);
   }

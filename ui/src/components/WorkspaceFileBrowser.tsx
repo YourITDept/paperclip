@@ -216,6 +216,7 @@ export interface WorkspaceFileBrowserProps {
   }) => void;
   /** Seed the search field (e.g. from a URL-backed deep link). */
   initialQuery?: string | null;
+  initialFolderPath?: string | null;
   initialProjectId?: string | null;
   initialWorkspaceId?: string | null;
   className?: string;
@@ -226,6 +227,7 @@ export function WorkspaceFileBrowser({
   companyId,
   onOpen,
   initialQuery,
+  initialFolderPath,
   initialProjectId,
   initialWorkspaceId,
   className,
@@ -236,6 +238,7 @@ export function WorkspaceFileBrowser({
   const [workspace, setWorkspace] = useState<WorkspaceFileSelector>("auto");
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(initialProjectId ?? null);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(initialWorkspaceId ?? null);
+  const [folderPath, setFolderPath] = useState<string | null>(initialFolderPath ?? null);
   const [searchInput, setSearchInput] = useState(initialQuery ?? "");
   const [debouncedQuery, setDebouncedQuery] = useState(initialQuery?.trim() ?? "");
   // When the workspace has no git change-tracking we silently fall back to a full
@@ -297,11 +300,11 @@ export function WorkspaceFileBrowser({
   // A new search or workspace should re-attempt recent-change tracking.
   useEffect(() => {
     setRecentUnavailable(false);
-  }, [workspace, source, selectedProjectId, selectedWorkspaceId]);
+  }, [workspace, source, selectedProjectId, selectedWorkspaceId, folderPath]);
 
   const q = debouncedQuery || null;
   const isSearch = q !== null;
-  const mode: WorkspaceFileListMode = isSearch ? "all" : recentUnavailable ? "all" : "changed";
+  const mode: WorkspaceFileListMode = folderPath || isSearch ? "all" : recentUnavailable ? "all" : "changed";
   const targetProjectId = source === "other" ? selectedProjectId : null;
   const targetWorkspaceId = source === "other" ? selectedWorkspaceId : null;
   const effectiveWorkspace: WorkspaceFileSelector = source === "other" ? "project" : workspace;
@@ -318,6 +321,7 @@ export function WorkspaceFileBrowser({
       mode,
       q,
       limit: LIST_LIMIT,
+      path: folderPath,
     }),
     queryFn: () => fileResourcesApi.list(issueId, {
       workspace: effectiveWorkspace,
@@ -326,6 +330,7 @@ export function WorkspaceFileBrowser({
       mode,
       q,
       limit: LIST_LIMIT,
+      path: folderPath,
     }),
     enabled: canListFiles,
     retry: false,
@@ -346,7 +351,7 @@ export function WorkspaceFileBrowser({
   // Keep the highlighted option valid as results change.
   useEffect(() => {
     setHighlightedIndex(items.length > 0 ? 0 : -1);
-  }, [items, q, workspace, source, selectedProjectId, selectedWorkspaceId]);
+  }, [items, q, workspace, source, selectedProjectId, selectedWorkspaceId, folderPath]);
 
   const announcement = useMemo(() => {
     if (listQuery.isFetching) return "Loading workspace files…";
@@ -361,7 +366,11 @@ export function WorkspaceFileBrowser({
     if (!value) return;
     const parsed = parseWorkspaceFileRef(value);
     const target = { workspace: effectiveWorkspace, ...targetRef };
-    if (parsed) onOpen({ path: parsed.path, ...target, line: parsed.line, column: parsed.column });
+    if (parsed?.resourceKind === "directory") {
+      setFolderPath(parsed.path);
+      setSearchInput("");
+      setDebouncedQuery("");
+    } else if (parsed) onOpen({ path: parsed.path, ...target, line: parsed.line, column: parsed.column });
     else onOpen({ path: value, ...target });
   }
 
@@ -567,9 +576,18 @@ export function WorkspaceFileBrowser({
         </div>
       ) : null}
 
+      {folderPath ? (
+        <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground" title={folderPath}>
+          <FolderOpen aria-hidden="true" className="h-3 w-3 shrink-0" />
+          <span className="min-w-0 truncate font-mono">{folderPath}</span>
+        </div>
+      ) : null}
+
       <div className="flex items-baseline justify-between gap-2 pt-1">
         <span className="text-xs font-medium text-muted-foreground">
-          {isSearch ? <>Files matching “{q}”</> : "Recently changed"}
+          {folderPath ? (
+            isSearch ? <>Files in folder matching “{q}”</> : "Files in folder"
+          ) : isSearch ? <>Files matching “{q}”</> : "Recently changed"}
         </span>
         <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
           {listQuery.isFetching ? <Loader2 aria-hidden="true" className="h-3 w-3 animate-spin" /> : null}

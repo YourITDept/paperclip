@@ -3,7 +3,9 @@
 import { describe, expect, it } from "vitest";
 import {
   FILE_VIEWER_NAVIGATE_OPTIONS,
+  readBrowseStateFromSearch,
   readFileViewerStateFromSearch,
+  writeFolderViewerStateToSearch,
   writeFileViewerStateToSearch,
 } from "./FileViewerContext";
 
@@ -120,5 +122,24 @@ describe("writeFileViewerStateToSearch", () => {
   it("returns empty string when no params remain", () => {
     const next = writeFileViewerStateToSearch("?file=a.ts", null);
     expect(next).toBe("");
+  });
+});
+
+describe("folder browse search state", () => {
+  it("round-trips explicit target folder browse params", () => {
+    const targetPath = "content-os/cases/active/2026-06-06-pap-10199-bundled-skills/";
+    const next = writeFolderViewerStateToSearch("?tab=thread", {
+      path: targetPath,
+      projectId: "17acae7d-9d0c-46bf-9c82-be9694ac3461",
+      workspaceId: "0de5f74f-a7d4-4f73-a9a0-455a2b968cf2",
+    });
+
+    expect(readFileViewerStateFromSearch(next)).toBeNull();
+    expect(readBrowseStateFromSearch(next)).toEqual({
+      q: null,
+      folderPath: targetPath,
+      projectId: "17acae7d-9d0c-46bf-9c82-be9694ac3461",
+      workspaceId: "0de5f74f-a7d4-4f73-a9a0-455a2b968cf2",
+    });
   });
 });

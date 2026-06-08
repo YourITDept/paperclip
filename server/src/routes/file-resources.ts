@@ -19,6 +19,7 @@ export type WorkspaceFileResourceService = {
     workspace?: "auto" | "execution" | "project" | null;
     projectId?: string | null;
     workspaceId?: string | null;
+    path?: string | null;
     mode?: "all" | "recent" | "changed" | null;
     q?: string | null;
     limit?: number | null;
@@ -133,7 +134,7 @@ function readListQuery(query: unknown) {
     if (error instanceof ZodError) {
       const refinement = error.errors.find((issue) => {
         const code = (issue as { params?: { code?: string } }).params?.code;
-        return code === "invalid_query" || code === "invalid_target";
+        return code === "invalid_query" || code === "invalid_target" || code === "invalid_path";
       });
       const code = (refinement as { params?: { code?: string } } | undefined)?.params?.code;
       if (refinement) throw unprocessable(refinement.message, { code: code ?? "invalid_query" });
@@ -145,6 +146,7 @@ function readListQuery(query: unknown) {
     workspace: parsed.workspace ?? "auto",
     projectId: parsed.projectId ?? null,
     workspaceId: parsed.workspaceId ?? null,
+    path: parsed.path ?? null,
     mode: parsed.mode ?? "all",
     q: parsed.q?.trim() || null,
     limit: parsed.limit,

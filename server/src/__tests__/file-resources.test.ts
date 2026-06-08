@@ -329,6 +329,63 @@ describeEmbeddedPostgres("workspace file resources", () => {
     expect(JSON.stringify(res.body)).not.toContain(root);
   });
 
+  it("resolves and lists explicit same-company cross-project workspace folders", async () => {
+    const { root, projectRoot, targetProjectRoot, executionRoot } = await makeWorkspace();
+    const graph = await seedGraph(db, { projectRoot, targetProjectRoot, executionRoot });
+    const folderPath = "content-os/cases/active/2026-06-06-pap-10199-bundled-skills/";
+    await fs.mkdir(path.join(targetProjectRoot, folderPath), { recursive: true });
+    await fs.writeFile(path.join(targetProjectRoot, folderPath, "README.md"), "# Bundled skills\n", "utf8");
+    await fs.writeFile(path.join(targetProjectRoot, folderPath, "notes.txt"), "notes\n", "utf8");
+    await fs.writeFile(path.join(targetProjectRoot, "outside.txt"), "not in focused folder\n", "utf8");
+
+    const app = createApp(db, {
+      type: "board",
+      userId: "board-user",
+      companyIds: [graph.companyId],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const resolved = await request(app)
+      .get(`/api/issues/${graph.issueId}/file-resources/resolve`)
+      .query({
+        projectId: graph.targetProjectId,
+        workspaceId: graph.targetProjectWorkspaceId,
+        path: folderPath,
+      });
+
+    expect(resolved.status).toBe(200);
+    expect(resolved.body).toMatchObject({
+      kind: "directory",
+      workspaceKind: "project_workspace",
+      workspaceId: graph.targetProjectWorkspaceId,
+      projectId: graph.targetProjectId,
+      projectName: "Target project",
+      displayPath: `Target project / ${folderPath}`,
+      capabilities: { preview: false, download: false, listChildren: true },
+    });
+    expect(JSON.stringify(resolved.body)).not.toContain(root);
+
+    const listed = await request(app)
+      .get(`/api/issues/${graph.issueId}/file-resources/list`)
+      .query({
+        projectId: graph.targetProjectId,
+        workspaceId: graph.targetProjectWorkspaceId,
+        path: folderPath,
+        mode: "all",
+      });
+
+    expect(listed.status).toBe(200);
+    expect(listed.body.state).toBe("available");
+    expect(listed.body.query).toMatchObject({ path: folderPath.slice(0, -1), mode: "all" });
+    expect(new Set(listed.body.items.map((item: { relativePath: string }) => item.relativePath))).toEqual(new Set([
+      `${folderPath}README.md`,
+      `${folderPath}notes.txt`,
+    ]));
+    expect(JSON.stringify(listed.body)).not.toContain(root);
+    expect(JSON.stringify(listed.body)).not.toContain("outside.txt");
+  });
+
   it("denies explicit cross-company project workspaces", async () => {
     const { projectRoot, targetProjectRoot, executionRoot } = await makeWorkspace();
     const graph = await seedGraph(db, { projectRoot, targetProjectRoot, executionRoot });
@@ -393,6 +450,24 @@ describeEmbeddedPostgres("workspace file resources", () => {
       projectId: graph.targetProjectId,
       workspaceId: graph.targetProjectWorkspaceId,
       path: "escape.txt",
+    })).rejects.toMatchObject({
+      status: 403,
+      details: { code: "outside_workspace" },
+    });
+  });
+
+  it("blocks symlink directory escapes from explicit cross-project workspaces", async () => {
+    const { root, projectRoot, targetProjectRoot, executionRoot } = await makeWorkspace();
+    const graph = await seedGraph(db, { projectRoot, targetProjectRoot, executionRoot });
+    const outsideDir = path.join(root, "outside-dir");
+    await fs.mkdir(outsideDir, { recursive: true });
+    await fs.writeFile(path.join(outsideDir, "secret.txt"), "secret\n", "utf8");
+    await fs.symlink(outsideDir, path.join(targetProjectRoot, "escape-dir"));
+
+    await expect(workspaceFileResourceService(db).resolve(graph.issueId, {
+      projectId: graph.targetProjectId,
+      workspaceId: graph.targetProjectWorkspaceId,
+      path: "escape-dir/",
     })).rejects.toMatchObject({
       status: 403,
       details: { code: "outside_workspace" },
@@ -596,7 +671,7 @@ describeEmbeddedPostgres("workspace file resources", () => {
     expect(otherControl.body?.details?.code).toBe("invalid_path");
   });
 
-  it("rejects traversal, encoded traversal, backslash traversal, and double-encoding without double-decoding", async () => {
+  it("rejects traversal, encoded traversal, home-relative paths, backslash traversal, and double-encoding without double-decoding", async () => {
     const { projectRoot, executionRoot } = await makeWorkspace();
     const graph = await seedGraph(db, { projectRoot, executionRoot });
     await fs.writeFile(path.join(projectRoot, "safe.txt"), "safe\n", "utf8");
@@ -611,6 +686,7 @@ describeEmbeddedPostgres("workspace file resources", () => {
 
     expect((await request(app).get(`/api/issues/${graph.issueId}/file-resources/content?workspace=project&path=..%2Fsecret.txt`)).status).toBe(403);
     expect((await request(app).get(`/api/issues/${graph.issueId}/file-resources/content?workspace=project&path=%2e%2e%2Fsecret.txt`)).status).toBe(403);
+    expect((await request(app).get(`/api/issues/${graph.issueId}/file-resources/content`).query({ workspace: "project", path: "~/secret.txt" })).status).toBe(422);
     expect((await request(app).get(`/api/issues/${graph.issueId}/file-resources/content`).query({ workspace: "project", path: "..\\secret.txt" })).status).toBe(422);
     const doubleEncoded = await request(app)
       .get(`/api/issues/${graph.issueId}/file-resources/content?workspace=project&path=%252e%252e%252Fsecret.txt`);

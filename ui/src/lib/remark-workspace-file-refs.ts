@@ -13,6 +13,7 @@ export function buildWorkspaceFileHref(ref: ParsedWorkspaceFileRef): string {
   const params = new URLSearchParams();
   if (ref.projectId) params.set("projectId", ref.projectId);
   if (ref.workspaceId) params.set("workspaceId", ref.workspaceId);
+  if (ref.resourceKind === "directory") params.set("kind", "directory");
   params.set("path", ref.path);
   if (ref.line !== null) params.set("line", String(ref.line));
   if (ref.column !== null) params.set("column", String(ref.column));
@@ -32,12 +33,14 @@ export function parseWorkspaceFileHref(href: string | null | undefined): ParsedW
   const workspaceIdRaw = params.get("workspaceId");
   const hasExplicitTarget = Boolean(projectIdRaw && workspaceIdRaw);
   const projectName = params.get("projectName");
+  const kindRaw = params.get("kind");
   const lineRaw = params.get("line");
   const columnRaw = params.get("column");
   const line = lineRaw ? Number.parseInt(lineRaw, 10) : NaN;
   const column = columnRaw ? Number.parseInt(columnRaw, 10) : NaN;
   return {
     path,
+    resourceKind: kindRaw === "directory" || path.endsWith("/") ? "directory" : "file",
     line: Number.isFinite(line) && line > 0 ? line : null,
     column: Number.isFinite(column) && column > 0 ? column : null,
     projectId: hasExplicitTarget ? projectIdRaw : null,

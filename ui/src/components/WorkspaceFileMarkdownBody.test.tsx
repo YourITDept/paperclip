@@ -19,4 +19,16 @@ describe("linkWorkspaceFileInlineCode", () => {
   it("leaves non-file inline code unchanged", () => {
     expect(linkWorkspaceFileInlineCode("Run `pnpm test`.", "/issues/PAP-1", "", "")).toBe("Run `pnpm test`.");
   });
+
+  it("links trailing-slash folder refs to the workspace browser", () => {
+    const markdown = linkWorkspaceFileInlineCode(
+      "Open `content-os/cases/active/2026-06-06-pap-10199-bundled-skills/`.",
+      "/issues/PAP-1",
+      "",
+      "",
+    );
+
+    expect(markdown).toContain("kind=directory");
+    expect(markdown).toContain("path=content-os%2Fcases%2Factive%2F2026-06-06-pap-10199-bundled-skills%2F");
+  });
 });
