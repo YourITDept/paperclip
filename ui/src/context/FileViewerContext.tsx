@@ -31,6 +31,8 @@ export interface FileViewerContextValue {
   ): void;
   /** Open (or stay in) browse mode, optionally seeding the search query. */
   openBrowse(opts?: { q?: string }): void;
+  /** Update URL-backed browse state without closing the active preview. */
+  updateBrowseState(opts: Partial<FileViewerBrowseState>): void;
   openFolder(
     ref: Pick<ParsedWorkspaceFileRef, "path" | "projectId" | "workspaceId"> & {
       workspace?: WorkspaceFileSelector;
@@ -149,6 +151,31 @@ export function writeFolderViewerStateToSearch(
   return str ? `?${str}` : "";
 }
 
+export function writeBrowseStateToSearch(current: string, next: Partial<FileViewerBrowseState>): string {
+  const params = new URLSearchParams(current);
+  params.set("browse", "1");
+  if ("q" in next) {
+    const q = next.q?.trim() ?? "";
+    if (q) params.set("q", q);
+    else params.delete("q");
+  }
+  if ("folderPath" in next) {
+    const folderPath = next.folderPath?.trim() ?? "";
+    if (folderPath) params.set("folder", folderPath);
+    else params.delete("folder");
+  }
+  if ("projectId" in next) {
+    if (next.projectId) params.set("projectId", next.projectId);
+    else params.delete("projectId");
+  }
+  if ("workspaceId" in next) {
+    if (next.workspaceId) params.set("workspaceId", next.workspaceId);
+    else params.delete("workspaceId");
+  }
+  const str = params.toString();
+  return str ? `?${str}` : "";
+}
+
 interface FileViewerProviderProps {
   issueId: string;
   children: ReactNode;
@@ -167,10 +194,11 @@ function EnabledFileViewerProvider({ issueId, children }: Omit<FileViewerProvide
   const browseState = useMemo(() => readBrowseStateFromSearch(location.search), [location.search]);
 
   const navigateSearch = useCallback(
-    (nextSearch: string) => {
+    (nextSearch: string, opts?: Partial<NavigateOptions>) => {
+      if (nextSearch === location.search) return;
       navigate(
         { pathname: location.pathname, hash: location.hash, search: nextSearch },
-        { ...FILE_VIEWER_NAVIGATE_OPTIONS, state: location.state },
+        { ...FILE_VIEWER_NAVIGATE_OPTIONS, ...opts, state: location.state },
       );
     },
     [location.hash, location.pathname, location.state, navigate],
@@ -211,6 +239,13 @@ function EnabledFileViewerProvider({ issueId, children }: Omit<FileViewerProvide
       if (typeof opts?.q === "string" && opts.q.length > 0) params.set("q", opts.q);
       else params.delete("q");
       navigateSearch(params.toString() ? `?${params.toString()}` : "");
+    },
+    [location.search, navigateSearch],
+  );
+
+  const updateBrowseState = useCallback<FileViewerContextValue["updateBrowseState"]>(
+    (opts) => {
+      navigateSearch(writeBrowseStateToSearch(location.search, opts), { replace: true });
     },
     [location.search, navigateSearch],
   );
@@ -256,11 +291,12 @@ function EnabledFileViewerProvider({ issueId, children }: Omit<FileViewerProvide
       folderPath: browseState?.folderPath ?? null,
       open,
       openBrowse,
+      updateBrowseState,
       openFolder,
       backToFiles,
       close,
     }),
-    [issueId, state, browseState, open, openBrowse, openFolder, backToFiles, close],
+    [issueId, state, browseState, open, openBrowse, updateBrowseState, openFolder, backToFiles, close],
   );
 
   return <FileViewerContext.Provider value={value}>{children}</FileViewerContext.Provider>;

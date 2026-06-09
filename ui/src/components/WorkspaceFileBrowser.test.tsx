@@ -271,6 +271,76 @@ describe("WorkspaceFileBrowser", () => {
     expect(selected?.getAttribute("aria-selected")).toBe("true");
   });
 
+  it("lists the selected file's parent folder so deep-linked files appear selected", () => {
+    const commandsItem = createItem({
+      title: "commands.md",
+      relativePath: "docs/reference/cli/commands.md",
+      displayPath: "docs/reference/cli/commands.md",
+      byteSize: 8192,
+    });
+    useQueryMock.mockReturnValue(ok(availableResponse([commandsItem])));
+
+    renderBrowser(vi.fn(), {
+      compact: true,
+      autoFocusSearch: false,
+      selectedPath: "docs/reference/cli/commands.md",
+    });
+
+    const listCall = useQueryMock.mock.calls.find(([options]) => options.queryKey?.[3] === "list");
+    expect(listCall?.[0].queryKey[4]).toMatchObject({
+      mode: "all",
+      path: "docs/reference/cli",
+    });
+    const selected = Array.from(container.querySelectorAll('[role="treeitem"]')).find(
+      (el) => el.getAttribute("title") === "docs/reference/cli/commands.md",
+    );
+    expect(selected?.getAttribute("aria-selected")).toBe("true");
+    expect(container.textContent).toContain("commands.md");
+  });
+
+  it("preserves an initial search instead of narrowing to the selected file's parent folder", () => {
+    useQueryMock.mockReturnValue(ok(availableResponse([createItem({
+      title: "FileViewerSheet.tsx",
+      relativePath: "ui/src/components/FileViewerSheet.tsx",
+      displayPath: "ui/src/components/FileViewerSheet.tsx",
+    })])));
+
+    renderBrowser(vi.fn(), {
+      compact: true,
+      autoFocusSearch: false,
+      initialQuery: "FileViewerSheet",
+      selectedPath: "ui/src/components/FileViewerSheet.tsx",
+    });
+
+    const listCall = useQueryMock.mock.calls.find(([options]) => options.queryKey?.[3] === "list");
+    expect(listCall?.[0].queryKey[4]).toMatchObject({
+      mode: "all",
+      q: "FileViewerSheet",
+      path: null,
+    });
+  });
+
+  it("does not mark an unrelated highlighted row as selected", () => {
+    useQueryMock.mockReturnValue(ok(availableResponse([
+      createItem({
+        title: "vite.config.ts",
+        relativePath: "ui/vite.config.ts",
+        displayPath: "ui/vite.config.ts",
+      }),
+    ])));
+
+    renderBrowser(vi.fn(), {
+      compact: true,
+      autoFocusSearch: false,
+      selectedPath: "docs/reference/cli/commands.md",
+    });
+
+    const unrelated = Array.from(container.querySelectorAll('[role="treeitem"]')).find(
+      (el) => el.getAttribute("title") === "ui/vite.config.ts",
+    );
+    expect(unrelated?.getAttribute("aria-selected")).toBe("false");
+  });
+
   it("does not render a Recent/All toggle", () => {
     useQueryMock.mockReturnValue(ok(availableResponse([createItem()])));
     renderBrowser();
@@ -295,6 +365,31 @@ describe("WorkspaceFileBrowser", () => {
       input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     });
     expect(onOpen).toHaveBeenCalledWith({ path: "ui/src/pages/IssueDetail.tsx", workspace: "auto" });
+  });
+
+  it("reports live search state for URL-backed browse preservation", async () => {
+    useQueryMock.mockReturnValue(ok(availableResponse([createItem()])));
+    const onBrowseStateChange = vi.fn();
+    renderBrowser(vi.fn(), {
+      initialFolderPath: "ui/src/components",
+      onBrowseStateChange,
+    });
+    onBrowseStateChange.mockClear();
+
+    const input = container.querySelector("input")!;
+    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    act(() => {
+      nativeSetter?.call(input, "FileViewerSheet");
+      input.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    expect(onBrowseStateChange).toHaveBeenLastCalledWith({
+      q: "FileViewerSheet",
+      folderPath: "ui/src/components",
+      projectId: null,
+      workspaceId: null,
+    });
   });
 
   it("shows the remote-workspace state without file rows", () => {

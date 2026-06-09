@@ -529,6 +529,18 @@ export function FileViewerSheet({
     [viewer],
   );
 
+  const handleBrowseStateChange = useCallback(
+    (next: {
+      q: string | null;
+      folderPath: string | null;
+      projectId: string | null;
+      workspaceId: string | null;
+    }) => {
+      viewer.updateBrowseState(next);
+    },
+    [viewer],
+  );
+
   const showCopyFeedback = useCallback((field: "content" | "link" | null, message: string) => {
     setCopiedField(field);
     setCopyFeedback(message);
@@ -739,6 +751,7 @@ export function FileViewerSheet({
                   issueId={issueId}
                   companyId={companyId}
                   onOpen={handleBrowseOpen}
+                  onBrowseStateChange={cameFromBrowse ? handleBrowseStateChange : undefined}
                   initialQuery={cameFromBrowse ? viewer.query : null}
                   initialFolderPath={cameFromBrowse ? viewer.folderPath : null}
                   initialProjectId={state.projectId ?? (cameFromBrowse ? viewer.browseProjectId : null)}
@@ -793,6 +806,7 @@ export function FileViewerSheet({
               issueId={issueId}
               companyId={companyId}
               onOpen={handleBrowseOpen}
+              onBrowseStateChange={handleBrowseStateChange}
               initialQuery={viewer.query}
               initialFolderPath={viewer.folderPath}
               initialProjectId={viewer.browseProjectId}

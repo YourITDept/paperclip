@@ -5,6 +5,7 @@ import {
   FILE_VIEWER_NAVIGATE_OPTIONS,
   readBrowseStateFromSearch,
   readFileViewerStateFromSearch,
+  writeBrowseStateToSearch,
   writeFolderViewerStateToSearch,
   writeFileViewerStateToSearch,
 } from "./FileViewerContext";
@@ -141,5 +142,38 @@ describe("folder browse search state", () => {
       projectId: "17acae7d-9d0c-46bf-9c82-be9694ac3461",
       workspaceId: "0de5f74f-a7d4-4f73-a9a0-455a2b968cf2",
     });
+  });
+
+  it("updates browse params without closing the active file preview", () => {
+    const next = writeBrowseStateToSearch(
+      "?tab=thread&file=ui/src/components/FileViewerSheet.tsx&line=5&browse=1",
+      {
+        q: " FileViewerSheet ",
+        folderPath: "ui/src/components",
+        projectId: null,
+        workspaceId: null,
+      },
+    );
+
+    const params = new URLSearchParams(next);
+    expect(params.get("file")).toBe("ui/src/components/FileViewerSheet.tsx");
+    expect(params.get("line")).toBe("5");
+    expect(params.get("browse")).toBe("1");
+    expect(params.get("q")).toBe("FileViewerSheet");
+    expect(params.get("folder")).toBe("ui/src/components");
+    expect(params.get("tab")).toBe("thread");
+  });
+
+  it("clears browse params while preserving the file preview", () => {
+    const next = writeBrowseStateToSearch(
+      "?file=ui/src/components/FileViewerSheet.tsx&browse=1&q=FileViewerSheet&folder=ui/src/components",
+      { q: null, folderPath: null },
+    );
+
+    const params = new URLSearchParams(next);
+    expect(params.get("file")).toBe("ui/src/components/FileViewerSheet.tsx");
+    expect(params.get("browse")).toBe("1");
+    expect(params.get("q")).toBeNull();
+    expect(params.get("folder")).toBeNull();
   });
 });

@@ -41,6 +41,13 @@ function normalizeFolderPrefix(path: string | null | undefined): string {
   return trimmed ? `${trimmed}/` : "";
 }
 
+function parentFolderPath(path: string | null | undefined): string | null {
+  const trimmed = path?.replace(/^\/+/, "").replace(/\/+$/, "");
+  if (!trimmed) return null;
+  const index = trimmed.lastIndexOf("/");
+  return index > 0 ? trimmed.slice(0, index) : null;
+}
+
 /**
  * Maps a server `unavailableReason` to a calm, board-readable explanation.
  * Copy is kept in sync with `describeDenial` in FileViewerSheet so the browse
@@ -141,12 +148,13 @@ interface WorkspaceFileRowProps {
   item: WorkspaceFileListItem;
   treeItemId: string;
   selected: boolean;
+  highlighted: boolean;
   depth: number;
   onOpen: () => void;
   onHover: () => void;
 }
 
-function WorkspaceFileRow({ item, treeItemId, selected, depth, onOpen, onHover }: WorkspaceFileRowProps) {
+function WorkspaceFileRow({ item, treeItemId, selected, highlighted, depth, onOpen, onHover }: WorkspaceFileRowProps) {
   const name = basename(item.relativePath);
   return (
     <div
@@ -158,7 +166,7 @@ function WorkspaceFileRow({ item, treeItemId, selected, depth, onOpen, onHover }
       title={item.displayPath}
       className={cn(
         "flex min-h-[36px] cursor-pointer items-center gap-2 rounded-md py-1.5 pr-2 sm:min-h-0",
-        selected ? "bg-accent" : "hover:bg-accent/60",
+        selected ? "bg-accent text-foreground" : highlighted ? "bg-accent/50" : "hover:bg-accent/60",
       )}
       style={{ paddingLeft: `${0.5 + depth * 0.875}rem` }}
     >
@@ -320,7 +328,8 @@ function WorkspaceFileTree({
         key={node.key}
         item={node.item}
         treeItemId={`${listboxId}-file-${node.key}`}
-        selected={node.key === selectedItemKey || node.key === highlightedItemKey}
+        selected={node.key === selectedItemKey}
+        highlighted={node.key === highlightedItemKey}
         depth={node.depth}
         onOpen={() => onOpen(node.item)}
         onHover={() => onHoverFile(node.item)}
@@ -346,6 +355,12 @@ export interface WorkspaceFileBrowserProps {
     projectId?: string | null;
     workspaceId?: string | null;
   }) => void;
+  onBrowseStateChange?: (state: {
+    q: string | null;
+    folderPath: string | null;
+    projectId: string | null;
+    workspaceId: string | null;
+  }) => void;
   /** Seed the search field (e.g. from a URL-backed deep link). */
   initialQuery?: string | null;
   initialFolderPath?: string | null;
@@ -363,6 +378,7 @@ export function WorkspaceFileBrowser({
   issueId,
   companyId,
   onOpen,
+  onBrowseStateChange,
   initialQuery,
   initialFolderPath,
   initialProjectId,
@@ -376,9 +392,11 @@ export function WorkspaceFileBrowser({
   const source: BrowserSource =
     initialProjectId && initialWorkspaceId ? "other" : "current";
   const workspace: WorkspaceFileSelector = "auto";
+  const selectedParentPath = useMemo(() => parentFolderPath(selectedPath), [selectedPath]);
+  const effectiveInitialFolderPath = initialFolderPath ?? (initialQuery?.trim() ? null : selectedParentPath);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(initialProjectId ?? null);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(initialWorkspaceId ?? null);
-  const [folderPath, setFolderPath] = useState<string | null>(initialFolderPath ?? null);
+  const [folderPath, setFolderPath] = useState<string | null>(effectiveInitialFolderPath ?? null);
   const [searchInput, setSearchInput] = useState(initialQuery ?? "");
   const [debouncedQuery, setDebouncedQuery] = useState(initialQuery?.trim() ?? "");
   // When the workspace has no git change-tracking we silently fall back to a full
@@ -439,6 +457,12 @@ export function WorkspaceFileBrowser({
   }, [initialProjectId, initialWorkspaceId]);
 
   useEffect(() => {
+    setFolderPath(effectiveInitialFolderPath ?? null);
+    setSearchInput(initialQuery ?? "");
+    setDebouncedQuery(initialQuery?.trim() ?? "");
+  }, [effectiveInitialFolderPath, initialQuery]);
+
+  useEffect(() => {
     const handle = window.setTimeout(() => setDebouncedQuery(searchInput.trim()), 150);
     return () => window.clearTimeout(handle);
   }, [searchInput]);
@@ -450,7 +474,7 @@ export function WorkspaceFileBrowser({
 
   const q = debouncedQuery || null;
   const isSearch = q !== null;
-  const mode: WorkspaceFileListMode = folderPath || isSearch ? "all" : recentUnavailable ? "all" : "changed";
+  const mode: WorkspaceFileListMode = folderPath || isSearch || selectedPath ? "all" : recentUnavailable ? "all" : "changed";
   const targetProjectId = source === "other" ? selectedProjectId : null;
   const targetWorkspaceId = source === "other" ? selectedWorkspaceId : null;
   const effectiveWorkspace: WorkspaceFileSelector = source === "other" ? "project" : workspace;
@@ -458,6 +482,15 @@ export function WorkspaceFileBrowser({
   const targetRef = targetProjectId && targetWorkspaceId
     ? { projectId: targetProjectId, workspaceId: targetWorkspaceId }
     : {};
+
+  useEffect(() => {
+    onBrowseStateChange?.({
+      q: searchInput.trim() || null,
+      folderPath,
+      projectId: targetProjectId,
+      workspaceId: targetWorkspaceId,
+    });
+  }, [folderPath, onBrowseStateChange, searchInput, targetProjectId, targetWorkspaceId]);
 
   const listQuery = useQuery({
     queryKey: queryKeys.issues.fileResources(issueId, {
@@ -487,6 +520,13 @@ export function WorkspaceFileBrowser({
   const items = useMemo(() => data?.items ?? [], [data]);
   const workspaceLabel = data?.workspace?.workspaceLabel ?? null;
   const treeNodes = useMemo(() => buildWorkspaceFileTree(items, folderPath), [folderPath, items]);
+  const selectedItemIndex = selectedPath
+    ? items.findIndex((item) =>
+      item.relativePath === selectedPath &&
+      (activeProjectId ? item.projectId === activeProjectId : true) &&
+      (activeWorkspaceId ? item.workspaceId === activeWorkspaceId : true)
+    )
+    : -1;
 
   // Silent fallback: empty-query view with no change-tracking → list everything.
   useEffect(() => {
@@ -497,8 +537,12 @@ export function WorkspaceFileBrowser({
 
   // Keep the highlighted option valid as results change.
   useEffect(() => {
+    if (selectedPath) {
+      setHighlightedIndex(selectedItemIndex >= 0 ? selectedItemIndex : -1);
+      return;
+    }
     setHighlightedIndex(items.length > 0 ? 0 : -1);
-  }, [items, q, workspace, source, selectedProjectId, selectedWorkspaceId, folderPath]);
+  }, [items.length, q, workspace, source, selectedProjectId, selectedWorkspaceId, folderPath, selectedPath, selectedItemIndex]);
 
   const announcement = useMemo(() => {
     if (listQuery.isFetching) return "Loading workspace files…";
@@ -547,13 +591,7 @@ export function WorkspaceFileBrowser({
 
   const highlightedItem = highlightedIndex >= 0 ? items[highlightedIndex] : undefined;
   const highlightedItemKey = highlightedItem ? itemKey(highlightedItem) : null;
-  const selectedItem = selectedPath
-    ? items.find((item) =>
-      item.relativePath === selectedPath &&
-      (activeProjectId ? item.projectId === activeProjectId : true) &&
-      (activeWorkspaceId ? item.workspaceId === activeWorkspaceId : true)
-    )
-    : null;
+  const selectedItem = selectedItemIndex >= 0 ? items[selectedItemIndex] : null;
   const selectedItemKey = selectedItem ? itemKey(selectedItem) : null;
   const activeOptionId = highlightedItemKey ? `${listboxId}-file-${highlightedItemKey}` : undefined;
 

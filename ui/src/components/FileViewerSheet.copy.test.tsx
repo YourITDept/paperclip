@@ -15,6 +15,7 @@ const viewerMock = {
   browseProjectId: null,
   browseWorkspaceId: null,
   open: vi.fn(),
+  updateBrowseState: vi.fn(),
   close: vi.fn(),
   backToFiles: vi.fn(),
 };
