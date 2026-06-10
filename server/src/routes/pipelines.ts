@@ -727,7 +727,7 @@ export function pipelineRoutes(db: Db, options: Parameters<typeof pipelineServic
     const result = await db.transaction(async (tx) => {
       const [issue] = await tx.insert(issueRows).values({
         companyId,
-        title: `Discuss case: ${detail.case.title}`,
+        title: `Discuss: ${detail.case.title}`,
         description: buildCaseContextMarkdown(detail),
         status: "todo",
         priority: "medium",
@@ -919,12 +919,12 @@ async function getCaseDetail(db: Db, companyId: string, caseId: string) {
 
 function buildCaseContextMarkdown(detail: Awaited<ReturnType<typeof getCaseDetail>>) {
   return [
-    "## Pipeline Case Context",
+    "## Pipeline Item Context",
     "",
-    `Case: ${detail.case.title}`,
+    `Item: ${detail.case.title}`,
     `Pipeline: ${detail.pipeline.name} (${detail.pipeline.key})`,
     `Stage: ${detail.stage.name} (${detail.stage.key}, ${detail.stage.kind})`,
-    `Case link: /PAP/pipelines/${detail.pipeline.id}/cases/${detail.case.id}`,
+    `Item link: /PAP/pipelines/${detail.pipeline.id}/cases/${detail.case.id}`,
     "",
     "```json",
     JSON.stringify({

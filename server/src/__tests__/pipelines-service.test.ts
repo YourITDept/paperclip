@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  activityLog,
   agents,
   companies,
   createDb,
@@ -50,6 +51,7 @@ describeEmbeddedPostgres("pipelineService", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await db.delete(activityLog);
     await db.delete(pipelineAutomationExecutions);
     await db.delete(pipelineCaseBlockers);
     await db.delete(pipelineCaseIssueLinks);
@@ -1089,7 +1091,7 @@ describeEmbeddedPostgres("pipelineService", () => {
     expect(linksAfterTransition[0]!.role).toBe("automation");
 
     const [issue] = await db.select().from(issues).where(eq(issues.id, ledgers[0]!.executionIssueId!));
-    expect(issue!.description).toContain("Pipeline Case Context");
+    expect(issue!.description).toContain("Pipeline Item Context");
     expect(issue!.description).toContain("untrustedContent");
 
     const triggerEvent = await db.insert(pipelineCaseEvents).values({

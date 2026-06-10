@@ -1,7 +1,21 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronUp, Info, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronRight, ChevronUp, GitBranch, Info, MessageSquare, MoreHorizontal, Plus, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
@@ -9,13 +23,27 @@ import { Link, useLocation, useNavigate, useParams } from "@/lib/router";
 import {
   pipelinesApi,
   type PipelineBatchIngestResult,
+  type PipelineCase,
+  type PipelineCaseDetail,
+  type PipelineCaseEvent,
+  type PipelineCaseIssueLinkWithIssue,
   type PipelineIntakeField,
   type PipelineIntakeForm,
+  type PipelineStage,
 } from "../api/pipelines";
+import { issuesApi } from "../api/issues";
+import { IssueChatThread } from "../components/IssueChatThread";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useCompany } from "../context/CompanyContext";
 import { useToastActions } from "../context/ToastContext";
+import {
+  displayPipelineItemFields,
+  formatPipelineItemEvent,
+  getPendingTransitionBannerState,
+  humanizePipelineItemStatus,
+  itemHasChangedNotice,
+} from "../lib/pipeline-item-detail";
 import { queryKeys } from "../lib/queryKeys";
 import { cn } from "../lib/utils";
 
@@ -199,9 +227,13 @@ function PipelineBoard({ pipelineId }: { pipelineId: string }) {
               </div>
               <div className="space-y-2">
                 {stageItems.map((row) => (
-                  <div key={row.case.id} className="border border-border bg-muted/20 px-3 py-2 text-sm font-medium text-foreground">
+                  <Link
+                    key={row.case.id}
+                    to={`/pipelines/${pipelineId}/items/${row.case.id}`}
+                    className="block border border-border bg-muted/20 px-3 py-2 text-sm font-medium text-foreground hover:bg-muted/40"
+                  >
                     {row.case.title}
-                  </div>
+                  </Link>
                 ))}
               </div>
             </section>
@@ -210,6 +242,439 @@ function PipelineBoard({ pipelineId }: { pipelineId: string }) {
       </div>
     </div>
   );
+}
+
+export function PipelineItemLegacyRedirect() {
+  const params = useParams<{ pipelineId?: string; caseId?: string }>();
+  if (!params.pipelineId || !params.caseId) return <NavigateMissingItem />;
+  return <NavigateToItem pipelineId={params.pipelineId} caseId={params.caseId} />;
+}
+
+function NavigateToItem({ pipelineId, caseId }: { pipelineId: string; caseId: string }) {
+  return <LinkRedirect to={`/pipelines/${pipelineId}/items/${caseId}`} />;
+}
+
+function NavigateMissingItem() {
+  return <div className="mx-auto max-w-3xl py-10 text-sm text-muted-foreground">Item not found.</div>;
+}
+
+function LinkRedirect({ to }: { to: string }) {
+  const navigate = useNavigate();
+  useEffect(() => {
+    navigate(to, { replace: true });
+  }, [navigate, to]);
+  return null;
+}
+
+export function PipelineItemDetail() {
+  const params = useParams<{ pipelineId?: string; caseId?: string }>();
+  if (!params.pipelineId || !params.caseId) return <NavigateMissingItem />;
+  return <PipelineItemDetailView pipelineId={params.pipelineId} caseId={params.caseId} />;
+}
+
+export function PipelineItemDetailView({ pipelineId, caseId }: { pipelineId: string; caseId: string }) {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const { pushToast } = useToastActions();
+  const { setBreadcrumbs } = useBreadcrumbs();
+  const [removeDialogOpen, setRemoveDialogOpen] = useState(false);
+
+  const pipeline = useQuery({
+    queryKey: queryKeys.pipelines.detail(pipelineId),
+    queryFn: () => pipelinesApi.get(pipelineId),
+  });
+  const item = useQuery({
+    queryKey: queryKeys.pipelines.caseDetail(caseId),
+    queryFn: () => pipelinesApi.getCase(caseId),
+  });
+  const children = useQuery({
+    queryKey: queryKeys.pipelines.caseChildren(pipelineId, caseId),
+    queryFn: () => pipelinesApi.getCaseChildren(pipelineId, caseId),
+  });
+  const events = useQuery({
+    queryKey: queryKeys.pipelines.caseEvents(caseId),
+    queryFn: () => pipelinesApi.getCaseEvents(caseId, { order: "asc", limit: 100 }),
+  });
+  const issueLinks = useQuery({
+    queryKey: queryKeys.pipelines.caseIssueLinks(caseId),
+    queryFn: () => pipelinesApi.getCaseIssueLinks(caseId),
+  });
+
+  const detail = item.data;
+  const stages = pipeline.data?.stages ?? detail?.allowedNextStages ?? [];
+  const stageLookup = useMemo(() => {
+    const lookup = new Map<string, string>();
+    for (const stage of stages) {
+      lookup.set(stage.id, stage.name);
+      lookup.set(stage.key, stage.name);
+    }
+    return lookup;
+  }, [stages]);
+  const conversationLink = useMemo(() => {
+    const links = issueLinks.data ?? [];
+    return links.find((link) => link.link.role === "conversation")
+      ?? links.find((link) => link.link.role === "work")
+      ?? null;
+  }, [issueLinks.data]);
+  const conversationIssueId = conversationLink?.issue.id ?? null;
+  const comments = useQuery({
+    queryKey: conversationIssueId ? queryKeys.issues.comments(conversationIssueId) : ["pipeline-item", caseId, "missing-conversation"],
+    queryFn: () => issuesApi.listComments(conversationIssueId!, { order: "asc", limit: 50 }),
+    enabled: Boolean(conversationIssueId),
+  });
+
+  useEffect(() => {
+    setBreadcrumbs([
+      { label: "Pipelines", href: "/pipelines" },
+      { label: pipeline.data?.name ?? detail?.pipeline.name ?? "Pipeline", href: `/pipelines/${pipelineId}` },
+      { label: detail?.case.title ?? "Item" },
+    ]);
+  }, [detail?.case.title, detail?.pipeline.name, pipeline.data?.name, pipelineId, setBreadcrumbs]);
+
+  const invalidateItem = useCallback(async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKeys.pipelines.detail(pipelineId) }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.pipelines.cases(pipelineId) }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.pipelines.caseDetail(caseId) }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.pipelines.caseEvents(caseId) }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.pipelines.caseIssueLinks(caseId) }),
+    ]);
+  }, [caseId, pipelineId, queryClient]);
+
+  const startConversation = useMutation({
+    mutationFn: async () => {
+      await pipelinesApi.createIssueLink(caseId, { role: "conversation" });
+    },
+    onSuccess: async () => {
+      await invalidateItem();
+      pushToast({ title: "Conversation started", tone: "success" });
+    },
+    onError: () => pushToast({ title: "Could not start the conversation", tone: "error" }),
+  });
+
+  const addConversationComment = useCallback(async (body: string) => {
+    if (!conversationIssueId) return;
+    await issuesApi.addComment(conversationIssueId, body);
+    await queryClient.invalidateQueries({ queryKey: queryKeys.issues.comments(conversationIssueId) });
+  }, [conversationIssueId, queryClient]);
+
+  const resolveSuggestion = useMutation({
+    mutationFn: ({ resolution, suggestionId }: { resolution: "accept" | "dismiss"; suggestionId: string }) =>
+      pipelinesApi.resolveSuggestion(caseId, {
+        suggestionId,
+        resolution,
+        expectedVersion: detail?.case.version,
+      }),
+    onSuccess: async (_result, variables) => {
+      await invalidateItem();
+      pushToast({
+        title: variables.resolution === "accept" ? "Move approved" : "Suggestion dismissed",
+        tone: "success",
+      });
+    },
+    onError: () => pushToast({ title: "Could not resolve the suggestion", tone: "error" }),
+  });
+
+  const acknowledgeChange = useMutation({
+    mutationFn: () => pipelinesApi.updateCase(caseId, {
+      expectedVersion: detail?.case.version,
+      fields: {
+        ...(detail?.case.fields ?? {}),
+        changeAcknowledgedAt: new Date().toISOString(),
+      },
+    }),
+    onSuccess: async () => {
+      await invalidateItem();
+      pushToast({ title: "Change acknowledged", tone: "success" });
+    },
+    onError: () => pushToast({ title: "Could not acknowledge the change", tone: "error" }),
+  });
+
+  const removeStage = useMemo(
+    () => stages.find((stage) => stage.kind === "cancelled") ?? stages.find((stage) => stage.key === "cancelled") ?? null,
+    [stages],
+  );
+  const removeItem = useMutation({
+    mutationFn: () => {
+      if (!removeStage || !detail?.case.version) throw new Error("Missing removal stage");
+      return pipelinesApi.transitionCase(caseId, {
+        toStageKey: removeStage.key,
+        expectedVersion: detail.case.version,
+        reason: "Removed from the item detail page.",
+      });
+    },
+    onSuccess: async () => {
+      setRemoveDialogOpen(false);
+      await invalidateItem();
+      pushToast({ title: "Item removed", tone: "success" });
+      navigate(`/pipelines/${pipelineId}`);
+    },
+    onError: () => pushToast({ title: "Could not remove the item", tone: "error" }),
+  });
+
+  if (pipeline.isLoading || item.isLoading) return <PageSkeleton />;
+  if (!detail || !pipeline.data) {
+    return <div className="mx-auto max-w-3xl py-10 text-sm text-muted-foreground">Item not found.</div>;
+  }
+
+  const itemFields = displayPipelineItemFields(detail.case.fields);
+  const banner = getPendingTransitionBannerState(detail.case, stageLookup);
+  const changedNotice = itemHasChangedNotice(detail.case);
+  const statusLabel = humanizePipelineItemStatus(detail.case.terminalKind ?? detail.stage.kind);
+  const childRows = children.data ?? [];
+  const eventRows = events.data?.items ?? [];
+  const primaryAction = conversationLink
+    ? (
+        <Button asChild>
+          <Link to={`/issues/${conversationLink.issue.id}`}>
+            <MessageSquare className="mr-2 h-4 w-4" />
+            Open full issue
+          </Link>
+        </Button>
+      )
+    : (
+        <Button onClick={() => startConversation.mutate()} disabled={startConversation.isPending}>
+          <MessageSquare className="mr-2 h-4 w-4" />
+          {startConversation.isPending ? "Starting..." : "Start a conversation"}
+        </Button>
+      );
+
+  return (
+    <div className="mx-auto max-w-6xl px-6 py-8">
+      <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div className="min-w-0">
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+            <Link to="/pipelines" className="hover:text-foreground">Pipelines</Link>
+            <ChevronRight className="h-3.5 w-3.5" />
+            <Link to={`/pipelines/${pipelineId}`} className="hover:text-foreground">{pipeline.data.name}</Link>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="min-w-0 text-2xl font-semibold text-foreground">{detail.case.title}</h1>
+            <span className="rounded-sm border border-border px-2 py-0.5 text-xs font-medium text-muted-foreground">
+              {statusLabel}
+            </span>
+          </div>
+          {detail.case.summary ? <p className="mt-2 max-w-3xl text-sm text-muted-foreground">{detail.case.summary}</p> : null}
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {primaryAction}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="icon" aria-label="Item actions">
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                variant="destructive"
+                disabled={!removeStage || removeItem.isPending}
+                onSelect={(event) => {
+                  event.preventDefault();
+                  setRemoveDialogOpen(true);
+                }}
+              >
+                <Trash2 className="h-4 w-4" />
+                Remove item
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+
+      {banner.visible ? (
+        <section className="mb-5 flex flex-col gap-3 border-y border-border bg-muted/20 py-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-foreground">Ready to move to {banner.stageName}?</h2>
+            {banner.rationale ? <p className="mt-1 text-sm text-muted-foreground">{banner.rationale}</p> : null}
+          </div>
+          {banner.suggestionId ? (
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                onClick={() => resolveSuggestion.mutate({ resolution: "accept", suggestionId: banner.suggestionId! })}
+                disabled={resolveSuggestion.isPending}
+              >
+                <Check className="mr-2 h-4 w-4" />
+                Approve
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => resolveSuggestion.mutate({ resolution: "dismiss", suggestionId: banner.suggestionId! })}
+                disabled={resolveSuggestion.isPending}
+              >
+                <X className="mr-2 h-4 w-4" />
+                Not yet
+              </Button>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
+      {changedNotice ? (
+        <section className="mb-5 flex flex-col gap-3 border-y border-amber-300 bg-amber-50 py-4 text-amber-950 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-100 md:flex-row md:items-center md:justify-between">
+          <div className="flex gap-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div>
+              <h2 className="text-sm font-semibold">{changedNotice.title}</h2>
+              <p className="mt-1 text-sm opacity-85">{changedNotice.body}</p>
+            </div>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => acknowledgeChange.mutate()}
+            disabled={acknowledgeChange.isPending}
+          >
+            Acknowledge
+          </Button>
+        </section>
+      ) : null}
+
+      <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_340px]">
+        <main className="space-y-8">
+          <DetailSection title="Conversation">
+            {conversationLink ? (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-3 text-sm">
+                  <span className="font-medium text-foreground">{conversationLink.issue.title}</span>
+                  <Link to={`/issues/${conversationLink.issue.id}`} className="text-muted-foreground hover:text-foreground">
+                    Open full issue
+                  </Link>
+                </div>
+                <IssueChatThread
+                  comments={comments.data ?? []}
+                  issueId={conversationLink.issue.id}
+                  companyId={conversationLink.issue.companyId}
+                  projectId={conversationLink.issue.projectId}
+                  issueStatus={conversationLink.issue.status}
+                  onAdd={addConversationComment}
+                  emptyMessage="No conversation yet."
+                  variant="embedded"
+                />
+              </div>
+            ) : (
+              <div className="flex flex-col items-start gap-3 py-3 text-sm text-muted-foreground">
+                <p>No active conversation yet.</p>
+                <Button size="sm" variant="outline" onClick={() => startConversation.mutate()} disabled={startConversation.isPending}>
+                  <MessageSquare className="mr-2 h-4 w-4" />
+                  {startConversation.isPending ? "Starting..." : "Start a conversation"}
+                </Button>
+              </div>
+            )}
+          </DetailSection>
+
+          <DetailSection title={`Built from ${detail.childrenSummary.childCount} ${detail.childrenSummary.childCount === 1 ? "item" : "items"}`}>
+            <BuiltFromTree pipelineId={pipelineId} rows={childRows} />
+          </DetailSection>
+        </main>
+
+        <aside className="space-y-8">
+          <DetailSection title="Details">
+            {itemFields.length > 0 ? (
+              <dl className="divide-y divide-border">
+                {itemFields.map((field) => (
+                  <div key={field.key} className="grid grid-cols-[120px_1fr] gap-3 py-2 text-sm">
+                    <dt className="text-muted-foreground">{field.label}</dt>
+                    <dd className="min-w-0 text-foreground">{field.value}</dd>
+                  </div>
+                ))}
+              </dl>
+            ) : (
+              <p className="py-3 text-sm text-muted-foreground">No added details.</p>
+            )}
+          </DetailSection>
+
+          <DetailSection title="Activity">
+            {eventRows.length > 0 ? (
+              <ol className="divide-y divide-border">
+                {eventRows.map((event) => (
+                  <li key={event.id} className="py-2 text-sm">
+                    <p className="text-foreground">{formatPipelineItemEvent(event, stageLookup)}</p>
+                    <time className="text-xs text-muted-foreground">{formatShortDate(event.createdAt)}</time>
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <p className="py-3 text-sm text-muted-foreground">No activity yet.</p>
+            )}
+          </DetailSection>
+        </aside>
+      </div>
+
+      <Dialog open={removeDialogOpen} onOpenChange={setRemoveDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove item</DialogTitle>
+            <DialogDescription>
+              This moves the item out of active work. It stays visible in the pipeline history.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRemoveDialogOpen(false)}>Keep item</Button>
+            <Button variant="destructive" onClick={() => removeItem.mutate()} disabled={removeItem.isPending || !removeStage}>
+              {removeItem.isPending ? "Removing..." : "Remove item"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function DetailSection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section>
+      <h2 className="mb-3 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">{title}</h2>
+      <div className="border-y border-border">{children}</div>
+    </section>
+  );
+}
+
+function BuiltFromTree({
+  pipelineId,
+  rows,
+}: {
+  pipelineId: string;
+  rows: Array<{ case: PipelineCase; stage: PipelineStage }>;
+}) {
+  if (rows.length === 0) {
+    return <p className="py-3 text-sm text-muted-foreground">No built-from items.</p>;
+  }
+  return (
+    <ul className="divide-y divide-border">
+      {rows.map((row) => (
+        <li key={row.case.id}>
+          <Link
+            to={`/pipelines/${pipelineId}/items/${row.case.id}`}
+            className="grid grid-cols-[18px_1fr_auto] items-center gap-3 py-3 text-sm hover:bg-muted/40"
+          >
+            <GitBranch className="h-4 w-4 text-muted-foreground" />
+            <span className="min-w-0">
+              <span className="block truncate font-medium text-foreground">{row.case.title}</span>
+              {(row.case.childCount ?? 0) > 0 ? (
+                <span className="block text-xs text-muted-foreground">
+                  {row.case.childCount} nested {(row.case.childCount ?? 0) === 1 ? "item" : "items"} hidden
+                </span>
+              ) : null}
+            </span>
+            <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-muted-foreground">
+              {humanizePipelineItemStatus(row.case.terminalKind ?? row.stage.kind)}
+            </span>
+          </Link>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function formatShortDate(value: Date | string) {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(value));
 }
 
 function PipelineAddItems({ pipelineId }: { pipelineId: string }) {

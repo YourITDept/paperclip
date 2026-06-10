@@ -1,0 +1,141 @@
+import { describe, expect, it } from "vitest";
+import type { PipelineCase, PipelineCaseEvent, PipelineStage } from "../api/pipelines";
+import {
+  displayPipelineItemFields,
+  formatPipelineItemEvent,
+  getPendingTransitionBannerState,
+  humanizePipelineItemStatus,
+  INTERNAL_FIELD_KEYS,
+  itemHasChangedNotice,
+} from "./pipeline-item-detail";
+
+const stages: PipelineStage[] = [
+  { id: "stage-intake", pipelineId: "pipeline-1", key: "intake", name: "Intake", kind: "open", position: 100 },
+  { id: "stage-review", pipelineId: "pipeline-1", key: "review", name: "Review", kind: "review", position: 200 },
+  { id: "stage-done", pipelineId: "pipeline-1", key: "done", name: "Done", kind: "done", position: 900 },
+];
+
+function item(overrides: Partial<PipelineCase>): PipelineCase {
+  return {
+    id: "item-1",
+    pipelineId: "pipeline-1",
+    stageId: "stage-intake",
+    title: "Draft launch post",
+    fields: {},
+    ...overrides,
+  };
+}
+
+function event(type: string, payload: Record<string, unknown> = {}, overrides: Partial<PipelineCaseEvent> = {}): PipelineCaseEvent {
+  return {
+    id: `${type}-event`,
+    companyId: "company-1",
+    caseId: "item-1",
+    type,
+    actorType: "system",
+    payload,
+    createdAt: "2026-06-10T12:00:00.000Z",
+    updatedAt: "2026-06-10T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+describe("pipeline item detail helpers", () => {
+  it("shows and hides the pending transition banner from item state", () => {
+    expect(getPendingTransitionBannerState(item({
+      pendingSuggestion: {
+        id: "suggestion-1",
+        toStageKey: "review",
+        rationale: "Ready for review",
+        createdAt: "2026-06-10T12:00:00.000Z",
+      },
+    }), stages)).toMatchObject({
+      visible: true,
+      suggestionId: "suggestion-1",
+      stageName: "Review",
+    });
+
+    expect(getPendingTransitionBannerState(item({ fields: { suggestionResolution: "dismiss" } }), stages)).toEqual({
+      visible: false,
+      reason: "resolved",
+    });
+    expect(getPendingTransitionBannerState(item({ fields: {} }), stages)).toEqual({
+      visible: false,
+      reason: "no_next_stage",
+    });
+    expect(getPendingTransitionBannerState(item({ fields: { nextSuggestedStageId: "stage-done" } }), stages)).toMatchObject({
+      visible: true,
+      stageName: "Done",
+    });
+    expect(getPendingTransitionBannerState(item({ fields: { nextSuggestedStageId: "missing-stage" } }), stages)).toMatchObject({
+      visible: true,
+      stageName: "the next stage",
+    });
+  });
+
+  it("detects changed items until acknowledged", () => {
+    expect(itemHasChangedNotice(item({ fields: { changeAcknowledgedAt: "2026-06-10T12:00:00.000Z", upstreamDrift: true } }))).toBeNull();
+    expect(itemHasChangedNotice({ ...item({ fields: {} }), thisChanged: true })).toMatchObject({ title: "This changed" });
+    expect(itemHasChangedNotice(item({ fields: { upstreamChanged: true } }))).toMatchObject({ title: "This changed" });
+    expect(itemHasChangedNotice(item({ fields: { upstreamDrift: true } }))).toMatchObject({ title: "This changed" });
+    expect(itemHasChangedNotice(item({ fields: {} }))).toBeNull();
+  });
+
+  it("formats every supported activity kind as prose", () => {
+    const cases: Array<[PipelineCaseEvent, string]> = [
+      [event("case.ingested"), "Item added."],
+      [event("case.updated"), "Item details updated."],
+      [event("case.transitioned", {}, { fromStageId: "stage-intake", toStageId: "stage-review" }), "Moved from Intake to Review."],
+      [event("case.suggested", { suggestion: { toStageKey: "review" } }), "Suggested moving to Review."],
+      [event("case.suggestion_resolved", { decision: "accept" }), "Suggestion approved."],
+      [event("case.suggestion_resolved", { decision: "dismiss" }), "Suggestion dismissed."],
+      [event("case.reviewed", { decision: "request_changes" }), "Review requested changes."],
+      [event("case.reviewed", { decision: "drop" }), "Review removed this item."],
+      [event("case.reviewed", { decision: "approve" }), "Review approved this item."],
+      [event("case.unknown_kind"), "Activity recorded."],
+    ];
+
+    for (const [input, expected] of cases) {
+      expect(formatPipelineItemEvent(input, stages)).toBe(expected);
+    }
+  });
+
+  it("humanizes status values", () => {
+    expect(humanizePipelineItemStatus(null)).toBe("Open");
+    expect(humanizePipelineItemStatus("open")).toBe("Open");
+    expect(humanizePipelineItemStatus("done")).toBe("Done");
+    expect(humanizePipelineItemStatus("cancelled")).toBe("Removed");
+    expect(humanizePipelineItemStatus("in_review")).toBe("In review");
+    expect(humanizePipelineItemStatus("in_progress")).toBe("In progress");
+    expect(humanizePipelineItemStatus("needs_qa")).toBe("Needs qa");
+  });
+
+  it("filters internal fields and formats display values", () => {
+    const fields = {
+      audience: ["Founders", "Operators"],
+      owner: { label: "Launch team" },
+      backupOwner: { name: "Growth" },
+      source: { title: "Launch brief" },
+      metadata: { nested: true },
+      title: "Announcement",
+      nextSuggestedStageId: "review",
+      suggestionResolution: "accept",
+      upstreamDrift: true,
+      changeAcknowledgedAt: "2026-06-10T12:00:00.000Z",
+      thisChanged: true,
+    };
+
+    const displayed = displayPipelineItemFields(fields);
+    expect(displayed).toEqual([
+      { key: "audience", label: "Audience", value: "Founders, Operators" },
+      { key: "owner", label: "Owner", value: "Launch team" },
+      { key: "backupOwner", label: "Backup Owner", value: "Growth" },
+      { key: "source", label: "Source", value: "Launch brief" },
+      { key: "metadata", label: "Metadata", value: "Added details" },
+      { key: "title", label: "Title", value: "Announcement" },
+    ]);
+    for (const key of INTERNAL_FIELD_KEYS) {
+      expect(displayed.some((field) => field.key === key)).toBe(false);
+    }
+  });
+});

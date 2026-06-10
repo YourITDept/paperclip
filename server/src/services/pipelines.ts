@@ -331,12 +331,12 @@ function buildPipelineCaseContextMarkdown(input: {
 }) {
   const contextPack = buildPipelineCaseContextPack(input);
   return [
-    "## Pipeline Case Context",
+    "## Pipeline Item Context",
     "",
-    `Case: ${input.case.title}`,
+    `Item: ${input.case.title}`,
     `Pipeline: ${input.pipeline.name} (${input.pipeline.key})`,
     `Stage: ${input.stage.name} (${input.stage.key}, ${input.stage.kind})`,
-    `Case link: ${contextPack.case.deepLink}`,
+    `Item link: ${contextPack.case.deepLink}`,
     input.triggeringEventId ? `Triggering event: ${input.triggeringEventId}` : null,
     "",
     "```json",
