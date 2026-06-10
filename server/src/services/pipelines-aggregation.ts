@@ -53,13 +53,26 @@ function caseDisplay(row: { case: CaseRow; stage: StageRow; pipeline: PipelineRo
   };
 }
 
-// Current review-stage approver semantics: reviewerKind "human" awaits any
-// human caller, "any" awaits anyone. B1 (stage requireApproval + named
-// approver) extends this predicate when it lands — keep the seam here.
+// Review-stage approver semantics (B1 model): requireApproval=false awaits
+// anyone; requireApproval=true awaits the configured approver (any_human,
+// user, or a specific agent). Legacy rows may still store reviewerKind
+// ("human"/"any") instead — honor it when present.
 // SQL-side so busy companies can't truncate an agent's review feed.
 function reviewStageAwaitsCallerSql(caller: AttentionCaller) {
   if (caller.type === "user") return sql`true`;
-  return sql`coalesce(${pipelineStages.config}->>'reviewerKind', 'human') = 'any'`;
+  return sql`(
+    coalesce(${pipelineStages.config}->>'reviewerKind', '') = 'any'
+    or (
+      coalesce(${pipelineStages.config}->>'reviewerKind', '') <> 'human'
+      and (
+        coalesce((${pipelineStages.config}->>'requireApproval')::boolean, false) = false
+        or (
+          ${pipelineStages.config}->'approver'->>'kind' = 'agent'
+          and ${pipelineStages.config}->'approver'->>'id' = ${caller.agentId}
+        )
+      )
+    )
+  )`;
 }
 
 function boundedLimit(limit: number | undefined, fallback: number, max: number) {
@@ -145,7 +158,12 @@ export async function listPipelineAttention(
           rejectToStageKey: typeof config.rejectToStageKey === "string" ? config.rejectToStageKey : null,
           requestChangesToStageKey: typeof config.requestChangesToStageKey === "string" ? config.requestChangesToStageKey : null,
           requireRejectReason: config.requireRejectReason !== false,
-          reviewerKind: typeof config.reviewerKind === "string" ? config.reviewerKind : "human",
+          reviewerKind:
+            typeof config.reviewerKind === "string"
+              ? config.reviewerKind
+              : config.requireApproval === false
+                ? "any"
+                : "human",
         },
       };
     });
