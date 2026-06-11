@@ -530,6 +530,16 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// Some bundled skills ship with a frontmatter-only SKILL.md whose extracted
+// description is just punctuation (e.g. ">"). Strip leading markdown syntax and
+// fall back to a neutral placeholder so cards don't render bare glyphs.
+function cardDescriptionText(raw: string | null | undefined): string {
+  const cleaned = (raw ?? "")
+    .replace(/^[\s>#*_\-`>]+/, "")
+    .trim();
+  return cleaned.length >= 3 ? cleaned : "No description yet.";
+}
+
 // ---------------------------------------------------------------------------
 // Skills Store discovery grid (PAP-10879)
 // ---------------------------------------------------------------------------
@@ -835,7 +845,7 @@ function SkillCard({ card, onOpen }: { card: DiscoveryCard; onOpen: (card: Disco
       ) : null}
 
       <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">
-        {card.description || "No description yet."}
+        {cardDescriptionText(card.description)}
       </p>
 
       <div className="mt-auto pt-3">
@@ -2936,15 +2946,19 @@ function SkillDetailPage({
               </div>
             </div>
             <div className="mt-4 flex flex-wrap items-center gap-2">
-              <TrustChip level={detail.trustLevel} />
-              <CompatChip compatibility={detail.compatibility} />
               {detail.categories.slice(0, 4).map((category) => (
                 <SkillCategoryChip key={category} label={category} />
               ))}
               {detail.sourceType === "github" ? (
-                <span className="text-xs text-muted-foreground">
-                  {currentPin ? `Source ${currentPin}` : "Untracked source"}
-                </span>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                      <Github className="h-3 w-3" aria-hidden="true" />
+                      {currentPin ?? "untracked"}
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>{currentPin ? `Source pin ${currentPin}` : "No source pin tracked"}</TooltipContent>
+                </Tooltip>
               ) : null}
             </div>
           </div>
@@ -2954,6 +2968,16 @@ function SkillDetailPage({
               {detail.starredByCurrentActor ? "Starred" : "Star"}
               <span className="ml-1 text-xs text-muted-foreground">{detail.starCount}</span>
             </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground">
+                  <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>{detail.installCount}</span>
+                  <span className="hidden sm:inline">{detail.installCount === 1 ? "install" : "installs"}</span>
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>Times this skill has been installed or forked.</TooltipContent>
+            </Tooltip>
             <Button variant="ghost" size="sm" onClick={onFork}>
               <GitFork className="mr-1.5 h-3.5 w-3.5" />
               Fork
@@ -3002,43 +3026,6 @@ function SkillDetailPage({
 
         <aside className="min-w-0 space-y-6 border-t border-border pt-4 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-0">
           <section>
-            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Sharing</div>
-            <div className="space-y-2">
-              {(["company", "private"] as const).map((scope) => (
-                <button
-                  key={scope}
-                  type="button"
-                  onClick={() => onUpdateSharingScope(scope)}
-                  disabled={updateSharingPending || detail.sharingScope === scope}
-                  className={cn(
-                    "flex w-full items-start gap-2 rounded-md border px-3 py-2 text-left text-sm transition-colors",
-                    detail.sharingScope === scope ? "border-foreground/50 bg-accent/40" : "border-border hover:bg-accent/30",
-                  )}
-                >
-                  {scope === "company" ? <Users className="mt-0.5 h-3.5 w-3.5" /> : <Lock className="mt-0.5 h-3.5 w-3.5" />}
-                  <span className="min-w-0">
-                    <span className="block font-medium">{scope === "company" ? "Company" : "Private"}</span>
-                    <span className="mt-0.5 block text-xs text-muted-foreground">
-                      {scope === "company" ? "Visible inside this company." : "Only visible in your library."}
-                    </span>
-                  </span>
-                </button>
-              ))}
-              <button
-                type="button"
-                disabled
-                className="flex w-full items-start gap-2 rounded-md border border-dashed border-border px-3 py-2 text-left text-sm text-muted-foreground"
-              >
-                <Globe className="mt-0.5 h-3.5 w-3.5" />
-                <span>
-                  <span className="block font-medium">Public link</span>
-                  <span className="mt-0.5 block text-xs">Coming later.</span>
-                </span>
-              </button>
-            </div>
-          </section>
-
-          <section>
             <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Attach to agent</div>
             <div className="space-y-2">
               <div className="text-sm">
@@ -3076,6 +3063,46 @@ function SkillDetailPage({
                 ))}
               </div>
             )}
+          </section>
+
+          {/* Sharing scope only surfaces when the viewer can edit it (round 2 #3).
+              Sits below Attach/Related so the primary action lives at the top
+              of the rail (round 2 #2). */}
+          <section>
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Sharing</div>
+            <div className="space-y-2">
+              {(["company", "private"] as const).map((scope) => (
+                <button
+                  key={scope}
+                  type="button"
+                  onClick={() => onUpdateSharingScope(scope)}
+                  disabled={updateSharingPending || detail.sharingScope === scope}
+                  className={cn(
+                    "flex w-full items-start gap-2 rounded-md border px-3 py-2 text-left text-sm transition-colors",
+                    detail.sharingScope === scope ? "border-foreground/50 bg-accent/40" : "border-border hover:bg-accent/30",
+                  )}
+                >
+                  {scope === "company" ? <Users className="mt-0.5 h-3.5 w-3.5" /> : <Lock className="mt-0.5 h-3.5 w-3.5" />}
+                  <span className="min-w-0">
+                    <span className="block font-medium">{scope === "company" ? "Company" : "Private"}</span>
+                    <span className="mt-0.5 block text-xs text-muted-foreground">
+                      {scope === "company" ? "Visible inside this company." : "Only visible in your library."}
+                    </span>
+                  </span>
+                </button>
+              ))}
+              <button
+                type="button"
+                disabled
+                className="flex w-full items-start gap-2 rounded-md border border-dashed border-border px-3 py-2 text-left text-sm text-muted-foreground"
+              >
+                <Globe className="mt-0.5 h-3.5 w-3.5" />
+                <span>
+                  <span className="block font-medium">Public link</span>
+                  <span className="mt-0.5 block text-xs">Coming later.</span>
+                </span>
+              </button>
+            </div>
           </section>
         </aside>
       </div>
