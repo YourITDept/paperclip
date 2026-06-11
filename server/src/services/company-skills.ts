@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { companies, companySkillComments, companySkillStars, companySkillVersions, companySkills } from "@paperclipai/db";
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
@@ -2636,30 +2636,42 @@ export function companySkillService(db: Db) {
     await ensureSkillInventoryCurrent(companyId);
     const skill = await getById(companyId, skillId);
     if (!skill) throw notFound("Skill not found");
-    const [{ nextRevision }] = await db
-      .select({
-        nextRevision: sql<number>`coalesce(max(${companySkillVersions.revisionNumber}), 0) + 1`,
-      })
-      .from(companySkillVersions)
-      .where(and(eq(companySkillVersions.companyId, companyId), eq(companySkillVersions.companySkillId, skillId)));
-    const versionRow = await db
-      .insert(companySkillVersions)
-      .values({
-        companyId,
-        companySkillId: skillId,
-        revisionNumber: Number(nextRevision ?? 1),
-        label: input.label?.trim() || null,
-        fileInventory: serializeVersionFileInventory(await collectVersionFileInventory(companyId, skill)),
-        authorAgentId: actor?.type === "agent" ? actor.agentId ?? null : null,
-        authorUserId: actor?.type === "user" ? actor.userId ?? null : null,
-      })
-      .returning()
-      .then((rows) => rows[0] ?? null);
+    const fileInventory = serializeVersionFileInventory(await collectVersionFileInventory(companyId, skill));
+    const versionRow = await db.transaction(async (tx) => {
+      await tx.execute(sql`
+        select ${companySkills.id}
+        from ${companySkills}
+        where ${companySkills.id} = ${skillId}
+          and ${companySkills.companyId} = ${companyId}
+        for update
+      `);
+      const [{ nextRevision }] = await tx
+        .select({
+          nextRevision: sql<number>`coalesce(max(${companySkillVersions.revisionNumber}), 0) + 1`,
+        })
+        .from(companySkillVersions)
+        .where(and(eq(companySkillVersions.companyId, companyId), eq(companySkillVersions.companySkillId, skillId)));
+      const row = await tx
+        .insert(companySkillVersions)
+        .values({
+          companyId,
+          companySkillId: skillId,
+          revisionNumber: Number(nextRevision ?? 1),
+          label: input.label?.trim() || null,
+          fileInventory,
+          authorAgentId: actor?.type === "agent" ? actor.agentId ?? null : null,
+          authorUserId: actor?.type === "user" ? actor.userId ?? null : null,
+        })
+        .returning()
+        .then((rows) => rows[0] ?? null);
+      if (!row) return null;
+      await tx
+        .update(companySkills)
+        .set({ currentVersionId: row.id, updatedAt: new Date() })
+        .where(and(eq(companySkills.id, skillId), eq(companySkills.companyId, companyId)));
+      return row;
+    });
     if (!versionRow) throw notFound("Failed to persist skill version");
-    await db
-      .update(companySkills)
-      .set({ currentVersionId: versionRow.id, updatedAt: new Date() })
-      .where(and(eq(companySkills.id, skillId), eq(companySkills.companyId, companyId)));
     return toCompanySkillVersion(versionRow);
   }
 
@@ -2716,7 +2728,11 @@ export function companySkillService(db: Db) {
     const rows = await db
       .select()
       .from(companySkillComments)
-      .where(and(eq(companySkillComments.companyId, companyId), eq(companySkillComments.companySkillId, skillId)))
+      .where(and(
+        eq(companySkillComments.companyId, companyId),
+        eq(companySkillComments.companySkillId, skillId),
+        isNull(companySkillComments.deletedAt),
+      ))
       .orderBy(asc(companySkillComments.createdAt));
     return rows.map((row) => toCompanySkillComment(row));
   }
@@ -2785,7 +2801,11 @@ export function companySkillService(db: Db) {
     const row = await db
       .update(companySkillComments)
       .set({ body: input.body, updatedAt: new Date() })
-      .where(eq(companySkillComments.id, commentId))
+      .where(and(
+        eq(companySkillComments.companyId, companyId),
+        eq(companySkillComments.companySkillId, skillId),
+        eq(companySkillComments.id, commentId),
+      ))
       .returning()
       .then((rows) => rows[0] ?? null);
     if (!row) throw notFound("Skill comment not found");
@@ -2813,7 +2833,11 @@ export function companySkillService(db: Db) {
     const row = await db
       .update(companySkillComments)
       .set({ deletedAt: new Date(), updatedAt: new Date() })
-      .where(eq(companySkillComments.id, commentId))
+      .where(and(
+        eq(companySkillComments.companyId, companyId),
+        eq(companySkillComments.companySkillId, skillId),
+        eq(companySkillComments.id, commentId),
+      ))
       .returning()
       .then((rows) => rows[0] ?? null);
     if (!row) throw notFound("Skill comment not found");
@@ -3038,12 +3062,12 @@ export function companySkillService(db: Db) {
       const repo = asString(metadata.repo);
       const hostname = asString(metadata.hostname) || "github.com";
       const ref = skill.sourceRef ?? asString(metadata.ref) ?? "main";
-      const rawRepoSkillDir = asString(metadata.repoSkillDir);
+      const rawRepoSkillDir = typeof metadata.repoSkillDir === "string" ? metadata.repoSkillDir.trim() : null;
       // An explicit "."/"" repoSkillDir means SKILL.md lives at the repo root;
       // only fall back to the slug subdirectory when metadata is absent.
-      const repoSkillDir = rawRepoSkillDir == null
-        ? normalizeGitHubSkillDirectory(rawRepoSkillDir, skill.slug)
-        : normalizeGitHubSkillDirectory(rawRepoSkillDir, "");
+      const repoSkillDir = typeof metadata.repoSkillDir === "string"
+        ? normalizeGitHubSkillDirectory(rawRepoSkillDir, "")
+        : normalizeGitHubSkillDirectory(rawRepoSkillDir, skill.slug);
       if (!owner || !repo) {
         throw unprocessable("Skill source metadata is incomplete.");
       }
@@ -4082,20 +4106,81 @@ export function companySkillService(db: Db) {
     return skillDir;
   }
 
+  function resolveVersionSnapshotPath(skillDir: string, relativePath: string) {
+    const normalizedPath = normalizePortablePath(relativePath);
+    if (!normalizedPath) return null;
+    const targetPath = path.resolve(skillDir, normalizedPath);
+    if (targetPath !== skillDir && !targetPath.startsWith(`${skillDir}${path.sep}`)) {
+      throw unprocessable(`Skill version file path is invalid: ${relativePath}`);
+    }
+    return { normalizedPath, targetPath };
+  }
+
+  async function listMaterializedFiles(root: string): Promise<string[] | null> {
+    async function walk(dir: string, base: string): Promise<string[]> {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      const out: string[] = [];
+      for (const entry of entries) {
+        const relativePath = base ? path.posix.join(base, entry.name) : entry.name;
+        const absolutePath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          out.push(...await walk(absolutePath, relativePath));
+        } else if (entry.isFile()) {
+          out.push(normalizePortablePath(relativePath));
+        } else {
+          out.push(normalizePortablePath(relativePath));
+        }
+      }
+      return out;
+    }
+
+    try {
+      return await walk(root, "");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  async function materializedVersionSnapshotMatches(skillDir: string, version: CompanySkillVersion) {
+    const expected = new Map<string, string>();
+    let sawSkillFile = false;
+    for (const entry of version.fileInventory) {
+      const resolved = resolveVersionSnapshotPath(skillDir, entry.path);
+      if (!resolved) continue;
+      expected.set(resolved.normalizedPath, entry.content);
+      if (resolved.normalizedPath === "SKILL.md") sawSkillFile = true;
+    }
+    if (!sawSkillFile) {
+      throw unprocessable("Company skill version could not be materialized because its SKILL.md snapshot is missing.");
+    }
+
+    const existingFiles = await listMaterializedFiles(skillDir);
+    if (!existingFiles || existingFiles.length !== expected.size) return false;
+    for (const relativePath of existingFiles) {
+      if (!expected.has(relativePath)) return false;
+    }
+    for (const [relativePath, content] of expected.entries()) {
+      const existingContent = await fs.readFile(path.resolve(skillDir, relativePath), "utf8").catch(() => null);
+      if (existingContent !== content) return false;
+    }
+    return true;
+  }
+
   async function materializeVersionSnapshot(companyId: string, skill: CompanySkill, version: CompanySkillVersion) {
     const runtimeRoot = path.resolve(resolveManagedSkillsRoot(companyId), "__versions__");
     const skillDir = path.resolve(runtimeRoot, skill.id, version.id);
+    if (await materializedVersionSnapshotMatches(skillDir, version)) {
+      return skillDir;
+    }
     await fs.rm(skillDir, { recursive: true, force: true });
     await fs.mkdir(skillDir, { recursive: true });
 
     let wroteSkillFile = false;
     for (const entry of version.fileInventory) {
-      const normalizedPath = normalizePortablePath(entry.path);
-      if (!normalizedPath) continue;
-      const targetPath = path.resolve(skillDir, normalizedPath);
-      if (targetPath !== skillDir && !targetPath.startsWith(`${skillDir}${path.sep}`)) {
-        throw unprocessable(`Skill version file path is invalid: ${entry.path}`);
-      }
+      const resolved = resolveVersionSnapshotPath(skillDir, entry.path);
+      if (!resolved) continue;
+      const { normalizedPath, targetPath } = resolved;
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.writeFile(targetPath, entry.content, "utf8");
       if (normalizedPath === "SKILL.md") wroteSkillFile = true;

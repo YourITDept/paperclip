@@ -221,5 +221,23 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
       .resolves.toContain("Version one.");
     await expect(fs.readFile(path.join(secondSkill!.source, "SKILL.md"), "utf8"))
       .resolves.toContain("Version two.");
+
+    const firstSkillFile = path.join(firstSkill!.source, "SKILL.md");
+    const oldMtime = new Date("2024-01-01T00:00:00.000Z");
+    await fs.utimes(firstSkillFile, oldMtime, oldMtime);
+
+    const repeatRun = await heartbeat.invoke(firstAgentId, "on_demand", {}, "manual");
+    expect(repeatRun).not.toBeNull();
+    expect((await waitForRunToFinish(heartbeat, repeatRun!.id))?.status).toBe("succeeded");
+    const repeatedSkill = capturedRuns
+      .filter((run) => run.agentId === firstAgentId)
+      .at(-1)
+      ?.skills.find((entry) => entry.key === skillKey);
+    expect(repeatedSkill).toMatchObject({
+      source: firstSkill!.source,
+      versionId: versionOne.id,
+      sourceStatus: "available",
+    });
+    expect((await fs.stat(firstSkillFile)).mtime.toISOString()).toBe(oldMtime.toISOString());
   });
 });

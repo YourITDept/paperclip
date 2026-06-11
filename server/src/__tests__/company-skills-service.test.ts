@@ -229,6 +229,9 @@ describeEmbeddedPostgres("companySkillService.list", () => {
       starred: true,
       starCount: 1,
     });
+    await expect(svc.starSkill(companyId, skillId, { type: "user", userId: null })).rejects.toMatchObject({
+      status: 422,
+    });
     const comment = await svc.createComment(
       companyId,
       skillId,
@@ -245,6 +248,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     )).rejects.toMatchObject({ status: 422 });
     await expect(svc.deleteComment(companyId, skillId, comment.id, { type: "user", userId: "board" }))
       .resolves.toMatchObject({ id: comment.id, deletedAt: expect.any(Date) });
+    await expect(svc.listComments(companyId, skillId)).resolves.toEqual([]);
     await expect(svc.unstarSkill(companyId, skillId, { type: "user", userId: "board" })).resolves.toMatchObject({
       starred: false,
       starCount: 0,
@@ -360,6 +364,13 @@ describeEmbeddedPostgres("companySkillService.list", () => {
         forkedFromCompanyId: companyId,
         forkedByUserId: "board",
       }),
+    });
+    const versions = await svc.listVersions(companyId, forked.id);
+    expect(versions).toHaveLength(1);
+    expect(versions[0]).toMatchObject({
+      revisionNumber: 1,
+      label: "Initial version",
+      authorUserId: "board",
     });
   });
 
@@ -869,6 +880,72 @@ describeEmbeddedPostgres("companySkillService.list", () => {
       await expect(svc.readFile(companyId, skillId, "SKILL.md")).resolves.toMatchObject({
         content: "# Root Skill (stored)\n",
       });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("falls back to slug paths for github skills only when repoSkillDir is absent", async () => {
+    const companyId = randomUUID();
+    const rootSkillId = randomUUID();
+    const slugSkillId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(companySkills).values([
+      {
+        id: rootSkillId,
+        companyId,
+        key: `company/${companyId}/empty-root-skill`,
+        slug: "empty-root-skill",
+        name: "Empty Root Skill",
+        description: null,
+        markdown: "# Empty Root Skill\n",
+        sourceType: "github",
+        sourceLocator: "https://github.com/acme/skills",
+        sourceRef: "main",
+        trustLevel: "markdown_only",
+        compatibility: "compatible",
+        fileInventory: [{ path: "SKILL.md", kind: "skill" }],
+        metadata: { owner: "acme", repo: "skills", ref: "main", repoSkillDir: "" },
+      },
+      {
+        id: slugSkillId,
+        companyId,
+        key: `company/${companyId}/slug-skill`,
+        slug: "slug-skill",
+        name: "Slug Skill",
+        description: null,
+        markdown: "# Slug Skill\n",
+        sourceType: "github",
+        sourceLocator: "https://github.com/acme/skills",
+        sourceRef: "main",
+        trustLevel: "markdown_only",
+        compatibility: "compatible",
+        fileInventory: [{ path: "SKILL.md", kind: "skill" }],
+        metadata: { owner: "acme", repo: "skills", ref: "main" },
+      },
+    ]);
+
+    const requestedUrls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string | URL) => {
+      requestedUrls.push(String(url));
+      return new Response("# Remote Skill\n", { status: 200 });
+    });
+    try {
+      await expect(svc.readFile(companyId, rootSkillId, "SKILL.md")).resolves.toMatchObject({
+        content: "# Remote Skill\n",
+      });
+      await expect(svc.readFile(companyId, slugSkillId, "SKILL.md")).resolves.toMatchObject({
+        content: "# Remote Skill\n",
+      });
+      expect(requestedUrls).toEqual([
+        "https://raw.githubusercontent.com/acme/skills/main/SKILL.md",
+        "https://raw.githubusercontent.com/acme/skills/main/slug-skill/SKILL.md",
+      ]);
     } finally {
       vi.unstubAllGlobals();
     }

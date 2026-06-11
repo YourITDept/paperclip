@@ -80,7 +80,7 @@ export function companySkillRoutes(db: Db) {
       return { type: "agent" as const, agentId: req.actor.agentId ?? null };
     }
     if (req.actor.type === "board") {
-      return { type: "user" as const, userId: req.actor.userId ?? "board" };
+      return { type: "user" as const, userId: req.actor.userId ?? null };
     }
     return { type: "system" as const };
   }
