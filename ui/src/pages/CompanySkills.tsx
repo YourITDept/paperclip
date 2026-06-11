@@ -2344,20 +2344,20 @@ function SkillDetailPage({
             <p className="text-sm text-muted-foreground">{skill.description ?? "No overview yet."}</p>
           )}
         </section>
-        <section className="grid gap-3 text-sm sm:grid-cols-2">
-          <div className="border-b border-border py-2">
+        <section className="grid min-w-0 gap-3 text-sm sm:grid-cols-2">
+          <div className="min-w-0 border-b border-border py-2">
             <div className="text-xs text-muted-foreground">Key</div>
             <div className="mt-1 truncate font-mono">{skill.key}</div>
           </div>
-          <div className="border-b border-border py-2">
+          <div className="min-w-0 border-b border-border py-2">
             <div className="text-xs text-muted-foreground">Source</div>
             <div className="mt-1 truncate">{skill.sourcePath ?? source.label}</div>
           </div>
-          <div className="border-b border-border py-2">
+          <div className="min-w-0 border-b border-border py-2">
             <div className="text-xs text-muted-foreground">Version</div>
             <div className="mt-1">{versionLabel(skill.currentVersion ?? null)}</div>
           </div>
-          <div className="border-b border-border py-2">
+          <div className="min-w-0 border-b border-border py-2">
             <div className="text-xs text-muted-foreground">Mode</div>
             <div className="mt-1">{skill.editable ? "Editable" : skill.editableReason ?? "Read only"}</div>
           </div>
@@ -2593,7 +2593,7 @@ function SkillDetailPage({
       <div className="grid gap-6 px-4 py-4 xl:grid-cols-[minmax(0,1fr)_18rem]">
         <main className="min-w-0">
           <Tabs value={activeTab} onValueChange={(value) => onTabChange(value as SkillDetailTab)}>
-            <TabsList variant="line" className="mb-5 p-0">
+            <TabsList variant="line" className="mb-5 w-full max-w-full justify-start overflow-x-auto p-0 [scrollbar-width:none]">
               {SKILL_DETAIL_TABS.map((tab) => {
                 const Icon = tab.icon;
                 return (
