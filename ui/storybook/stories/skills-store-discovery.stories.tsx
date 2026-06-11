@@ -25,6 +25,7 @@ const MOCK_CARDS: DiscoveryCard[] = [
     required: false,
     forkedFrom: false,
     updatedAt: Date.now() - 2 * 86_400_000,
+    sourceBadge: "github",
   },
   {
     key: "here.now/agent-browser",
@@ -45,6 +46,7 @@ const MOCK_CARDS: DiscoveryCard[] = [
     required: false,
     forkedFrom: false,
     updatedAt: Date.now() - 5 * 86_400_000,
+    sourceBadge: "skills_sh",
   },
   {
     key: "paperclipai/paperclip/verify",
@@ -65,6 +67,7 @@ const MOCK_CARDS: DiscoveryCard[] = [
     required: false,
     forkedFrom: false,
     updatedAt: Date.now() - 9 * 86_400_000,
+    sourceBadge: "local",
   },
   {
     key: "you/hue-prosumer",
@@ -85,6 +88,7 @@ const MOCK_CARDS: DiscoveryCard[] = [
     required: false,
     forkedFrom: true,
     updatedAt: Date.now() - 1 * 86_400_000,
+    sourceBadge: "paperclip",
   },
   {
     key: "anthropic/claude-api",
@@ -105,6 +109,7 @@ const MOCK_CARDS: DiscoveryCard[] = [
     required: false,
     forkedFrom: false,
     updatedAt: 0,
+    sourceBadge: "url",
   },
   {
     key: "paperclipai/paperclip/security-review",
@@ -125,6 +130,7 @@ const MOCK_CARDS: DiscoveryCard[] = [
     required: false,
     forkedFrom: false,
     updatedAt: Date.now() - 3 * 86_400_000,
+    sourceBadge: "github",
   },
   {
     key: "yuki/commit-perfect",
@@ -145,6 +151,7 @@ const MOCK_CARDS: DiscoveryCard[] = [
     required: false,
     forkedFrom: false,
     updatedAt: 0,
+    sourceBadge: "skills_sh",
   },
   {
     key: "astra/deep-research",
@@ -165,6 +172,7 @@ const MOCK_CARDS: DiscoveryCard[] = [
     required: false,
     forkedFrom: false,
     updatedAt: Date.now() - 4 * 86_400_000,
+    sourceBadge: "local",
   },
   {
     key: "paperclipai/paperclip/paperclip",
@@ -185,6 +193,7 @@ const MOCK_CARDS: DiscoveryCard[] = [
     required: true,
     forkedFrom: false,
     updatedAt: Date.now() - 30 * 86_400_000,
+    sourceBadge: "paperclip",
   },
   {
     key: "paperclipai/paperclip/diagnose-why-work-stopped",
@@ -205,6 +214,7 @@ const MOCK_CARDS: DiscoveryCard[] = [
     required: true,
     forkedFrom: false,
     updatedAt: Date.now() - 28 * 86_400_000,
+    sourceBadge: "url",
   },
 ];
 

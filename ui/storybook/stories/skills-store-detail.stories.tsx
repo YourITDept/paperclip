@@ -120,7 +120,6 @@ const MOCK_ATTACH_AGENTS = [
 
 function SkillDetailHarness({ initialTab = "overview" as DetailTab }: { initialTab?: DetailTab }) {
   const [activeTab, setActiveTab] = useState<DetailTab>(initialTab);
-  const [attachOpen, setAttachOpen] = useState(false);
   const [viewMode, setViewMode] = useState<"preview" | "code">("preview");
   const [editMode, setEditMode] = useState(false);
   const [draft, setDraft] = useState(MOCK_FILE.content);
@@ -145,9 +144,7 @@ function SkillDetailHarness({ initialTab = "overview" as DetailTab }: { initialT
       versions={MOCK_VERSIONS}
       versionsLoading={false}
       attachAgents={MOCK_ATTACH_AGENTS}
-      attachPopoverOpen={attachOpen}
-      setAttachPopoverOpen={setAttachOpen}
-      onSubmitAttach={() => setAttachOpen(false)}
+      onSubmitAttach={() => {}}
       attachPending={false}
       expandedDirs={new Set<string>()}
       onToggleDir={() => {}}

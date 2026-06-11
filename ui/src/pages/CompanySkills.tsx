@@ -95,6 +95,7 @@ import {
   RefreshCw,
   Save,
   Search,
+  Settings,
   ShieldCheck,
   Star,
   Trash2,
@@ -581,6 +582,8 @@ export type DiscoveryCard = {
   required: boolean;
   forkedFrom: boolean;
   updatedAt: number;
+  sourceBadge?: CompanySkillSourceBadge | null;
+  sourceLabel?: string | null;
 };
 
 // Stable palette used to auto-assign an accent colour to a skill when the
@@ -722,6 +725,8 @@ function buildDiscoveryCards(
       required,
       forkedFrom: Boolean(skill.forkedFromSkillId),
       updatedAt: new Date(skill.updatedAt).getTime() || 0,
+      sourceBadge: skill.sourceBadge,
+      sourceLabel: skill.sourceLabel,
     });
   }
 
@@ -747,6 +752,8 @@ function buildDiscoveryCards(
       required,
       forkedFrom: false,
       updatedAt: 0,
+      sourceBadge: "catalog",
+      sourceLabel: entry.packageName ?? "Catalog",
     });
   }
 
@@ -837,6 +844,16 @@ function SkillCard({ card, onOpen }: { card: DiscoveryCard; onOpen: (card: Disco
             by {card.author}{card.version ? ` · ${card.version}` : ""}
           </div>
         </div>
+        {/* Where the skill came from (PAP-10907 E); native title gives a hover hint. */}
+        {(() => {
+          const meta = sourceMeta(card.sourceBadge ?? "catalog", card.sourceLabel ?? null);
+          const SourceIcon = meta.icon;
+          return (
+            <span className="shrink-0 text-muted-foreground" title={`From ${meta.label}`} aria-label={`From ${meta.label}`}>
+              <SourceIcon className="h-3.5 w-3.5" aria-hidden="true" />
+            </span>
+          );
+        })()}
       </div>
 
       {card.forkedFrom ? (
@@ -980,6 +997,25 @@ export function DiscoveryGrid({
   scanPending: boolean;
   scanStatus: string | null;
 }) {
+  // Source filter (github / skills.sh / local / …) lives in the grid so it
+  // narrows whatever the parent already filtered by tab/category/search (PAP-10907 E).
+  const [sourceBadgeFilter, setSourceBadgeFilter] = useState<string>("all");
+  const availableSources = useMemo(() => {
+    const set = new Set<string>();
+    for (const card of cards) if (card.sourceBadge) set.add(card.sourceBadge);
+    return Array.from(set).sort();
+  }, [cards]);
+  useEffect(() => {
+    if (sourceBadgeFilter !== "all" && !availableSources.includes(sourceBadgeFilter)) {
+      setSourceBadgeFilter("all");
+    }
+  }, [availableSources, sourceBadgeFilter]);
+  const sourceFilteredCards = useMemo(
+    () => (sourceBadgeFilter === "all" ? cards : cards.filter((card) => card.sourceBadge === sourceBadgeFilter)),
+    [cards, sourceBadgeFilter],
+  );
+  const sourceFilterActive = sourceBadgeFilter !== "all";
+
   return (
     // On desktop the store is bounded to the viewport so the category sidebar
     // and the results pane each scroll independently (PAP-10907). Mobile keeps
@@ -1035,6 +1071,29 @@ export function DiscoveryGrid({
               </DropdownMenuRadioGroup>
             </DropdownMenuContent>
           </DropdownMenu>
+          {availableSources.length > 1 ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm">
+                  <span className="text-muted-foreground">Source</span>
+                  <span className="ml-1.5 capitalize">
+                    {sourceBadgeFilter === "all" ? "All" : sourceMeta(sourceBadgeFilter as CompanySkillSourceBadge, null).label}
+                  </span>
+                  <ChevronDown className="ml-1 h-3.5 w-3.5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuRadioGroup value={sourceBadgeFilter} onValueChange={setSourceBadgeFilter}>
+                  <DropdownMenuRadioItem value="all">All sources</DropdownMenuRadioItem>
+                  {availableSources.map((badge) => (
+                    <DropdownMenuRadioItem key={badge} value={badge}>
+                      {sourceMeta(badge as CompanySkillSourceBadge, null).label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
           <Button
             variant="ghost"
             size="icon-sm"
@@ -1127,15 +1186,15 @@ export function DiscoveryGrid({
             <PageSkeleton variant="list" />
           ) : error ? (
             <div className="py-6 text-sm text-destructive">{error}</div>
-          ) : cards.length === 0 ? (
+          ) : sourceFilteredCards.length === 0 ? (
             <div className="py-12">
               <EmptyState
                 icon={LayoutGrid}
                 message={
                   totalCount === 0
                     ? "No skills yet. Create one or install from the catalog."
-                    : search || activeCategory
-                      ? "No skills match your search."
+                    : search || activeCategory || sourceFilterActive
+                      ? "No skills match your filters."
                       : "No skills in this tab yet."
                 }
               />
@@ -1148,7 +1207,7 @@ export function DiscoveryGrid({
                     Create a skill
                   </Button>
                 </div>
-              ) : (search || activeCategory) ? (
+              ) : (search || activeCategory || sourceFilterActive) ? (
                 <div className="mt-3 flex justify-center">
                   <Button
                     size="sm"
@@ -1156,6 +1215,7 @@ export function DiscoveryGrid({
                     onClick={() => {
                       onSearchChange("");
                       onCategoryChange(null);
+                      setSourceBadgeFilter("all");
                     }}
                   >
                     Clear filters
@@ -1166,11 +1226,11 @@ export function DiscoveryGrid({
           ) : (
             <>
               <p className="mb-3 text-xs text-muted-foreground">
-                {cards.length} {cards.length === 1 ? "skill" : "skills"}
+                {sourceFilteredCards.length} {sourceFilteredCards.length === 1 ? "skill" : "skills"}
                 {activeCategory ? <span className="capitalize"> · {activeCategory}</span> : null}
               </p>
               <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(15rem,1fr))]">
-                {cards.map((card) => (
+                {sourceFilteredCards.map((card) => (
                   <SkillCard key={card.key} card={card} onOpen={onOpenCard} />
                 ))}
               </div>
@@ -1976,8 +2036,6 @@ type AttachAgentOption = {
 };
 
 function AttachAgentsPopover({
-  open,
-  onOpenChange,
   agents,
   attachedAgentIds,
   versions,
@@ -1986,8 +2044,6 @@ function AttachAgentsPopover({
   onSubmit,
   fullWidth = false,
 }: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
   agents: AttachAgentOption[];
   attachedAgentIds: string[];
   versions: CompanySkillVersion[];
@@ -1996,6 +2052,10 @@ function AttachAgentsPopover({
   onSubmit: (nextIds: string[], versionId: string | null) => void;
   fullWidth?: boolean;
 }) {
+  // Each popover instance owns its open state. The detail page renders two of
+  // these (agents tab + sidebar); sharing a single controlled flag made both
+  // open at once and swallowed clicks, so "Add to agent" appeared dead (PAP-10907 H).
+  const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("");
   const [draft, setDraft] = useState<Set<string>>(new Set(attachedAgentIds));
   const [draftVersionId, setDraftVersionId] = useState<string | null>(selectedVersionId);
@@ -2022,7 +2082,7 @@ function AttachAgentsPopover({
   const sortedVersions = [...versions].sort((a, b) => b.revisionNumber - a.revisionNumber);
 
   return (
-    <Popover open={open} onOpenChange={onOpenChange}>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button size="sm" className={cn(fullWidth && "w-full")}>
           <Plus className="mr-1.5 h-3.5 w-3.5" />
@@ -2110,10 +2170,17 @@ function AttachAgentsPopover({
           </div>
         )}
         <div className="flex items-center justify-end gap-2 border-t border-border px-3 py-2">
-          <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)} disabled={pending}>
+          <Button variant="ghost" size="sm" onClick={() => setOpen(false)} disabled={pending}>
             Cancel
           </Button>
-          <Button size="sm" onClick={() => onSubmit(Array.from(draft), draftVersionId)} disabled={pending}>
+          <Button
+            size="sm"
+            onClick={() => {
+              onSubmit(Array.from(draft), draftVersionId);
+              setOpen(false);
+            }}
+            disabled={pending}
+          >
             {pending ? "Saving…" : "Save"}
           </Button>
         </div>
@@ -2514,8 +2581,6 @@ export function SkillDetailPage({
   versions,
   versionsLoading,
   attachAgents,
-  attachPopoverOpen,
-  setAttachPopoverOpen,
   onSubmitAttach,
   attachPending,
   expandedDirs,
@@ -2553,8 +2618,6 @@ export function SkillDetailPage({
   versions: CompanySkillVersion[];
   versionsLoading: boolean;
   attachAgents: AttachAgentOption[];
-  attachPopoverOpen: boolean;
-  setAttachPopoverOpen: (open: boolean) => void;
   onSubmitAttach: (ids: string[], versionId: string | null) => void;
   attachPending: boolean;
   expandedDirs: Set<string>;
@@ -2575,9 +2638,24 @@ export function SkillDetailPage({
   deletePending: boolean;
 }) {
   const [diffOpen, setDiffOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const sortedVersions = [...versions].sort((a, b) => b.revisionNumber - a.revisionNumber);
   const [leftVersionId, setLeftVersionId] = useState<string | null>(null);
   const [rightVersionId, setRightVersionId] = useState<string | null>(null);
+
+  // Track unsaved edits so we can float a save bar and warn before the page is
+  // unloaded with a dirty draft (PAP-10907 J).
+  const savedFileContent = file?.content ?? "";
+  const isDirty = editMode && Boolean(file?.editable) && draft !== savedFileContent;
+  useEffect(() => {
+    if (!isDirty) return;
+    const handler = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [isDirty]);
 
   if (!detail) {
     return loading ? <PageSkeleton variant="detail" /> : <EmptyState icon={Boxes} message="Skill not found." />;
@@ -2598,7 +2676,7 @@ export function SkillDetailPage({
 
   function renderFilesBody() {
     return (
-      <div className="grid min-h-[560px] gap-0 lg:grid-cols-[18rem_minmax(0,1fr)]">
+      <div className="grid min-h-[560px] gap-0 lg:grid-cols-[13rem_minmax(0,1fr)]">
         <aside className="border-b border-border pb-3 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-3">
           <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Files</div>
           <SkillTree
@@ -2783,8 +2861,6 @@ export function SkillDetailPage({
             {selectedVersion ? ` · ${versionLabel(selectedVersion)}` : " · Latest"}
           </p>
           <AttachAgentsPopover
-            open={attachPopoverOpen}
-            onOpenChange={setAttachPopoverOpen}
             agents={attachAgents}
             attachedAgentIds={attached.map((agent) => agent.id)}
             versions={versions}
@@ -2908,18 +2984,19 @@ export function SkillDetailPage({
             </div>
           </div>
           {/* GitHub-style social proof, top-right: installs · stars · fork.
-              Installs is a read-only stat; stars and fork are interactive. */}
+              "Installs" counts agents that currently have this skill attached
+              (PAP-10907); stars and fork are interactive. */}
           <div className="flex flex-wrap items-center justify-end gap-1">
             <div className="flex items-center overflow-hidden rounded-md border border-border">
               <Tooltip>
                 <TooltipTrigger asChild>
                   <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-muted-foreground">
                     <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span className="font-medium text-foreground">{detail.installCount}</span>
-                    <span className="hidden sm:inline">{detail.installCount === 1 ? "install" : "installs"}</span>
+                    <span className="font-medium text-foreground">{detail.attachedAgentCount}</span>
+                    <span className="hidden sm:inline">{detail.attachedAgentCount === 1 ? "install" : "installs"}</span>
                   </span>
                 </TooltipTrigger>
-                <TooltipContent>Times this skill has been installed or forked.</TooltipContent>
+                <TooltipContent>Agents in this company that currently have this skill installed.</TooltipContent>
               </Tooltip>
               <button
                 type="button"
@@ -2943,20 +3020,6 @@ export function SkillDetailPage({
                 <span className="font-medium text-foreground">{detail.forkCount}</span>
               </button>
             </div>
-            {detail.sourceType === "github" ? (
-              <>
-                <Button variant="ghost" size="sm" onClick={onCheckUpdates} disabled={checkUpdatesPending || updateStatusLoading}>
-                  <RefreshCw className={cn("mr-1.5 h-3.5 w-3.5", (checkUpdatesPending || updateStatusLoading) && "animate-spin")} />
-                  Check updates
-                </Button>
-                {updateStatus?.supported && updateStatus.hasUpdate ? (
-                  <Button size="sm" onClick={onInstallUpdate} disabled={installUpdatePending}>
-                    <RefreshCw className={cn("mr-1.5 h-3.5 w-3.5", installUpdatePending && "animate-spin")} />
-                    Install update{latestPin ? ` ${latestPin}` : ""}
-                  </Button>
-                ) : null}
-              </>
-            ) : null}
           </div>
         </div>
       </div>
@@ -2987,8 +3050,6 @@ export function SkillDetailPage({
             <div className="space-y-3">
               {/* Big primary action opens the agent multi-selector (PAP-10907). */}
               <AttachAgentsPopover
-                open={attachPopoverOpen}
-                onOpenChange={setAttachPopoverOpen}
                 agents={attachAgents}
                 attachedAgentIds={detail.usedByAgents.map((agent) => agent.id)}
                 versions={versions}
@@ -3028,59 +3089,112 @@ export function SkillDetailPage({
             </div>
           </section>
 
-          {/* Sharing scope only surfaces when the viewer can edit it (round 2 #3). */}
+          {/* Revision / update controls sit under Agents, above the config gear
+              (PAP-10907 F). Only GitHub-sourced skills can pull updates. */}
+          {detail.sourceType === "github" ? (
+            <section>
+              <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Updates</div>
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span className="shrink-0 uppercase tracking-wide">Pin</span>
+                  <span className="truncate font-mono text-foreground">{currentPin ?? "untracked"}</span>
+                </div>
+                <Button variant="outline" size="sm" className="w-full" onClick={onCheckUpdates} disabled={checkUpdatesPending || updateStatusLoading}>
+                  <RefreshCw className={cn("mr-1.5 h-3.5 w-3.5", (checkUpdatesPending || updateStatusLoading) && "animate-spin")} />
+                  Check for updates
+                </Button>
+                {updateStatus?.supported && updateStatus.hasUpdate ? (
+                  <Button size="sm" className="w-full" onClick={onInstallUpdate} disabled={installUpdatePending}>
+                    <ArrowUpCircle className={cn("mr-1.5 h-3.5 w-3.5", installUpdatePending && "animate-spin")} />
+                    Install update{latestPin ? ` ${latestPin}` : ""}
+                  </Button>
+                ) : updateStatus?.supported && !updateStatus.hasUpdate && !updateStatusLoading ? (
+                  <p className="text-xs text-muted-foreground">Up to date.</p>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
+
+          {/* Config lives behind a gear; sharing + danger zone open in a modal
+              (PAP-10907 A). */}
           <section>
-            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Sharing</div>
-            <div className="space-y-2">
-              {(["company", "private"] as const).map((scope) => (
-                <button
-                  key={scope}
-                  type="button"
-                  onClick={() => onUpdateSharingScope(scope)}
-                  disabled={updateSharingPending || detail.sharingScope === scope}
-                  className={cn(
-                    "flex w-full items-start gap-2 rounded-md border px-3 py-2 text-left text-sm transition-colors",
-                    detail.sharingScope === scope ? "border-foreground/50 bg-accent/40" : "border-border hover:bg-accent/30",
-                  )}
-                >
-                  {scope === "company" ? <Users className="mt-0.5 h-3.5 w-3.5" /> : <Lock className="mt-0.5 h-3.5 w-3.5" />}
-                  <span className="min-w-0">
-                    <span className="block font-medium">{scope === "company" ? "Company" : "Private"}</span>
-                    <span className="mt-0.5 block text-xs text-muted-foreground">
-                      {scope === "company" ? "Visible inside this company." : "Only visible in your library."}
-                    </span>
-                  </span>
-                </button>
-              ))}
-              <button
-                type="button"
-                disabled
-                className="flex w-full items-start gap-2 rounded-md border border-dashed border-border px-3 py-2 text-left text-sm text-muted-foreground"
-              >
-                <Globe className="mt-0.5 h-3.5 w-3.5" />
-                <span>
-                  <span className="block font-medium">Public link</span>
-                  <span className="mt-0.5 block text-xs">Coming later.</span>
-                </span>
-              </button>
-              {/* Remove lives in the sidebar and only appears when the viewer can
-                  edit (and therefore remove) the skill (PAP-10907). */}
-              {detail.editable ? (
-                <button
-                  type="button"
-                  onClick={onDelete}
-                  disabled={deletePending}
-                  title={detail.usedByAgents.length > 0 ? "Detach this skill from all agents before removing it." : undefined}
-                  className="mt-1 flex w-full items-center gap-2 rounded-md border border-destructive/40 px-3 py-2 text-left text-sm text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
-                >
-                  <Trash2 className="h-3.5 w-3.5 shrink-0" />
-                  {deletePending ? "Removing…" : "Remove skill"}
-                </button>
-              ) : null}
-            </div>
+            <button
+              type="button"
+              onClick={() => setSettingsOpen(true)}
+              className="flex w-full items-center gap-2 rounded-md border border-border px-3 py-2 text-left text-sm text-muted-foreground transition-colors hover:bg-accent/30 hover:text-foreground"
+            >
+              <Settings className="h-4 w-4 shrink-0" />
+              <span className="flex-1">Settings</span>
+            </button>
           </section>
         </aside>
       </div>
+
+      {/* Floating save bar: stays visible while a file edit is dirty so the
+          unsaved state is obvious (PAP-10907 J). */}
+      {isDirty ? (
+        <div className="fixed bottom-6 left-1/2 z-40 flex -translate-x-1/2 items-center gap-3 rounded-full border border-border bg-background/95 px-4 py-2 shadow-lg backdrop-blur">
+          <span className="text-sm text-muted-foreground">Unsaved changes</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setDraft(savedFileContent);
+              setEditMode(false);
+            }}
+            disabled={savePending}
+          >
+            Discard
+          </Button>
+          <Button size="sm" onClick={onSave} disabled={savePending}>
+            <Save className="mr-1.5 h-3.5 w-3.5" />
+            {savePending ? "Saving…" : "Save changes"}
+          </Button>
+        </div>
+      ) : null}
+
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Skill settings</DialogTitle>
+            <DialogDescription>Manage how {detail.name} is shared.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-5">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Sharing</label>
+              <select
+                value={detail.sharingScope === "public_link" ? "company" : detail.sharingScope}
+                onChange={(event) => onUpdateSharingScope(event.target.value as Exclude<CompanySkillSharingScope, "public_link">)}
+                disabled={updateSharingPending}
+                className="h-9 w-full rounded-md border border-border bg-background px-2 text-sm text-foreground"
+              >
+                <option value="company">Company — visible inside this company</option>
+                <option value="private">Private — only visible in your library</option>
+              </select>
+              <p className="text-xs text-muted-foreground">Public link sharing is coming later.</p>
+            </div>
+            {detail.editable ? (
+              <div className="rounded-md border border-destructive/40 p-3">
+                <div className="text-xs font-semibold uppercase tracking-wide text-destructive">Danger zone</div>
+                <div className="mt-2 flex items-center justify-between gap-3">
+                  <p className="min-w-0 text-xs text-muted-foreground">Remove this skill from the company library.</p>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    className="shrink-0"
+                    onClick={onDelete}
+                    disabled={deletePending}
+                    title={detail.usedByAgents.length > 0 ? "Detach this skill from all agents before removing it." : undefined}
+                  >
+                    <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                    {deletePending ? "Removing…" : "Remove"}
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -3107,8 +3221,6 @@ function SkillPane({
   onSave,
   savePending,
   attachAgents,
-  attachPopoverOpen,
-  setAttachPopoverOpen,
   versions,
   onSubmitAttach,
   attachPending,
@@ -3134,8 +3246,6 @@ function SkillPane({
   onSave: () => void;
   savePending: boolean;
   attachAgents: AttachAgentOption[];
-  attachPopoverOpen: boolean;
-  setAttachPopoverOpen: (open: boolean) => void;
   versions: CompanySkillVersion[];
   onSubmitAttach: (ids: string[], versionId: string | null) => void;
   attachPending: boolean;
@@ -3299,8 +3409,6 @@ function SkillPane({
             <div className="flex items-center gap-2">
               <span className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Used by</span>
               <AttachAgentsPopover
-                open={attachPopoverOpen}
-                onOpenChange={setAttachPopoverOpen}
                 agents={attachAgents}
                 attachedAgentIds={usedBy.map((agent) => agent.id)}
                 versions={versions}
@@ -3441,7 +3549,6 @@ export function CompanySkills() {
     defaultAction: "install" | "update" | "replace";
     error: string | null;
   }>({ open: false, catalogSkill: null, conflict: null, defaultSlug: null, defaultForce: false, defaultAction: "install", error: null });
-  const [attachPopoverOpen, setAttachPopoverOpen] = useState(false);
   const [discoverySearch, setDiscoverySearch] = useState("");
   const [discoverySort, setDiscoverySort] = useState<DiscoverySort>("agents");
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
@@ -4013,7 +4120,6 @@ export function CompanySkills() {
     );
     const affected = new Set<string>([...toAdd, ...toRemove, ...toUpdateVersion]);
     if (affected.size === 0) {
-      setAttachPopoverOpen(false);
       return;
     }
     try {
@@ -4027,7 +4133,6 @@ export function CompanySkills() {
         await attachAgentsMutation.mutateAsync({ agentId, desiredSkills: currentEntries });
       }
       pushToast({ tone: "success", title: "Agents updated", body: `${nextAgentIds.length} agent(s) attached.` });
-      setAttachPopoverOpen(false);
     } catch (error) {
       pushToast({ tone: "error", title: "Update failed", body: error instanceof Error ? error.message : "Failed to update agent skills." });
     }
@@ -4345,8 +4450,6 @@ export function CompanySkills() {
           versions={versionsQuery.data ?? []}
           versionsLoading={versionsQuery.isLoading}
           attachAgents={eligibleAgentsForAttach}
-          attachPopoverOpen={attachPopoverOpen}
-          setAttachPopoverOpen={setAttachPopoverOpen}
           onSubmitAttach={handleAttachSubmit}
           attachPending={attachAgentsMutation.isPending}
           expandedDirs={expandedDirs[selectedSkillId] ?? new Set<string>()}
@@ -4548,8 +4651,6 @@ export function CompanySkills() {
                 onSave={() => saveFile.mutate()}
                 savePending={saveFile.isPending}
                 attachAgents={eligibleAgentsForAttach}
-                attachPopoverOpen={attachPopoverOpen}
-                setAttachPopoverOpen={setAttachPopoverOpen}
                 versions={versionsQuery.data ?? []}
                 onSubmitAttach={handleAttachSubmit}
                 attachPending={attachAgentsMutation.isPending}
