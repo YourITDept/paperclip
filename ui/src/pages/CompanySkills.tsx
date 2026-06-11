@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState, type SVGProps } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "@/lib/router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
+  AgentDesiredSkillEntry,
   Agent,
   CatalogSkill,
   CatalogSkillFileDetail,
+  CompanySkillComment,
   CompanySkillCompatibility,
   CompanySkillCreateRequest,
   CompanySkillDetail,
@@ -15,6 +17,7 @@ import type {
   CompanySkillSourceBadge,
   CompanySkillTrustLevel,
   CompanySkillUpdateStatus,
+  CompanySkillVersion,
 } from "@paperclipai/shared";
 import { companySkillsApi } from "../api/companySkills";
 import { agentsApi } from "../api/agents";
@@ -55,7 +58,8 @@ import {
 } from "@/components/ui/popover";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { cn } from "../lib/utils";
+import { buildLineDiff, type DiffRow } from "../lib/line-diff";
+import { cn, relativeTime } from "../lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -81,6 +85,7 @@ import {
   LayoutGrid,
   Link2,
   Lock,
+  MessageSquare,
   ExternalLink,
   Paperclip,
   Pencil,
@@ -93,6 +98,7 @@ import {
   Star,
   Trash2,
   Users,
+  History,
   XOctagon,
 } from "lucide-react";
 
@@ -1648,6 +1654,8 @@ function AttachAgentsPopover({
   onOpenChange,
   agents,
   attachedAgentIds,
+  versions,
+  selectedVersionId,
   pending,
   onSubmit,
 }: {
@@ -1655,21 +1663,26 @@ function AttachAgentsPopover({
   onOpenChange: (open: boolean) => void;
   agents: Array<{ id: string; name: string; adapterType: string; supportsSkills: boolean; required: boolean }>;
   attachedAgentIds: string[];
+  versions: CompanySkillVersion[];
+  selectedVersionId: string | null;
   pending: boolean;
-  onSubmit: (nextIds: string[]) => void;
+  onSubmit: (nextIds: string[], versionId: string | null) => void;
 }) {
   const [filter, setFilter] = useState("");
   const [draft, setDraft] = useState<Set<string>>(new Set(attachedAgentIds));
+  const [draftVersionId, setDraftVersionId] = useState<string | null>(selectedVersionId);
 
   useEffect(() => {
     if (open) {
       setDraft(new Set(attachedAgentIds));
+      setDraftVersionId(selectedVersionId);
       setFilter("");
     }
-  }, [open, attachedAgentIds]);
+  }, [open, attachedAgentIds, selectedVersionId]);
 
   const filtered = agents.filter((agent) => agent.name.toLowerCase().includes(filter.toLowerCase()));
   const eligible = agents.filter((agent) => agent.supportsSkills);
+  const sortedVersions = [...versions].sort((a, b) => b.revisionNumber - a.revisionNumber);
 
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
@@ -1691,6 +1704,23 @@ function AttachAgentsPopover({
             placeholder="Filter agents"
             className="h-8"
           />
+          {sortedVersions.length > 0 ? (
+            <div className="mt-2 flex items-center gap-2 text-xs">
+              <span className="shrink-0 text-muted-foreground">Version</span>
+              <select
+                value={draftVersionId ?? "__latest__"}
+                onChange={(event) => setDraftVersionId(event.target.value === "__latest__" ? null : event.target.value)}
+                className="h-8 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-xs text-foreground"
+              >
+                <option value="__latest__">Latest</option>
+                {sortedVersions.map((version) => (
+                  <option key={version.id} value={version.id}>
+                    v{version.revisionNumber}{version.label ? ` · ${version.label}` : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
         </div>
         {eligible.length === 0 ? (
           <div className="px-3 py-4 text-sm text-muted-foreground">
@@ -1741,7 +1771,7 @@ function AttachAgentsPopover({
           <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)} disabled={pending}>
             Cancel
           </Button>
-          <Button size="sm" onClick={() => onSubmit(Array.from(draft))} disabled={pending}>
+          <Button size="sm" onClick={() => onSubmit(Array.from(draft), draftVersionId)} disabled={pending}>
             {pending ? "Saving…" : "Save"}
           </Button>
         </div>
@@ -1965,6 +1995,666 @@ function SkillList({
   );
 }
 
+type SkillDetailTab = "overview" | "files" | "versions" | "comments" | "agents";
+
+const SKILL_DETAIL_TABS: Array<{ value: SkillDetailTab; label: string; icon: typeof FileText }> = [
+  { value: "overview", label: "Overview", icon: FileText },
+  { value: "files", label: "Files", icon: FolderOpen },
+  { value: "versions", label: "Versions", icon: History },
+  { value: "comments", label: "Comments", icon: MessageSquare },
+  { value: "agents", label: "Agents", icon: Users },
+];
+
+function currentVersionSelection(detail: CompanySkillDetail | null | undefined) {
+  const selected = detail?.usedByAgents.find((agent) => agent.versionId)?.versionId;
+  return selected ?? null;
+}
+
+function versionLabel(version: CompanySkillVersion | null | undefined) {
+  if (!version) return "Latest";
+  return `v${version.revisionNumber}${version.label ? ` · ${version.label}` : ""}`;
+}
+
+function SkillVersionDiffDialog({
+  open,
+  onOpenChange,
+  versions,
+  leftVersionId,
+  rightVersionId,
+  onLeftVersionChange,
+  onRightVersionChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  versions: CompanySkillVersion[];
+  leftVersionId: string | null;
+  rightVersionId: string | null;
+  onLeftVersionChange: (id: string | null) => void;
+  onRightVersionChange: (id: string | null) => void;
+}) {
+  const sorted = [...versions].sort((a, b) => b.revisionNumber - a.revisionNumber);
+  const left = sorted.find((version) => version.id === leftVersionId) ?? sorted[1] ?? null;
+  const right = sorted.find((version) => version.id === rightVersionId) ?? sorted[0] ?? null;
+  const allPaths = useMemo(() => {
+    const paths = new Set<string>();
+    for (const file of left?.fileInventory ?? []) paths.add(file.path);
+    for (const file of right?.fileInventory ?? []) paths.add(file.path);
+    return Array.from(paths).sort((a, b) => {
+      if (a === "SKILL.md") return -1;
+      if (b === "SKILL.md") return 1;
+      return a.localeCompare(b);
+    });
+  }, [left, right]);
+  const [selectedPath, setSelectedPath] = useState("SKILL.md");
+  const effectivePath = allPaths.includes(selectedPath) ? selectedPath : allPaths[0] ?? "SKILL.md";
+  const leftFile = left?.fileInventory.find((file) => file.path === effectivePath);
+  const rightFile = right?.fileInventory.find((file) => file.path === effectivePath);
+  const diffRows = useMemo(
+    () => buildLineDiff(leftFile?.content ?? "", rightFile?.content ?? ""),
+    [leftFile?.content, rightFile?.content],
+  );
+  const lineClassesByKind: Record<DiffRow["kind"], string> = {
+    context: "bg-transparent",
+    removed: "bg-red-500/10 text-red-100",
+    added: "bg-green-500/10 text-green-100",
+  };
+  const markerByKind: Record<DiffRow["kind"], string> = {
+    context: " ",
+    removed: "-",
+    added: "+",
+  };
+
+  useEffect(() => {
+    if (open && allPaths.length > 0 && !allPaths.includes(selectedPath)) {
+      setSelectedPath(allPaths[0]!);
+    }
+  }, [allPaths, open, selectedPath]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="flex max-h-[85vh] w-full !max-w-[90%] flex-col overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <DialogHeader className="shrink-0">
+            <DialogTitle>Diff · skill files</DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-wrap items-center gap-3 text-xs">
+            <label className="flex items-center gap-2">
+              <span className="rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 font-medium uppercase tracking-wider text-red-400">Old</span>
+              <select
+                value={left?.id ?? ""}
+                onChange={(event) => onLeftVersionChange(event.target.value || null)}
+                className="h-8 w-44 rounded-md border border-border bg-background px-2 text-xs"
+              >
+                {sorted.map((version) => (
+                  <option key={version.id} value={version.id}>{versionLabel(version)}</option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-2">
+              <span className="rounded-full border border-green-500/30 bg-green-500/10 px-2 py-0.5 font-medium uppercase tracking-wider text-green-400">New</span>
+              <select
+                value={right?.id ?? ""}
+                onChange={(event) => onRightVersionChange(event.target.value || null)}
+                className="h-8 w-44 rounded-md border border-border bg-background px-2 text-xs"
+              >
+                {sorted.map((version) => (
+                  <option key={version.id} value={version.id}>{versionLabel(version)}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
+        <div className="flex min-h-0 flex-1 gap-3">
+          <aside className="hidden w-56 shrink-0 overflow-auto border-r border-border pr-3 md:block">
+            {allPaths.map((path) => (
+              <button
+                key={path}
+                type="button"
+                onClick={() => setSelectedPath(path)}
+                className={cn(
+                  "flex w-full items-center gap-2 px-2 py-1.5 text-left font-mono text-xs text-muted-foreground hover:bg-accent/40 hover:text-foreground",
+                  effectivePath === path && "bg-accent/50 text-foreground",
+                )}
+              >
+                <FileText className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">{path}</span>
+              </button>
+            ))}
+          </aside>
+          <div className="min-w-0 flex-1 overflow-auto rounded-md border border-border text-xs">
+            {!left || !right ? (
+              <div className="p-6 text-center text-sm text-muted-foreground">Select two versions to compare.</div>
+            ) : left.id === right.id ? (
+              <div className="p-6 text-center text-sm text-muted-foreground">Both sides are the same version.</div>
+            ) : (
+              <div className="font-mono text-[12px] leading-6">
+                <div className="grid grid-cols-[56px_56px_24px_minmax(0,1fr)] border-b border-border/60 bg-muted/30 px-3 py-2 text-[11px] uppercase tracking-wide text-muted-foreground">
+                  <span>Old</span>
+                  <span>New</span>
+                  <span />
+                  <span>{effectivePath}</span>
+                </div>
+                {diffRows.map((row, index) => (
+                  <div
+                    key={`${row.kind}-${index}-${row.oldLineNumber ?? "x"}-${row.newLineNumber ?? "x"}`}
+                    className={cn("grid grid-cols-[56px_56px_24px_minmax(0,1fr)] gap-0 border-b border-border/30 px-3", lineClassesByKind[row.kind])}
+                  >
+                    <span className="select-none border-r border-border/30 pr-3 text-right text-muted-foreground">{row.oldLineNumber ?? ""}</span>
+                    <span className="select-none border-r border-border/30 px-3 text-right text-muted-foreground">{row.newLineNumber ?? ""}</span>
+                    <span className="select-none px-3 text-center text-muted-foreground">{markerByKind[row.kind]}</span>
+                    <pre className="overflow-x-auto whitespace-pre-wrap break-words px-3 py-0 text-inherit">{row.text.length > 0 ? row.text : " "}</pre>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function SkillDetailPage({
+  detail,
+  loading,
+  activeTab,
+  onTabChange,
+  selectedPath,
+  file,
+  fileLoading,
+  viewMode,
+  editMode,
+  draft,
+  setViewMode,
+  setEditMode,
+  setDraft,
+  onSave,
+  savePending,
+  versions,
+  versionsLoading,
+  comments,
+  commentsLoading,
+  commentDraft,
+  setCommentDraft,
+  onCreateComment,
+  createCommentPending,
+  relatedSkills,
+  attachAgents,
+  attachPopoverOpen,
+  setAttachPopoverOpen,
+  onSubmitAttach,
+  attachPending,
+  expandedDirs,
+  onToggleDir,
+  onSelectPath,
+  updateStatus,
+  updateStatusLoading,
+  onCheckUpdates,
+  checkUpdatesPending,
+  onInstallUpdate,
+  installUpdatePending,
+  onDelete,
+  deletePending,
+}: {
+  detail: CompanySkillDetail | null | undefined;
+  loading: boolean;
+  activeTab: SkillDetailTab;
+  onTabChange: (tab: SkillDetailTab) => void;
+  selectedPath: string;
+  file: CompanySkillFileDetail | null | undefined;
+  fileLoading: boolean;
+  viewMode: "preview" | "code";
+  editMode: boolean;
+  draft: string;
+  setViewMode: (mode: "preview" | "code") => void;
+  setEditMode: (value: boolean) => void;
+  setDraft: (value: string) => void;
+  onSave: () => void;
+  savePending: boolean;
+  versions: CompanySkillVersion[];
+  versionsLoading: boolean;
+  comments: CompanySkillComment[];
+  commentsLoading: boolean;
+  commentDraft: string;
+  setCommentDraft: (value: string) => void;
+  onCreateComment: () => void;
+  createCommentPending: boolean;
+  relatedSkills: CompanySkillListItem[];
+  attachAgents: Array<{ id: string; name: string; adapterType: string; supportsSkills: boolean; required: boolean }>;
+  attachPopoverOpen: boolean;
+  setAttachPopoverOpen: (open: boolean) => void;
+  onSubmitAttach: (ids: string[], versionId: string | null) => void;
+  attachPending: boolean;
+  expandedDirs: Set<string>;
+  onToggleDir: (path: string) => void;
+  onSelectPath: (path: string) => void;
+  updateStatus: CompanySkillUpdateStatus | null | undefined;
+  updateStatusLoading: boolean;
+  onCheckUpdates: () => void;
+  checkUpdatesPending: boolean;
+  onInstallUpdate: () => void;
+  installUpdatePending: boolean;
+  onDelete: () => void;
+  deletePending: boolean;
+}) {
+  const [diffOpen, setDiffOpen] = useState(false);
+  const sortedVersions = [...versions].sort((a, b) => b.revisionNumber - a.revisionNumber);
+  const [leftVersionId, setLeftVersionId] = useState<string | null>(null);
+  const [rightVersionId, setRightVersionId] = useState<string | null>(null);
+
+  if (!detail) {
+    return loading ? <PageSkeleton variant="detail" /> : <EmptyState icon={Boxes} message="Skill not found." />;
+  }
+
+  const skill = detail;
+  const source = sourceMeta(skill.sourceBadge, skill.sourceLabel);
+  const SourceIcon = source.icon;
+  const body = file?.markdown ? stripFrontmatter(file.content) : file?.content ?? "";
+  const currentPin = shortRef(skill.sourceRef);
+  const latestPin = shortRef(updateStatus?.latestRef);
+  const selectedVersion = versions.find((version) => version.id === currentVersionSelection(skill)) ?? null;
+
+  function renderFilesBody() {
+    return (
+      <div className="grid min-h-[560px] gap-0 lg:grid-cols-[18rem_minmax(0,1fr)]">
+        <aside className="border-b border-border pb-3 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-3">
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Files</div>
+          <SkillTree
+            nodes={buildTree(skill.fileInventory)}
+            skillId={skill.id}
+            selectedPath={selectedPath}
+            expandedDirs={expandedDirs}
+            onToggleDir={onToggleDir}
+            onSelectPath={onSelectPath}
+          />
+        </aside>
+        <section className="min-w-0 lg:pl-5">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
+            <div className="min-w-0 truncate font-mono text-sm">{file?.path ?? selectedPath}</div>
+            <div className="flex items-center gap-2">
+              {file?.markdown && !editMode ? (
+                <div className="flex items-center border border-border">
+                  <button
+                    className={cn("px-3 py-1.5 text-sm", viewMode === "preview" ? "text-foreground" : "text-muted-foreground")}
+                    onClick={() => setViewMode("preview")}
+                  >
+                    <span className="flex items-center gap-1.5"><Eye className="h-3.5 w-3.5" /> View</span>
+                  </button>
+                  <button
+                    className={cn("border-l border-border px-3 py-1.5 text-sm", viewMode === "code" ? "text-foreground" : "text-muted-foreground")}
+                    onClick={() => setViewMode("code")}
+                  >
+                    <span className="flex items-center gap-1.5"><Code2 className="h-3.5 w-3.5" /> Code</span>
+                  </button>
+                </div>
+              ) : null}
+              {skill.editable && file?.editable ? (
+                editMode ? (
+                  <>
+                    <Button variant="ghost" size="sm" onClick={() => setEditMode(false)} disabled={savePending}>Cancel</Button>
+                    <Button size="sm" onClick={onSave} disabled={savePending}>
+                      <Save className="mr-1.5 h-3.5 w-3.5" />
+                      {savePending ? "Saving..." : "Save"}
+                    </Button>
+                  </>
+                ) : (
+                  <Button variant="ghost" size="sm" onClick={() => setEditMode(true)}>
+                    <Pencil className="mr-1.5 h-3.5 w-3.5" /> Edit
+                  </Button>
+                )
+              ) : null}
+            </div>
+          </div>
+          {fileLoading ? (
+            <PageSkeleton variant="detail" />
+          ) : !file ? (
+            <div className="text-sm text-muted-foreground">Select a file to inspect.</div>
+          ) : editMode && file.editable ? (
+            file.markdown ? (
+              <MarkdownEditor value={draft} onChange={setDraft} bordered={false} className="min-h-[520px]" />
+            ) : (
+              <Textarea
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                className="min-h-[520px] rounded-none border-0 bg-transparent px-0 py-0 font-mono text-sm shadow-none focus-visible:ring-0"
+              />
+            )
+          ) : file.markdown && viewMode === "preview" ? (
+            <MarkdownBody softBreaks={false} linkIssueReferences={false}>{body}</MarkdownBody>
+          ) : (
+            <pre className="overflow-x-auto whitespace-pre-wrap wrap-break-word border-0 bg-transparent p-0 font-mono text-sm text-foreground">
+              <code>{file.content}</code>
+            </pre>
+          )}
+        </section>
+      </div>
+    );
+  }
+
+  function renderOverviewBody() {
+    return (
+      <div className="space-y-6">
+        <section>
+          <h2 className="mb-2 text-sm font-medium">About</h2>
+          {fileLoading ? (
+            <PageSkeleton variant="detail" />
+          ) : file?.markdown ? (
+            <MarkdownBody softBreaks={false} linkIssueReferences={false}>{body || skill.description || "No overview yet."}</MarkdownBody>
+          ) : (
+            <p className="text-sm text-muted-foreground">{skill.description ?? "No overview yet."}</p>
+          )}
+        </section>
+        <section className="grid gap-3 text-sm sm:grid-cols-2">
+          <div className="border-b border-border py-2">
+            <div className="text-xs text-muted-foreground">Key</div>
+            <div className="mt-1 truncate font-mono">{skill.key}</div>
+          </div>
+          <div className="border-b border-border py-2">
+            <div className="text-xs text-muted-foreground">Source</div>
+            <div className="mt-1 truncate">{skill.sourcePath ?? source.label}</div>
+          </div>
+          <div className="border-b border-border py-2">
+            <div className="text-xs text-muted-foreground">Version</div>
+            <div className="mt-1">{versionLabel(skill.currentVersion ?? null)}</div>
+          </div>
+          <div className="border-b border-border py-2">
+            <div className="text-xs text-muted-foreground">Mode</div>
+            <div className="mt-1">{skill.editable ? "Editable" : skill.editableReason ?? "Read only"}</div>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  function renderVersionsBody() {
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-sm text-muted-foreground">
+            {versionsLoading ? "Loading versions..." : `${versions.length} ${versions.length === 1 ? "version" : "versions"}`}
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setLeftVersionId(sortedVersions[1]?.id ?? sortedVersions[0]?.id ?? null);
+              setRightVersionId(sortedVersions[0]?.id ?? null);
+              setDiffOpen(true);
+            }}
+            disabled={sortedVersions.length < 2}
+          >
+            <History className="mr-1.5 h-3.5 w-3.5" /> Compare
+          </Button>
+        </div>
+        <div className="border-y border-border">
+          {versionsLoading ? (
+            <PageSkeleton variant="list" />
+          ) : sortedVersions.length === 0 ? (
+            <div className="py-6 text-sm text-muted-foreground">No saved versions yet.</div>
+          ) : (
+            sortedVersions.map((version) => (
+              <div key={version.id} className="grid gap-2 border-b border-border px-0 py-3 text-sm last:border-b-0 sm:grid-cols-[minmax(0,1fr)_auto]">
+                <div className="min-w-0">
+                  <div className="font-medium">{versionLabel(version)}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {relativeTime(version.createdAt)} · {version.fileInventory.length} files
+                  </div>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setLeftVersionId(sortedVersions.find((candidate) => candidate.revisionNumber === version.revisionNumber - 1)?.id ?? null);
+                    setRightVersionId(version.id);
+                    setDiffOpen(true);
+                  }}
+                  disabled={sortedVersions.length < 2}
+                >
+                  View diff
+                </Button>
+              </div>
+            ))
+          )}
+        </div>
+        <SkillVersionDiffDialog
+          open={diffOpen}
+          onOpenChange={setDiffOpen}
+          versions={sortedVersions}
+          leftVersionId={leftVersionId}
+          rightVersionId={rightVersionId}
+          onLeftVersionChange={setLeftVersionId}
+          onRightVersionChange={setRightVersionId}
+        />
+      </div>
+    );
+  }
+
+  function renderCommentsBody() {
+    return (
+      <div className="space-y-4">
+        <div className="space-y-2">
+          <Textarea
+            value={commentDraft}
+            onChange={(event) => setCommentDraft(event.target.value)}
+            placeholder="Add a comment"
+            className="min-h-24"
+          />
+          <div className="flex justify-end">
+            <Button size="sm" onClick={onCreateComment} disabled={createCommentPending || commentDraft.trim().length === 0}>
+              {createCommentPending ? "Posting..." : "Post comment"}
+            </Button>
+          </div>
+        </div>
+        <div className="border-y border-border">
+          {commentsLoading ? (
+            <PageSkeleton variant="list" />
+          ) : comments.length === 0 ? (
+            <div className="py-6 text-sm text-muted-foreground">No comments yet.</div>
+          ) : (
+            comments.map((comment) => (
+              <article key={comment.id} className="border-b border-border py-3 last:border-b-0">
+                <div className="mb-1 text-xs text-muted-foreground">
+                  {comment.authorAgentId ? "Agent" : comment.authorUserId ? "Board" : "System"} · {relativeTime(comment.createdAt)}
+                </div>
+                <MarkdownBody className="prose-sm" softBreaks>{comment.deletedAt ? "_Deleted comment_" : comment.body}</MarkdownBody>
+              </article>
+            ))
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  function renderAgentsBody() {
+    const attachedIds = new Set(skill.usedByAgents.map((agent) => agent.id));
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-sm text-muted-foreground">
+            {skill.usedByAgents.length} {skill.usedByAgents.length === 1 ? "agent" : "agents"} attached
+            {selectedVersion ? ` · ${versionLabel(selectedVersion)}` : " · Latest"}
+          </p>
+          <AttachAgentsPopover
+            open={attachPopoverOpen}
+            onOpenChange={setAttachPopoverOpen}
+            agents={attachAgents}
+            attachedAgentIds={skill.usedByAgents.map((agent) => agent.id)}
+            versions={versions}
+            selectedVersionId={currentVersionSelection(skill)}
+            pending={attachPending}
+            onSubmit={onSubmitAttach}
+          />
+        </div>
+        <div className="border-y border-border">
+          {attachAgents.map((agent) => (
+            <div key={agent.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-border py-3 text-sm last:border-b-0">
+              <div className="min-w-0">
+                <Identity name={agent.name} size="sm" />
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {agent.adapterType}{agent.supportsSkills ? "" : " · skills not supported"}
+                </div>
+              </div>
+              <span className={cn("text-xs", attachedIds.has(agent.id) ? "text-foreground" : "text-muted-foreground")}>
+                {attachedIds.has(agent.id) ? "Attached" : "Not attached"}
+              </span>
+            </div>
+          ))}
+          {attachAgents.length === 0 ? (
+            <div className="py-6 text-sm text-muted-foreground">No agents in this company yet.</div>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  const tabBody = activeTab === "files"
+    ? renderFilesBody()
+    : activeTab === "versions"
+      ? renderVersionsBody()
+      : activeTab === "comments"
+        ? renderCommentsBody()
+        : activeTab === "agents"
+          ? renderAgentsBody()
+          : renderOverviewBody();
+
+  return (
+    <div className="min-h-[calc(100vh-12rem)]">
+      <div className="border-b border-border px-4 py-5">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex min-w-0 items-center gap-3">
+              <SkillCardIcon
+                card={{
+                  key: detail.key,
+                  skillId: detail.id,
+                  catalogRef: null,
+                  name: detail.name,
+                  slug: detail.slug,
+                  author: detail.authorName ?? source.label,
+                  version: null,
+                  description: detail.description,
+                  categories: detail.categories,
+                  iconUrl: detail.iconUrl,
+                  color: detail.color,
+                  starCount: detail.starCount,
+                  agentCount: detail.attachedAgentCount,
+                  forkCount: detail.forkCount,
+                  installed: true,
+                  required: false,
+                  forkedFrom: Boolean(detail.forkedFromSkillId),
+                  updatedAt: new Date(detail.updatedAt).getTime() || 0,
+                }}
+                size={44}
+              />
+              <div className="min-w-0">
+                <h1 className="truncate text-2xl font-semibold">{detail.name}</h1>
+                <p className="mt-1 flex min-w-0 flex-wrap items-center gap-2 text-sm text-muted-foreground">
+                  <SourceIcon className="h-3.5 w-3.5" />
+                  <span className="truncate">{detail.tagline ?? detail.description ?? source.label}</span>
+                </p>
+              </div>
+            </div>
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <TrustChip level={detail.trustLevel} />
+              <CompatChip compatibility={detail.compatibility} />
+              {detail.categories.slice(0, 4).map((category) => (
+                <SkillCategoryChip key={category} label={category} />
+              ))}
+              {detail.sourceType === "github" ? (
+                <span className="text-xs text-muted-foreground">
+                  {currentPin ? `Source ${currentPin}` : "Untracked source"}
+                </span>
+              ) : null}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {detail.sourceType === "github" ? (
+              <>
+                <Button variant="ghost" size="sm" onClick={onCheckUpdates} disabled={checkUpdatesPending || updateStatusLoading}>
+                  <RefreshCw className={cn("mr-1.5 h-3.5 w-3.5", (checkUpdatesPending || updateStatusLoading) && "animate-spin")} />
+                  Check updates
+                </Button>
+                {updateStatus?.supported && updateStatus.hasUpdate ? (
+                  <Button size="sm" onClick={onInstallUpdate} disabled={installUpdatePending}>
+                    <RefreshCw className={cn("mr-1.5 h-3.5 w-3.5", installUpdatePending && "animate-spin")} />
+                    Install update{latestPin ? ` ${latestPin}` : ""}
+                  </Button>
+                ) : null}
+              </>
+            ) : null}
+            <Button variant="ghost" size="sm" onClick={onDelete} disabled={deletePending} title={detail.usedByAgents.length > 0 ? "Detach this skill from all agents before removing it." : undefined}>
+              <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+              {deletePending ? "Removing..." : "Remove"}
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid gap-6 px-4 py-4 xl:grid-cols-[minmax(0,1fr)_18rem]">
+        <main className="min-w-0">
+          <Tabs value={activeTab} onValueChange={(value) => onTabChange(value as SkillDetailTab)}>
+            <TabsList variant="line" className="mb-5 p-0">
+              {SKILL_DETAIL_TABS.map((tab) => {
+                const Icon = tab.icon;
+                return (
+                  <TabsTrigger key={tab.value} value={tab.value} className="px-3">
+                    <Icon className="mr-1.5 h-3.5 w-3.5" />
+                    {tab.label}
+                    {tab.value === "comments" ? <span className="ml-1.5 text-[11px] text-muted-foreground">{comments.length}</span> : null}
+                  </TabsTrigger>
+                );
+              })}
+            </TabsList>
+          </Tabs>
+          {tabBody}
+        </main>
+
+        <aside className="space-y-6 border-t border-border pt-4 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-0">
+          <section>
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Attach to agent</div>
+            <div className="space-y-2">
+              <div className="text-sm">
+                {detail.usedByAgents.length === 0 ? "No agents attached" : `${detail.usedByAgents.length} attached`}
+              </div>
+              <div className="text-xs text-muted-foreground">{selectedVersion ? versionLabel(selectedVersion) : "Latest"}</div>
+              <AttachAgentsPopover
+                open={attachPopoverOpen}
+                onOpenChange={setAttachPopoverOpen}
+                agents={attachAgents}
+                attachedAgentIds={detail.usedByAgents.map((agent) => agent.id)}
+                versions={versions}
+                selectedVersionId={currentVersionSelection(detail)}
+                pending={attachPending}
+                onSubmit={onSubmitAttach}
+              />
+            </div>
+          </section>
+
+          <section>
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Related skills</div>
+            {relatedSkills.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No related skills yet.</p>
+            ) : (
+              <div className="space-y-1">
+                {relatedSkills.map((skill) => (
+                  <Link
+                    key={skill.id}
+                    to={skillRoute(skill.id)}
+                    className="block rounded-md px-2 py-1.5 text-sm text-muted-foreground no-underline hover:bg-accent/40 hover:text-foreground"
+                  >
+                    <span className="block truncate font-medium">{skill.name}</span>
+                    <span className="block truncate text-xs">{skill.tagline ?? skill.description ?? skill.sourceLabel}</span>
+                  </Link>
+                ))}
+              </div>
+            )}
+          </section>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
 function SkillPane({
   loading,
   detail,
@@ -1989,6 +2679,7 @@ function SkillPane({
   attachAgents,
   attachPopoverOpen,
   setAttachPopoverOpen,
+  versions,
   onSubmitAttach,
   attachPending,
 }: {
@@ -2015,7 +2706,8 @@ function SkillPane({
   attachAgents: Array<{ id: string; name: string; adapterType: string; supportsSkills: boolean; required: boolean }>;
   attachPopoverOpen: boolean;
   setAttachPopoverOpen: (open: boolean) => void;
-  onSubmitAttach: (ids: string[]) => void;
+  versions: CompanySkillVersion[];
+  onSubmitAttach: (ids: string[], versionId: string | null) => void;
   attachPending: boolean;
 }) {
   if (!detail) {
@@ -2181,6 +2873,8 @@ function SkillPane({
                 onOpenChange={setAttachPopoverOpen}
                 agents={attachAgents}
                 attachedAgentIds={usedBy.map((agent) => agent.id)}
+                versions={versions}
+                selectedVersionId={usedBy.find((agent) => agent.versionId)?.versionId ?? null}
                 pending={attachPending}
                 onSubmit={onSubmitAttach}
               />
@@ -2297,6 +2991,7 @@ export function CompanySkills() {
   const [viewMode, setViewMode] = useState<"preview" | "code">("preview");
   const [editMode, setEditMode] = useState(false);
   const [draft, setDraft] = useState("");
+  const [commentDraft, setCommentDraft] = useState("");
   const [displayedDetail, setDisplayedDetail] = useState<CompanySkillDetail | null>(null);
   const [displayedFile, setDisplayedFile] = useState<CompanySkillFileDetail | null>(null);
   const [scanStatusMessage, setScanStatusMessage] = useState<string | null>(null);
@@ -2337,6 +3032,11 @@ export function CompanySkills() {
   const discoveryTab: DiscoveryTab = DISCOVERY_TABS.includes(tabParam as DiscoveryTab)
     ? (tabParam as DiscoveryTab)
     : "all";
+  const detailTab: SkillDetailTab = (["overview", "files", "versions", "comments", "agents"] as SkillDetailTab[]).includes(tabParam as SkillDetailTab)
+    ? (tabParam as SkillDetailTab)
+    : selectedPath !== "SKILL.md"
+      ? "files"
+      : "overview";
   const discoveryCategory = searchParams.get("category");
   // Discovery grid owns `/skills` whenever no specific skill or catalog entry is
   // selected; selecting either drops into the existing master/detail surfaces.
@@ -2348,6 +3048,15 @@ export function CompanySkills() {
       if (tab === "all") params.delete("tab");
       else params.set("tab", tab);
       params.delete("category");
+      return params;
+    });
+  }
+
+  function setDetailTab(tab: SkillDetailTab) {
+    setSearchParams((current) => {
+      const params = new URLSearchParams(current);
+      if (tab === "overview") params.delete("tab");
+      else params.set("tab", tab);
       return params;
     });
   }
@@ -2416,6 +3125,18 @@ export function CompanySkills() {
     queryKey: queryKeys.companySkills.file(selectedCompanyId ?? "", selectedSkillId ?? "", selectedPath),
     queryFn: () => companySkillsApi.file(selectedCompanyId!, selectedSkillId!, selectedPath),
     enabled: Boolean(selectedCompanyId && selectedSkillId && selectedPath),
+  });
+
+  const versionsQuery = useQuery({
+    queryKey: queryKeys.companySkills.versions(selectedCompanyId ?? "", selectedSkillId ?? ""),
+    queryFn: () => companySkillsApi.versions(selectedCompanyId!, selectedSkillId!),
+    enabled: Boolean(selectedCompanyId && selectedSkillId),
+  });
+
+  const commentsQuery = useQuery({
+    queryKey: queryKeys.companySkills.comments(selectedCompanyId ?? "", selectedSkillId ?? ""),
+    queryFn: () => companySkillsApi.comments(selectedCompanyId!, selectedSkillId!),
+    enabled: Boolean(selectedCompanyId && selectedSkillId),
   });
 
   const updateStatusQuery = useQuery({
@@ -2604,6 +3325,24 @@ export function CompanySkills() {
     },
   });
 
+  const createComment = useMutation({
+    mutationFn: () => companySkillsApi.createComment(selectedCompanyId!, selectedSkillId!, { body: commentDraft.trim() }),
+    onSuccess: async () => {
+      setCommentDraft("");
+      await queryClient.invalidateQueries({
+        queryKey: queryKeys.companySkills.comments(selectedCompanyId!, selectedSkillId!),
+      });
+      pushToast({ tone: "success", title: "Comment posted" });
+    },
+    onError: (error) => {
+      pushToast({
+        tone: "error",
+        title: "Comment failed",
+        body: error instanceof Error ? error.message : "Failed to post comment.",
+      });
+    },
+  });
+
   const installUpdate = useMutation({
     mutationFn: () => companySkillsApi.installUpdate(selectedCompanyId!, selectedSkillId!),
     onSuccess: async (skill) => {
@@ -2734,6 +3473,21 @@ export function CompanySkills() {
     }
     return counts;
   }, [installedSkills]);
+  const relatedSkills = useMemo(() => {
+    if (!activeDetail) return [];
+    const categorySet = new Set(activeDetail.categories);
+    return installedSkills
+      .filter((skill) => skill.id !== activeDetail.id)
+      .map((skill) => {
+        const sharedCategories = skill.categories.filter((category) => categorySet.has(category)).length;
+        const sameSource = skill.sourceBadge === activeDetail.sourceBadge ? 1 : 0;
+        return { skill, score: sharedCategories * 3 + sameSource };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name))
+      .slice(0, 5)
+      .map((entry) => entry.skill);
+  }, [activeDetail, installedSkills]);
 
   const installCatalog = useMutation({
     mutationFn: (payload: { catalogSkillId: string; slug: string | null; force: boolean }) =>
@@ -2787,18 +3541,19 @@ export function CompanySkills() {
   }, [agentsQuery.data, adapterCaps, activeDetail]);
 
   const attachAgentsMutation = useMutation({
-    mutationFn: async (input: { agentId: string; desiredSkills: string[] }) => {
+    mutationFn: async (input: { agentId: string; desiredSkills: Array<string | AgentDesiredSkillEntry> }) => {
       return agentsApi.syncSkills(input.agentId, input.desiredSkills, selectedCompanyId ?? undefined);
     },
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.detail(selectedCompanyId!, selectedSkillId ?? "") }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.versions(selectedCompanyId!, selectedSkillId ?? "") }),
       ]);
     },
   });
 
-  async function handleAttachSubmit(nextAgentIds: string[]) {
+  async function handleAttachSubmit(nextAgentIds: string[], versionId: string | null = null) {
     if (!activeDetail) return;
     const skillKey = activeDetail.key;
     const targetSet = new Set(nextAgentIds);
@@ -2814,10 +3569,12 @@ export function CompanySkills() {
     try {
       for (const agentId of affected) {
         const snapshot = await agentsApi.skills(agentId, selectedCompanyId ?? undefined);
-        const current = new Set(snapshot.desiredSkills ?? []);
-        if (targetSet.has(agentId)) current.add(skillKey);
-        else current.delete(skillKey);
-        await attachAgentsMutation.mutateAsync({ agentId, desiredSkills: Array.from(current) });
+        const currentEntries: AgentDesiredSkillEntry[] = (snapshot.desiredSkillEntries ?? snapshot.desiredSkills.map((key) => ({ key, versionId: null })))
+          .filter((entry) => entry.key !== skillKey);
+        if (targetSet.has(agentId)) {
+          currentEntries.push({ key: skillKey, versionId });
+        }
+        await attachAgentsMutation.mutateAsync({ agentId, desiredSkills: currentEntries });
       }
       pushToast({ tone: "success", title: "Agents updated", body: `${nextAgentIds.length} agent(s) attached.` });
       setAttachPopoverOpen(false);
@@ -3114,6 +3871,61 @@ export function CompanySkills() {
           scanPending={scanProjects.isPending}
           scanStatus={scanStatusMessage}
         />
+      ) : activeView === "installed" && selectedSkillId ? (
+        <SkillDetailPage
+          detail={activeDetail}
+          loading={skillsQuery.isLoading || detailQuery.isLoading}
+          activeTab={detailTab}
+          onTabChange={setDetailTab}
+          selectedPath={selectedPath}
+          file={activeFile}
+          fileLoading={fileQuery.isLoading && !activeFile}
+          viewMode={viewMode}
+          editMode={editMode}
+          draft={draft}
+          setViewMode={setViewMode}
+          setEditMode={setEditMode}
+          setDraft={setDraft}
+          onSave={() => saveFile.mutate()}
+          savePending={saveFile.isPending}
+          versions={versionsQuery.data ?? []}
+          versionsLoading={versionsQuery.isLoading}
+          comments={commentsQuery.data ?? []}
+          commentsLoading={commentsQuery.isLoading}
+          commentDraft={commentDraft}
+          setCommentDraft={setCommentDraft}
+          onCreateComment={() => createComment.mutate()}
+          createCommentPending={createComment.isPending}
+          relatedSkills={relatedSkills}
+          attachAgents={eligibleAgentsForAttach}
+          attachPopoverOpen={attachPopoverOpen}
+          setAttachPopoverOpen={setAttachPopoverOpen}
+          onSubmitAttach={handleAttachSubmit}
+          attachPending={attachAgentsMutation.isPending}
+          expandedDirs={expandedDirs[selectedSkillId] ?? new Set<string>()}
+          onToggleDir={(path) => {
+            setExpandedDirs((current) => {
+              const next = new Set(current[selectedSkillId] ?? []);
+              if (next.has(path)) next.delete(path);
+              else next.add(path);
+              return { ...current, [selectedSkillId]: next };
+            });
+          }}
+          onSelectPath={(path) => {
+            setDetailTab("files");
+            navigate(skillRoute(selectedSkillId, path));
+          }}
+          updateStatus={updateStatusQuery.data}
+          updateStatusLoading={updateStatusQuery.isLoading}
+          onCheckUpdates={() => {
+            void updateStatusQuery.refetch();
+          }}
+          checkUpdatesPending={updateStatusQuery.isFetching}
+          onInstallUpdate={() => installUpdate.mutate()}
+          installUpdatePending={installUpdate.isPending}
+          onDelete={openDeleteDialog}
+          deletePending={deleteSkill.isPending}
+        />
       ) : (
       <div className="flex min-h-[calc(100vh-12rem)] flex-col">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 pt-3 pb-[5px]">
@@ -3294,6 +4106,7 @@ export function CompanySkills() {
                 attachAgents={eligibleAgentsForAttach}
                 attachPopoverOpen={attachPopoverOpen}
                 setAttachPopoverOpen={setAttachPopoverOpen}
+                versions={versionsQuery.data ?? []}
                 onSubmitAttach={handleAttachSubmit}
                 attachPending={attachAgentsMutation.isPending}
               />
