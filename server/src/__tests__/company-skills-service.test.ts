@@ -143,6 +143,169 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     });
   });
 
+  it("filters store list results by category and creates version snapshots", async () => {
+    const companyId = randomUUID();
+    const skillId = randomUUID();
+    const skillDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-versioned-skill-"));
+    cleanupDirs.add(skillDir);
+    await fs.writeFile(path.join(skillDir, "SKILL.md"), "---\nname: Versioned Skill\ncategories:\n  - Memory\n---\n\n# Versioned Skill\n", "utf8");
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(companySkills).values({
+      id: skillId,
+      companyId,
+      key: `company/${companyId}/versioned-skill`,
+      slug: "versioned-skill",
+      name: "Versioned Skill",
+      description: "Tracks revisions.",
+      markdown: "# Versioned Skill",
+      sourceType: "local_path",
+      sourceLocator: skillDir,
+      trustLevel: "markdown_only",
+      compatibility: "compatible",
+      fileInventory: [{ path: "SKILL.md", kind: "skill" }],
+      categories: ["memory"],
+      tagline: "Tracks revisions",
+    });
+
+    const filtered = await svc.list(companyId, { categories: ["memory"], sort: "recent" });
+    expect(filtered.some((skill) => skill.id === skillId)).toBe(true);
+    expect(filtered.find((skill) => skill.id === skillId)).toMatchObject({
+      categories: ["memory"],
+      tagline: "Tracks revisions",
+    });
+
+    const version = await svc.createVersion(companyId, skillId, { label: "v1" }, { type: "user", userId: "board" });
+    expect(version).toMatchObject({
+      companySkillId: skillId,
+      revisionNumber: 1,
+      label: "v1",
+      authorUserId: "board",
+    });
+    expect(version.fileInventory).toEqual([
+      expect.objectContaining({
+        path: "SKILL.md",
+        kind: "skill",
+        content: expect.stringContaining("# Versioned Skill"),
+      }),
+    ]);
+    await expect(svc.getVersion(companyId, skillId, version.id)).resolves.toMatchObject({ id: version.id });
+  });
+
+  it("tracks stars and skill comments with actor ownership", async () => {
+    const companyId = randomUUID();
+    const skillId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(companySkills).values({
+      id: skillId,
+      companyId,
+      key: `company/${companyId}/discussion-skill`,
+      slug: "discussion-skill",
+      name: "Discussion Skill",
+      description: null,
+      markdown: "# Discussion Skill",
+      sourceType: "local_path",
+      sourceLocator: null,
+      trustLevel: "markdown_only",
+      compatibility: "compatible",
+      fileInventory: [{ path: "SKILL.md", kind: "skill" }],
+    });
+
+    await expect(svc.starSkill(companyId, skillId, { type: "user", userId: "board" })).resolves.toMatchObject({
+      starred: true,
+      starCount: 1,
+    });
+    await expect(svc.starSkill(companyId, skillId, { type: "user", userId: "board" })).resolves.toMatchObject({
+      starred: true,
+      starCount: 1,
+    });
+    const comment = await svc.createComment(
+      companyId,
+      skillId,
+      { body: "Looks useful." },
+      { type: "user", userId: "board" },
+    );
+    expect(comment).toMatchObject({ body: "Looks useful.", authorUserId: "board" });
+    await expect(svc.updateComment(
+      companyId,
+      skillId,
+      comment.id,
+      { body: "Looks very useful." },
+      { type: "agent", agentId: randomUUID() },
+    )).rejects.toMatchObject({ status: 422 });
+    await expect(svc.deleteComment(companyId, skillId, comment.id, { type: "user", userId: "board" }))
+      .resolves.toMatchObject({ id: comment.id, deletedAt: expect.any(Date) });
+    await expect(svc.unstarSkill(companyId, skillId, { type: "user", userId: "board" })).resolves.toMatchObject({
+      starred: false,
+      starCount: 0,
+    });
+  });
+
+  it("validates version-aware desired skill selections", async () => {
+    const companyId = randomUUID();
+    const skillId = randomUUID();
+    const otherSkillId = randomUUID();
+    const skillDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pinned-skill-"));
+    cleanupDirs.add(skillDir);
+    await fs.writeFile(path.join(skillDir, "SKILL.md"), "# Pinned Skill\n", "utf8");
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(companySkills).values([
+      {
+        id: skillId,
+        companyId,
+        key: `company/${companyId}/pinned-skill`,
+        slug: "pinned-skill",
+        name: "Pinned Skill",
+        description: null,
+        markdown: "# Pinned Skill",
+        sourceType: "local_path",
+        sourceLocator: skillDir,
+        trustLevel: "markdown_only",
+        compatibility: "compatible",
+        fileInventory: [{ path: "SKILL.md", kind: "skill" }],
+      },
+      {
+        id: otherSkillId,
+        companyId,
+        key: `company/${companyId}/other-skill`,
+        slug: "other-skill",
+        name: "Other Skill",
+        description: null,
+        markdown: "# Other Skill",
+        sourceType: "local_path",
+        sourceLocator: null,
+        trustLevel: "markdown_only",
+        compatibility: "compatible",
+        fileInventory: [{ path: "SKILL.md", kind: "skill" }],
+      },
+    ]);
+    const version = await svc.createVersion(companyId, skillId, {}, { type: "user", userId: "board" });
+
+    await expect(svc.resolveRequestedSkillEntries(companyId, [
+      { key: "pinned-skill", versionId: version.id },
+    ])).resolves.toEqual([
+      { key: `company/${companyId}/pinned-skill`, versionId: version.id },
+    ]);
+    await expect(svc.resolveRequestedSkillEntries(companyId, [
+      { key: "other-skill", versionId: version.id },
+    ])).rejects.toMatchObject({ status: 422 });
+  });
+
   it("preserves missing local-path skills that active agents still desire", async () => {
     const companyId = randomUUID();
     const skillId = randomUUID();
