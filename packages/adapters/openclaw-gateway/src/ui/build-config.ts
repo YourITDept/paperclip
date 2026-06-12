@@ -64,8 +64,8 @@ export function buildOpenClawGatewayConfig(v: CreateConfigValues): Record<string
   }
 
   // Safe defaults — applied when fields are not explicitly set
-  if (!ac.timeoutSec) ac.timeoutSec = 60;
-  if (!ac.waitTimeoutMs) ac.waitTimeoutMs = 30000;
+  if (!ac.timeoutSec) ac.timeoutSec = 120;
+  if (!ac.waitTimeoutMs) ac.waitTimeoutMs = 120000;
   if (!ac.sessionKeyStrategy) ac.sessionKeyStrategy = "issue";
   if (!ac.role) ac.role = "operator";
   if (!ac.scopes) ac.scopes = ["operator.admin"];
