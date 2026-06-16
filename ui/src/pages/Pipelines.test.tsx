@@ -290,7 +290,7 @@ function itemDetail(overrides: Record<string, unknown> = {}) {
     links: [],
     blockers: [],
     blocks: [],
-    childrenSummary: { childCount: 1, terminalChildCount: 0, loadedChildren: 1 },
+    childrenSummary: { childCount: 1, terminalChildCount: 0, loadedChildren: 1, descendantActiveWorkCount: 0 },
     pendingSuggestion: null,
   };
 }
@@ -555,6 +555,65 @@ describe("PipelineItemDetailView", () => {
     });
   });
 
+  it("renders waiting children as a compact vertical list with direct live work", async () => {
+    const detail = itemDetail();
+    detail.stage = {
+      ...pipeline.stages[0],
+      config: { requireChildrenTerminal: true },
+    };
+    detail.childrenSummary = { childCount: 2, terminalChildCount: 0, loadedChildren: 2, descendantActiveWorkCount: 2 };
+
+    const { container, root } = await renderItemPage(detail, [], {
+      children: [
+        {
+          case: {
+            id: "child-live",
+            pipelineId: "pipeline-1",
+            stageId: "stage-intake",
+            title: "Implement live indicator",
+            fields: {},
+            childCount: 1,
+            terminalKind: null,
+          },
+          stage: pipeline.stages[0],
+          activeWork: {
+            issueId: "issue-live",
+            issueIdentifier: "PAP-2",
+            issueTitle: "Build the child",
+            agentId: "agent-1",
+            agentName: "CodexCoder",
+            startedAt: "2026-06-16T10:00:00.000Z",
+          },
+          descendantActiveWorkCount: 1,
+        },
+        {
+          case: {
+            id: "child-quiet",
+            pipelineId: "pipeline-1",
+            stageId: "stage-review",
+            title: "Review quiet child",
+            fields: {},
+            childCount: 0,
+            terminalKind: null,
+          },
+          stage: pipeline.stages[1],
+        },
+      ],
+      events: [],
+    });
+
+    const waitingSection = container.querySelector('section[aria-label="Waiting child items"]');
+    expect(waitingSection).not.toBeNull();
+    expect(waitingSection?.textContent).toContain("Waiting on 2 of 2 child items");
+    expect(waitingSection?.textContent).toContain("Live with CodexCoder");
+    expect(waitingSection?.textContent).toContain("1 live downstream");
+    expect(waitingSection?.querySelectorAll("li")).toHaveLength(2);
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
   it("renders built-from children from the rollup tree response shape", async () => {
     const { container, root } = await renderItemPage(itemDetail(), [], {
       children: {
@@ -601,7 +660,7 @@ describe("PipelineItemDetailView", () => {
       childCount: 0,
       pendingSuggestion: null,
     });
-    emptyDetail.childrenSummary = { childCount: 0, terminalChildCount: 0, loadedChildren: 0 };
+    emptyDetail.childrenSummary = { childCount: 0, terminalChildCount: 0, loadedChildren: 0, descendantActiveWorkCount: 0 };
     const { container, root } = await renderItemPage(emptyDetail, [], { children: [], events: [] });
 
     expect(container.textContent).not.toContain("Ready to move");
@@ -803,6 +862,25 @@ describe("PipelinesIndexTable", () => {
     });
   });
 
+  it("shows live downstream copy when descendants are actively running", () => {
+    const { container, root } = renderIndexTable({
+      pipelines: [
+        makeListPipeline({
+          id: "release",
+          name: "Release pipeline",
+          descendantActiveWorkCount: 4,
+        }),
+      ],
+      connectionsAvailable: false,
+    });
+
+    expect(container.textContent).toContain("4 live downstream");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
   it("shows an empty state when search filters out every pipeline", () => {
     const { container, root } = renderIndexTable({
       pipelines: [makeListPipeline({ id: "press", name: "Press outreach" })],
@@ -859,7 +937,9 @@ describe("pipeline board guard helpers", () => {
   });
 });
 
-async function renderPipelineBoard() {
+async function renderPipelineBoard(options: {
+  cases?: unknown[];
+} = {}) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -869,7 +949,7 @@ async function renderPipelineBoard() {
 
   mockLocationPathname.value = "/pipelines/pipeline-1";
   mockPipelinesApi.get.mockResolvedValue(pipeline);
-  mockPipelinesApi.listCases.mockResolvedValue([
+  mockPipelinesApi.listCases.mockResolvedValue(options.cases ?? [
     {
       case: {
         id: "item-1",
@@ -881,6 +961,7 @@ async function renderPipelineBoard() {
         terminalKind: null,
       },
       activeWork: null,
+      descendantActiveWorkCount: 0,
     },
   ]);
   mockPipelinesApi.getHealth.mockResolvedValue({
@@ -940,6 +1021,34 @@ describe("PipelineBoard", () => {
     const editStageLink = container.querySelector<HTMLAnchorElement>('a[aria-label="Edit Intake stage"]');
     expect(editStageLink?.getAttribute("href")).toBe("/pipelines/pipeline-1/settings?stage=stage-intake");
     expect(editStageLink?.className).toContain("group-hover/stage-header:opacity-100");
+
+    act(() => {
+      root.unmount();
+    });
+    queryClient.clear();
+  });
+
+  it("shows live downstream copy on pipeline cards", async () => {
+    const { container, root, queryClient } = await renderPipelineBoard({
+      cases: [
+        {
+          case: {
+            id: "item-live-descendants",
+            companyId: "company-1",
+            pipelineId: "pipeline-1",
+            stageId: "stage-intake",
+            title: "Release train",
+            fields: {},
+            terminalKind: null,
+          },
+          activeWork: null,
+          descendantActiveWorkCount: 3,
+        },
+      ],
+    });
+
+    expect(container.textContent).toContain("Release train");
+    expect(container.textContent).toContain("3 live downstream");
 
     act(() => {
       root.unmount();

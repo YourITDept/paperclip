@@ -577,6 +577,118 @@ export async function loadActiveWorkForCases(
   return map;
 }
 
+type DescendantActiveWorkCountRow = {
+  root_id: string;
+  count: number;
+};
+
+export async function loadDescendantActiveWorkCountsForCases(
+  db: Db,
+  companyId: string,
+  caseIds: string[],
+): Promise<Map<string, number>> {
+  const uniqueCaseIds = [...new Set(caseIds)];
+  const map = new Map<string, number>(uniqueCaseIds.map((id) => [id, 0]));
+  if (uniqueCaseIds.length === 0) return map;
+
+  const rootValues = sql.join(uniqueCaseIds.map((id) => sql`(${id}::uuid)`), sql`, `);
+  const rows = Array.from(await db.execute(sql`
+    with recursive roots(root_id) as (
+      values ${rootValues}
+    ),
+    subtree(root_id, id, depth) as (
+      select roots.root_id, roots.root_id, 0
+      from roots
+      join pipeline_cases root_case
+        on root_case.id = roots.root_id
+       and root_case.company_id = ${companyId}
+      union all
+      select subtree.root_id, child.id, subtree.depth + 1
+      from pipeline_cases child
+      join subtree on child.parent_case_id = subtree.id
+      where child.company_id = ${companyId}
+        and subtree.depth < ${CASE_CHILDREN_TREE_MAX_DEPTH}
+    )
+    select subtree.root_id, count(distinct subtree.id)::int as count
+    from subtree
+    join pipeline_case_issue_links link
+      on link.company_id = ${companyId}
+     and link.case_id = subtree.id
+     and link.role in ('work', 'automation')
+    join issues issue
+      on issue.id = link.issue_id
+     and issue.company_id = ${companyId}
+     and issue.status = 'in_progress'
+     and issue.hidden_at is null
+    join agents agent on agent.id = issue.assignee_agent_id
+    where subtree.depth > 0
+    group by subtree.root_id
+  `)) as DescendantActiveWorkCountRow[];
+
+  for (const row of rows) {
+    map.set(row.root_id, row.count);
+  }
+  return map;
+}
+
+type PipelineDescendantActiveWorkCountRow = {
+  pipeline_id: string;
+  count: number;
+};
+
+export async function loadPipelineDescendantActiveWorkCounts(
+  db: Db,
+  companyId: string,
+  pipelineIds: string[],
+): Promise<Map<string, number>> {
+  const uniquePipelineIds = [...new Set(pipelineIds)];
+  const map = new Map<string, number>(uniquePipelineIds.map((id) => [id, 0]));
+  if (uniquePipelineIds.length === 0) return map;
+
+  const pipelineValues = sql.join(uniquePipelineIds.map((id) => sql`(${id}::uuid)`), sql`, `);
+  const rows = Array.from(await db.execute(sql`
+    with recursive target_pipelines(pipeline_id) as (
+      values ${pipelineValues}
+    ),
+    roots(root_pipeline_id, root_case_id) as (
+      select target_pipelines.pipeline_id, root_case.id
+      from target_pipelines
+      join pipeline_cases root_case
+        on root_case.pipeline_id = target_pipelines.pipeline_id
+       and root_case.company_id = ${companyId}
+    ),
+    subtree(root_pipeline_id, root_case_id, id, depth) as (
+      select roots.root_pipeline_id, roots.root_case_id, roots.root_case_id, 0
+      from roots
+      union all
+      select subtree.root_pipeline_id, subtree.root_case_id, child.id, subtree.depth + 1
+      from pipeline_cases child
+      join subtree on child.parent_case_id = subtree.id
+      where child.company_id = ${companyId}
+        and subtree.depth < ${CASE_CHILDREN_TREE_MAX_DEPTH}
+    )
+    select subtree.root_pipeline_id as pipeline_id, count(distinct subtree.id)::int as count
+    from subtree
+    join pipeline_case_issue_links link
+      on link.company_id = ${companyId}
+     and link.case_id = subtree.id
+     and link.role in ('work', 'automation')
+    join issues issue
+      on issue.id = link.issue_id
+     and issue.company_id = ${companyId}
+     and issue.status = 'in_progress'
+     and issue.hidden_at is null
+    join agents agent on agent.id = issue.assignee_agent_id
+    where subtree.depth > 0
+    group by subtree.root_pipeline_id
+  `)) as PipelineDescendantActiveWorkCountRow[];
+
+  for (const row of rows) {
+    map.set(row.pipeline_id, row.count);
+  }
+  return map;
+}
+
 async function loadOpenWorkIssuesForCases(db: Db, companyId: string, caseIds: string[]) {
   const map = new Map<string, { issueId: string; issueIdentifier: string | null; title: string; status: string }>();
   if (caseIds.length === 0) return map;

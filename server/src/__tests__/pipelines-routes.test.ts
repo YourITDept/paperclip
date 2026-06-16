@@ -377,6 +377,101 @@ describeEmbeddedPostgres("pipeline routes", () => {
 
     const detail = await http.get(`/api/cases/${releaseCaseId}`).expect(200);
     expect(detail.body.childrenSummary.childCount).toBe(2);
+
+    const tree = await http.get(`/api/cases/${releaseCaseId}/children/tree`).expect(200);
+    expect(tree.body.case.id).toBe(releaseCaseId);
+    expect(tree.body.childGroups.flatMap((group: { cases: Array<{ id: string }> }) => group.cases.map((item) => item.id)).sort())
+      .toEqual([featureA.body.case.id, featureB.body.case.id].sort());
+  });
+
+  it("exposes active descendant state for pipeline lists and direct child rows", async () => {
+    const company = await seedCompany();
+    const [agent] = await db.insert(agents).values({
+      companyId: company.id,
+      name: "Live Builder",
+      role: "engineer",
+      status: "idle",
+    }).returning();
+    const http = request(app(boardActor));
+
+    const releasePipeline = await http
+      .post(`/api/companies/${company.id}/pipelines`)
+      .send({ key: "live-releases", name: "Live releases" })
+      .expect(201);
+    const featurePipeline = await http
+      .post(`/api/companies/${company.id}/pipelines`)
+      .send({ key: "live-features", name: "Live features" })
+      .expect(201);
+
+    const release = await http
+      .post(`/api/pipelines/${releasePipeline.body.id}/cases`)
+      .send({ caseKey: "launch", title: "Launch" })
+      .expect(201);
+    const child = await http
+      .post(`/api/pipelines/${featurePipeline.body.id}/cases`)
+      .send({ caseKey: "child", title: "Child work", parentCaseId: release.body.case.id })
+      .expect(201);
+    const grandchild = await http
+      .post(`/api/pipelines/${featurePipeline.body.id}/cases`)
+      .send({ caseKey: "grandchild", title: "Grandchild work", parentCaseId: child.body.case.id })
+      .expect(201);
+
+    const [childIssue, grandchildIssue] = await db.insert(issues).values([
+      {
+        companyId: company.id,
+        title: "Build child work",
+        identifier: "LIVE-CHILD",
+        status: "in_progress",
+        priority: "medium",
+        assigneeAgentId: agent!.id,
+        startedAt: new Date("2026-06-16T10:00:00Z"),
+      },
+      {
+        companyId: company.id,
+        title: "Build grandchild work",
+        identifier: "LIVE-GRANDCHILD",
+        status: "in_progress",
+        priority: "medium",
+        assigneeAgentId: agent!.id,
+        startedAt: new Date("2026-06-16T10:05:00Z"),
+      },
+    ]).returning();
+    await http
+      .post(`/api/cases/${child.body.case.id}/issue-links`)
+      .send({ issueId: childIssue!.id, role: "work" })
+      .expect(201);
+    await http
+      .post(`/api/cases/${grandchild.body.case.id}/issue-links`)
+      .send({ issueId: grandchildIssue!.id, role: "automation" })
+      .expect(201);
+
+    const pipelinesList = await http.get(`/api/companies/${company.id}/pipelines`).expect(200);
+    const releaseRow = pipelinesList.body.find((row: { id: string }) => row.id === releasePipeline.body.id);
+    const featureRow = pipelinesList.body.find((row: { id: string }) => row.id === featurePipeline.body.id);
+    expect(releaseRow).toMatchObject({
+      descendantActiveWorkCount: 2,
+    });
+    expect(featureRow).toMatchObject({
+      descendantActiveWorkCount: 1,
+    });
+
+    const releaseDetail = await http.get(`/api/cases/${release.body.case.id}`).expect(200);
+    expect(releaseDetail.body.childrenSummary.descendantActiveWorkCount).toBe(2);
+
+    const children = await http.get(`/api/cases/${release.body.case.id}/children`).expect(200);
+    expect(Array.isArray(children.body)).toBe(true);
+    expect(children.body).toHaveLength(1);
+    expect(children.body[0]).toMatchObject({
+      case: { id: child.body.case.id },
+      activeWork: {
+        issueId: childIssue!.id,
+        issueIdentifier: "LIVE-CHILD",
+        issueTitle: "Build child work",
+        agentId: agent!.id,
+        agentName: "Live Builder",
+      },
+      descendantActiveWorkCount: 1,
+    });
   });
 
   it("lists, guards, and restores pipeline document revisions", async () => {

@@ -15,6 +15,7 @@ export interface PipelineChildRow {
   case: PipelineCase;
   stage: PipelineStage;
   activeWork?: PipelineCaseActiveWork | null;
+  descendantActiveWorkCount?: number;
 }
 
 interface PipelineCaseTreeNode {

@@ -35,9 +35,11 @@ import {
   COMPANY_CASE_EVENTS_MAX_TYPES,
   getCaseChildrenTree,
   getDirectChildrenSummary,
+  loadDescendantActiveWorkCountsForCases,
   listCompanyCaseEvents,
   listPipelineAttention,
   loadActiveWorkForCases,
+  loadPipelineDescendantActiveWorkCounts,
   loadPipelineConnections,
   PIPELINE_ATTENTION_DEFAULT_LIMIT,
   PIPELINE_ATTENTION_MAX_LIMIT,
@@ -601,15 +603,18 @@ export function pipelineRoutes(db: Db, options: Parameters<typeof pipelineServic
       .where(eq(pipelines.companyId, companyId))
       .groupBy(pipelines.id)
       .orderBy(asc(pipelines.createdAt));
-    const connections = await loadPipelineConnections(db, companyId);
     const pipelineIds = rows.map((row) => row.pipeline.id);
-    const stageRows = pipelineIds.length > 0
-      ? await db
+    const [connections, descendantActiveWorkCounts, stageRows] = await Promise.all([
+      loadPipelineConnections(db, companyId),
+      loadPipelineDescendantActiveWorkCounts(db, companyId, pipelineIds),
+      pipelineIds.length > 0
+        ? db
         .select()
         .from(pipelineStages)
         .where(inArray(pipelineStages.pipelineId, pipelineIds))
         .orderBy(asc(pipelineStages.position), asc(pipelineStages.createdAt))
-      : [];
+        : Promise.resolve([]),
+    ]);
     const stagesByPipelineId = new Map<string, typeof stageRows>();
     for (const stage of stageRows) {
       const stages = stagesByPipelineId.get(stage.pipelineId) ?? [];
@@ -623,6 +628,7 @@ export function pipelineRoutes(db: Db, options: Parameters<typeof pipelineServic
       openCaseCount: row.openCaseCount,
       attentionCount: row.attentionCount,
       inMotionCount: row.inMotionCount,
+      descendantActiveWorkCount: descendantActiveWorkCounts.get(row.pipeline.id) ?? 0,
       lastActivityAt: row.lastActivityAt,
       connections: connections.get(row.pipeline.id) ?? { upstreamPipelineIds: [], downstreamPipelineIds: [] },
     })));
@@ -1228,8 +1234,16 @@ export function pipelineRoutes(db: Db, options: Parameters<typeof pipelineServic
         q ? or(ilike(pipelineCases.title, `%${q}%`), ilike(pipelineCases.summary, `%${q}%`)) : undefined,
       ))
       .orderBy(asc(pipelineCases.createdAt));
-    const activeWork = await loadActiveWorkForCases(db, companyId, rows.map((row) => row.case.id));
-    res.json(rows.map((row) => ({ ...row, activeWork: activeWork.get(row.case.id) ?? null })));
+    const caseIds = rows.map((row) => row.case.id);
+    const [activeWork, descendantActiveWorkCounts] = await Promise.all([
+      loadActiveWorkForCases(db, companyId, caseIds),
+      loadDescendantActiveWorkCountsForCases(db, companyId, caseIds),
+    ]);
+    res.json(rows.map((row) => ({
+      ...row,
+      activeWork: activeWork.get(row.case.id) ?? null,
+      descendantActiveWorkCount: descendantActiveWorkCounts.get(row.case.id) ?? 0,
+    })));
   });
 
   router.get("/cases/:caseId", async (req, res) => {
@@ -1255,8 +1269,16 @@ export function pipelineRoutes(db: Db, options: Parameters<typeof pipelineServic
         eq(pipelineCases.parentCaseId, caseId),
       ))
       .orderBy(asc(pipelineCases.createdAt));
-    const activeWork = await loadActiveWorkForCases(db, companyId, rows.map((row) => row.case.id));
-    res.json(rows.map((row) => ({ ...row, activeWork: activeWork.get(row.case.id) ?? null })));
+    const caseIds = rows.map((row) => row.case.id);
+    const [activeWork, descendantActiveWorkCounts] = await Promise.all([
+      loadActiveWorkForCases(db, companyId, caseIds),
+      loadDescendantActiveWorkCountsForCases(db, companyId, caseIds),
+    ]);
+    res.json(rows.map((row) => ({
+      ...row,
+      activeWork: activeWork.get(row.case.id) ?? null,
+      descendantActiveWorkCount: descendantActiveWorkCounts.get(row.case.id) ?? 0,
+    })));
   });
 
   router.patch("/cases/:caseId", validate(casePatchSchema), async (req, res) => {
@@ -1506,7 +1528,7 @@ export function pipelineRoutes(db: Db, options: Parameters<typeof pipelineServic
     res.json(await svc.listCaseEventsPage(companyId, caseId, pagination));
   });
 
-  router.get("/cases/:caseId/children", async (req, res) => {
+  router.get("/cases/:caseId/children/tree", async (req, res) => {
     const caseId = req.params.caseId as string;
     const companyId = await assertCaseAccess(db, req, caseId);
     res.json(await getCaseChildrenTree(db, companyId, caseId));
@@ -1588,13 +1610,23 @@ async function getCaseDetail(db: Db, companyId: string, caseId: string) {
       .limit(1)
       .then((rows) => rows[0] ?? null)
     : Promise.resolve(null);
-  const [allowedNextStages, links, blockers, blocks, childrenCounts, activeWorkByCase, parentCase] = await Promise.all([
+  const [
+    allowedNextStages,
+    links,
+    blockers,
+    blocks,
+    childrenCounts,
+    activeWorkByCase,
+    descendantActiveWorkCounts,
+    parentCase,
+  ] = await Promise.all([
     db.select().from(pipelineStages).where(eq(pipelineStages.pipelineId, row.case.pipelineId)).orderBy(asc(pipelineStages.position)),
     db.select().from(pipelineCaseIssueLinks).where(and(eq(pipelineCaseIssueLinks.companyId, companyId), eq(pipelineCaseIssueLinks.caseId, caseId))),
     db.select().from(pipelineCaseBlockers).where(and(eq(pipelineCaseBlockers.companyId, companyId), eq(pipelineCaseBlockers.caseId, caseId))),
     db.select().from(pipelineCaseBlockers).where(and(eq(pipelineCaseBlockers.companyId, companyId), eq(pipelineCaseBlockers.blockedByCaseId, caseId))),
     getDirectChildrenSummary(db, companyId, caseId),
     loadActiveWorkForCases(db, companyId, [caseId]),
+    loadDescendantActiveWorkCountsForCases(db, companyId, [caseId]),
     parentCasePromise,
   ]);
   return {
@@ -1610,6 +1642,7 @@ async function getCaseDetail(db: Db, companyId: string, caseId: string) {
       childCount: row.case.childCount,
       terminalChildCount: row.case.terminalChildCount,
       loadedChildren: childrenCounts.total,
+      descendantActiveWorkCount: descendantActiveWorkCounts.get(caseId) ?? 0,
       ...childrenCounts,
     },
     activeWork: activeWorkByCase.get(caseId) ?? null,

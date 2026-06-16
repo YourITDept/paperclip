@@ -41,6 +41,7 @@ export interface PipelineListItem {
   openCaseCount: number;
   attentionCount?: number | null;
   inMotionCount?: number | null;
+  descendantActiveWorkCount?: number | null;
   lastActivityAt?: Date | string | null;
   connections?: PipelineConnections | null;
   createdAt: Date | string;
@@ -166,6 +167,7 @@ export interface PipelineCaseDetail {
     childCount: number;
     terminalChildCount: number;
     loadedChildren: number;
+    descendantActiveWorkCount?: number;
   };
   parentCase?: {
     case: PipelineCase;
@@ -368,11 +370,23 @@ export interface PipelineCaseChildrenTreeNode {
 
 export interface PipelineCaseChildrenTree {
   case: PipelineCaseChildrenTreeNode;
+  rollup?: { total: number; done: number; dropped: number; inMotion: number } | null;
+  childGroups?: Array<{
+    pipeline: { id: string; key: string; name: string };
+    cases: PipelineCaseChildrenTreeNode[];
+  }>;
+  truncated?: boolean;
+  totalNodes?: number;
 }
 
-export type PipelineCaseChildrenResponse =
-  | Array<{ case: PipelineCase; stage: PipelineStage; activeWork?: PipelineCaseActiveWork | null }>
-  | PipelineCaseChildrenTree;
+export interface PipelineCaseChildRow {
+  case: PipelineCase;
+  stage: PipelineStage;
+  activeWork?: PipelineCaseActiveWork | null;
+  descendantActiveWorkCount?: number;
+}
+
+export type PipelineCaseChildrenResponse = PipelineCaseChildRow[];
 
 export type PipelineBatchIngestResult =
   | { ok: true; case: PipelineCase; created: boolean }
@@ -447,11 +461,13 @@ export const pipelinesApi = {
     if (filters?.parentCaseId) params.set("parentCaseId", filters.parentCaseId);
     if (filters?.terminal !== undefined) params.set("terminal", filters.terminal ? "true" : "false");
     const qs = params.toString();
-    return api.get<Array<{ case: PipelineCase; stage: PipelineStage; activeWork?: PipelineCaseActiveWork | null }>>(`/pipelines/${pipelineId}/cases${qs ? `?${qs}` : ""}`);
+    return api.get<PipelineCaseChildRow[]>(`/pipelines/${pipelineId}/cases${qs ? `?${qs}` : ""}`);
   },
   getCase: (caseId: string) => api.get<PipelineCaseDetail>(`/cases/${caseId}`),
   getCaseChildren: (caseId: string) =>
     api.get<PipelineCaseChildrenResponse>(`/cases/${caseId}/children`),
+  getCaseChildrenTree: (caseId: string) =>
+    api.get<PipelineCaseChildrenTree>(`/cases/${caseId}/children/tree`),
   getCaseEvents: (caseId: string, filters?: { limit?: number; offset?: number; order?: "asc" | "desc" }) => {
     const params = new URLSearchParams();
     if (filters?.limit !== undefined) params.set("limit", String(filters.limit));

@@ -237,6 +237,14 @@ function pipelineInMotionCount(pipeline: PipelineListItem) {
   return pipeline.inMotionCount ?? 0;
 }
 
+function descendantActiveWorkCount(value: { descendantActiveWorkCount?: number | null }) {
+  return value.descendantActiveWorkCount ?? 0;
+}
+
+function formatLiveDownstream(count: number) {
+  return `${formatNumber(count)} live downstream`;
+}
+
 function pipelineActivityTime(pipeline: PipelineListItem) {
   return pipeline.lastActivityAt ?? pipeline.updatedAt ?? pipeline.createdAt ?? null;
 }
@@ -564,6 +572,7 @@ export function PipelinesIndexTable({
               {rows.map((row) => {
                 const attentionCount = pipelineAttentionCount(row.pipeline);
                 const inMotionCount = pipelineInMotionCount(row.pipeline);
+                const liveDownstreamCount = descendantActiveWorkCount(row.pipeline);
                 return (
                   <tr key={row.pipeline.id} className="h-10 border-b border-border/70">
                     <td className="pl-3 pr-4">
@@ -606,6 +615,12 @@ export function PipelinesIndexTable({
                         {inMotionCount > 0 ? (
                           <span className="text-muted-foreground">
                             {formatNumber(inMotionCount)} in motion
+                          </span>
+                        ) : null}
+                        {liveDownstreamCount > 0 ? (
+                          <span className="inline-flex items-center gap-1.5 text-emerald-700 dark:text-emerald-300">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
+                            {formatLiveDownstream(liveDownstreamCount)}
                           </span>
                         ) : null}
                       </div>
@@ -815,7 +830,10 @@ function PipelinesIndex() {
 const UNASSIGNED_STAGE_ID = "__pipeline_unassigned_stage";
 const UNASSIGNED_STAGE_NAME = "Unassigned";
 
-type BoardCase = PipelineCase & { activeWork?: PipelineCaseActiveWork | null };
+type BoardCase = PipelineCase & {
+  activeWork?: PipelineCaseActiveWork | null;
+  descendantActiveWorkCount?: number | null;
+};
 
 type PipelineTransitionEdge = { fromStageId: string; toStageId: string; label?: string | null };
 
@@ -959,6 +977,7 @@ function PipelineCaseCard({
   const hasNeedsAttention = blockerCount > 0;
   const hasChangedNotice = hasThisChanged(caseItem);
   const childrenSummary = getChildrenSummaryCount(caseItem);
+  const liveDownstreamCount = descendantActiveWorkCount(caseItem);
   const {
     attributes,
     listeners,
@@ -1006,6 +1025,12 @@ function PipelineCaseCard({
           {hasChangedNotice ? (
             <span className="inline-flex items-center rounded-full border border-indigo-400/40 bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-700 dark:border-indigo-300/30 dark:bg-indigo-900/25 dark:text-indigo-300">
               This changed
+            </span>
+          ) : null}
+          {liveDownstreamCount > 0 ? (
+            <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/35 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:border-emerald-300/30 dark:bg-emerald-900/25 dark:text-emerald-300">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
+              {formatLiveDownstream(liveDownstreamCount)}
             </span>
           ) : null}
         </div>
@@ -1154,7 +1179,11 @@ function PipelineBoard({ pipelineId }: { pipelineId: string }) {
 
   const pipeline = pipelineQuery.data;
   const cases = useMemo<BoardCase[]>(
-    () => (casesQuery.data ?? []).map((row) => ({ ...row.case, activeWork: row.activeWork ?? null })),
+    () => (casesQuery.data ?? []).map((row) => ({
+      ...row.case,
+      activeWork: row.activeWork ?? null,
+      descendantActiveWorkCount: row.descendantActiveWorkCount ?? 0,
+    })),
     [casesQuery.data],
   );
 
@@ -1979,7 +2008,7 @@ export function PipelineItemDetailView({ pipelineId, caseId }: { pipelineId: str
       ) : null}
 
       {(childrenGate || (breakdown?.waitForPieces ?? false)) && waitingChildren.length > 0 ? (
-        <section className="mb-5 border-y border-border bg-muted/20 py-4">
+        <section aria-label="Waiting child items" className="mb-5 border-y border-border bg-muted/20 py-4">
           <div className="flex flex-col gap-2">
             <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
               <ListTree className="h-4 w-4 text-muted-foreground" />
@@ -1987,17 +2016,11 @@ export function PipelineItemDetailView({ pipelineId, caseId }: { pipelineId: str
                 ? `Waiting on ${waitingChildren.length} of ${pieceCountTotal} ${pieceLabel(pieceCountTotal)} · ${pieceCountDone} finished`
                 : `Waiting on ${waitingChildren.length} of ${pieceCountTotal} child ${pieceCountTotal === 1 ? "item" : "items"}`}
             </div>
-            <div className="flex flex-wrap gap-x-3 gap-y-1 text-sm text-muted-foreground">
+            <ul className="divide-y divide-border">
               {waitingChildren.map((row) => (
-                <Link
-                  key={row.case.id}
-                  to={`/pipelines/${row.case.pipelineId}/items/${row.case.id}`}
-                  className="text-foreground hover:underline"
-                >
-                  {row.case.title} ({humanizePipelineItemStatus(row.case.terminalKind ?? row.stage.kind).toLowerCase()})
-                </Link>
+                <WaitingChildRow key={row.case.id} row={row} />
               ))}
-            </div>
+            </ul>
           </div>
         </section>
       ) : null}
@@ -2136,8 +2159,51 @@ function isTerminalChild(row: { case: PipelineCase; stage: PipelineStage }) {
   return Boolean(row.case.terminalKind) || row.stage.kind === "done" || row.stage.kind === "cancelled";
 }
 
-function getWaitingChildren(rows: Array<{ case: PipelineCase; stage: PipelineStage }>) {
+function getWaitingChildren<T extends { case: PipelineCase; stage: PipelineStage }>(rows: T[]) {
   return rows.filter((row) => !isTerminalChild(row));
+}
+
+function WaitingChildRow({
+  row,
+}: {
+  row: {
+    case: PipelineCase;
+    stage: PipelineStage;
+    activeWork?: PipelineCaseActiveWork | null;
+    descendantActiveWorkCount?: number | null;
+  };
+}) {
+  const liveDownstreamCount = descendantActiveWorkCount(row);
+
+  return (
+    <li>
+      <Link
+        to={`/pipelines/${row.case.pipelineId}/items/${row.case.id}`}
+        className="grid grid-cols-[18px_1fr_auto] items-center gap-3 py-2 text-sm hover:bg-muted/40"
+      >
+        <GitBranch className="h-4 w-4 text-muted-foreground" />
+        <span className="min-w-0">
+          <span className="block truncate font-medium text-foreground">{row.case.title}</span>
+          {row.activeWork || liveDownstreamCount > 0 ? (
+            <span className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+              {row.activeWork ? (
+                <span className="inline-flex items-center gap-1.5 text-emerald-700 dark:text-emerald-300">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" aria-hidden="true" />
+                  Live with {row.activeWork.agentName}
+                </span>
+              ) : null}
+              {liveDownstreamCount > 0 ? (
+                <span>{formatLiveDownstream(liveDownstreamCount)}</span>
+              ) : null}
+            </span>
+          ) : null}
+        </span>
+        <span className="rounded-sm border border-border px-2 py-0.5 text-xs text-muted-foreground">
+          {humanizePipelineItemStatus(row.case.terminalKind ?? row.stage.kind)}
+        </span>
+      </Link>
+    </li>
+  );
 }
 
 interface ReviewDecisionConfig {
