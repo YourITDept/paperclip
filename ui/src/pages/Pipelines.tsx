@@ -56,6 +56,7 @@ import {
 } from "../api/pipelines";
 import { issuesApi } from "../api/issues";
 import { EmptyState } from "../components/EmptyState";
+import { FoldCurtain } from "../components/FoldCurtain";
 import { IssueChatThread } from "../components/IssueChatThread";
 import { MarkdownBody } from "../components/MarkdownBody";
 import { PageSkeleton } from "../components/PageSkeleton";
@@ -2023,9 +2024,11 @@ export function PipelineItemDetailView({ pipelineId, caseId }: { pipelineId: str
       <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_340px]">
         <main className="min-w-0 space-y-8">
           {detail.case.summary ? (
-            <MarkdownBody className="max-w-3xl text-[15px] leading-7 text-foreground">
-              {detail.case.summary}
-            </MarkdownBody>
+            <FoldCurtain className="max-w-3xl">
+              <MarkdownBody className="text-[15px] leading-7 text-foreground">
+                {detail.case.summary}
+              </MarkdownBody>
+            </FoldCurtain>
           ) : null}
 
           <DetailSection title="Conversation">

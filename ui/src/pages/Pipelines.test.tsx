@@ -137,6 +137,21 @@ function act(callback: () => void | Promise<void>): void | Promise<void> {
     : undefined;
 }
 
+function mockElementScrollHeight(value: number) {
+  const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+  Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+    configurable: true,
+    get: () => value,
+  });
+  return () => {
+    if (descriptor) {
+      Object.defineProperty(HTMLElement.prototype, "scrollHeight", descriptor);
+    } else {
+      Reflect.deleteProperty(HTMLElement.prototype, "scrollHeight");
+    }
+  };
+}
+
 const fields: PipelineIntakeField[] = [
   { key: "title", label: "Name", type: "text", required: true },
   { key: "kind", label: "Type", type: "select", required: true, options: ["Blog post", "Launch tweet"] },
@@ -437,6 +452,39 @@ describe("PipelineItemDetailView", () => {
     act(() => {
       root.unmount();
     });
+  });
+
+  it("folds long item markdown descriptions behind the shared show more fader", async () => {
+    const restoreScrollHeight = mockElementScrollHeight(700);
+    try {
+      const { container, root } = await renderItemPage(itemDetail({
+        summary: Array.from({ length: 24 }, (_, index) => `Paragraph ${index + 1}`).join("\n\n"),
+      }), [], { children: [], events: [] });
+
+      const curtain = container.querySelector(".fold-curtain");
+      const content = curtain?.querySelector(".fold-curtain__content");
+      const toggle = Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent?.includes("Show more"));
+
+      expect(curtain).not.toBeNull();
+      expect(content?.getAttribute("style")).toContain("max-height: 420px");
+      expect(toggle).not.toBeUndefined();
+      expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+
+      await act(async () => {
+        toggle!.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(toggle?.textContent).toContain("Show less");
+      expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+
+      act(() => {
+        root.unmount();
+      });
+    } finally {
+      restoreScrollHeight();
+    }
   });
 
   it("shows the current stage and can re-run its entry automation", async () => {
