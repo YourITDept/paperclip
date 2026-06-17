@@ -350,6 +350,77 @@ describe("PipelineSettings", () => {
     queryClient.clear();
   });
 
+  it("shows intake fields on the first stage settings overview", async () => {
+    const intakePipeline = makePipeline();
+    const intakeStage = intakePipeline.stages[0]!;
+    const intakeStageConfig =
+      intakeStage.config && typeof intakeStage.config === "object" && !Array.isArray(intakeStage.config)
+        ? intakeStage.config
+        : {};
+    const existingVariables = Array.isArray(intakeStageConfig.variables) ? intakeStageConfig.variables : [];
+    intakeStage.config = {
+      ...intakeStageConfig,
+      variables: [
+        ...existingVariables,
+        {
+          key: "internal_note",
+          label: "Internal note",
+          type: "text",
+          options: [],
+          required: false,
+          showInAddForm: false,
+        },
+        {
+          name: "release_tag",
+          label: "Release tag",
+          type: "text",
+          options: [],
+          required: true,
+          defaultValue: "v2.1.0",
+        },
+        {
+          name: "feature_angle",
+          label: "Feature angle",
+          type: "select",
+          options: ["Reliability", "Workflow clarity"],
+          required: false,
+          defaultValue: "Workflow clarity",
+        },
+      ],
+    };
+    vi.mocked(pipelinesApi.get).mockResolvedValue(intakePipeline);
+
+    const { container, root, queryClient } = renderSettings();
+    await flushQueries();
+
+    expect(container.textContent).toContain("Intake fields");
+    expect(container.textContent).toContain("These fields power Add item forms and other pipelines' Carry over pickers.");
+    expect(container.textContent).toContain("Name");
+    expect(container.textContent).toContain("title");
+    expect(container.textContent).toContain("Customer");
+    expect(container.textContent).toContain("customer");
+    expect(container.textContent).toContain("Release tag");
+    expect(container.textContent).toContain("release_tag");
+    expect(container.textContent).toContain("Feature angle");
+    expect(container.textContent).toContain("feature_angle");
+    expect(container.textContent).toContain("Reliability, Workflow clarity");
+    expect(container.textContent).toContain("Workflow clarity");
+    expect(container.textContent).not.toContain("Internal note");
+
+    const reviewStageButton = container.querySelector<HTMLButtonElement>('button[aria-label="Review"]')!;
+    flushSync(() => {
+      reviewStageButton.click();
+    });
+    await flushQueries();
+
+    expect(container.textContent).not.toContain("Intake fields");
+
+    flushSync(() => {
+      root.unmount();
+    });
+    queryClient.clear();
+  });
+
   it("keeps the active detail tab when switching stages", async () => {
     const { container, root, queryClient } = renderSettings();
     await flushQueries();
@@ -709,7 +780,7 @@ describe("PipelineSettings", () => {
     const editLink = Array.from(container.querySelectorAll("a")).find((anchor) =>
       anchor.textContent?.includes("Edit these fields"),
     ) as HTMLAnchorElement | undefined;
-    expect(editLink?.getAttribute("href")).toBe("/pipelines/pipeline-2?stage=piece-stage-1");
+    expect(editLink?.getAttribute("href")).toBe("/pipelines/pipeline-2/settings?stage=piece-stage-1");
     // The picker still lists the destination's intake fields by their keys.
     expect(container.textContent).toContain("Release");
 
@@ -805,7 +876,86 @@ describe("PipelineSettings", () => {
       assigneeAgentId: "agent-1",
       instructionsBody: "Draft {{customer\\_name}} for the {{event\\_date}} channel",
     });
-    expect(lastConfig.variables.map((variable) => variable.name)).toEqual(["customer_name", "event_date"]);
+    expect(lastConfig.variables.map((variable) => variable.name)).toEqual(["customer_name", "event_date", "customer"]);
+
+    flushSync(() => {
+      root.unmount();
+    });
+    queryClient.clear();
+  });
+
+  it("edits manual intake fields without an automation agent or instruction placeholder", async () => {
+    const manualPipeline = makePipeline();
+    manualPipeline.stages = manualPipeline.stages.map((stage) =>
+      stage.id === "stage-1"
+        ? {
+            ...stage,
+            config: {
+              ...stage.config,
+              variables: [
+                {
+                  name: "customer",
+                  label: "Customer",
+                  type: "text",
+                  defaultValue: null,
+                  required: true,
+                  options: [],
+                },
+              ],
+              automation: {
+                assigneeAgentId: null,
+                instructionsBody: "Collect requests.",
+              },
+              whatHappensHere: "Collect requests.",
+            },
+          }
+        : stage,
+    );
+    (pipelinesApi.get as unknown as { mockResolvedValueOnce: (value: unknown) => void }).mockResolvedValueOnce(
+      manualPipeline,
+    );
+
+    const { container, root, queryClient } = renderSettings();
+    await flushQueries();
+
+    flushSync(() => {
+      findButton(container, "Automation")!.click();
+    });
+
+    expect(container.textContent).toContain("Nothing runs here automatically");
+    expect(container.textContent).toContain("Intake fields");
+    expect(container.textContent).toContain("{{customer}}");
+
+    const labelInput = Array.from(container.querySelectorAll<HTMLInputElement>("input")).find((input) =>
+      input.value === "Customer"
+    );
+    expect(labelInput).toBeTruthy();
+    flushSync(() => {
+      setNativeValue(labelInput!, "Client");
+    });
+    await flushQueries();
+
+    const saveButton = findButton(container, "Save stage")!;
+    expect(saveButton).toBeTruthy();
+    flushSync(() => {
+      saveButton.click();
+    });
+    await flushQueries();
+
+    const updateStageCalls = (pipelinesApi.updateStage as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    const lastConfig = (updateStageCalls.at(-1)?.[2] as {
+      config: {
+        automation: { assigneeAgentId: string | null; instructionsBody: string };
+        variables: Array<{ name: string; label: string | null }>;
+      };
+    }).config;
+    expect(lastConfig.automation).toEqual({
+      assigneeAgentId: null,
+      instructionsBody: "Collect requests.",
+    });
+    expect(lastConfig.variables).toEqual([
+      expect.objectContaining({ name: "customer", label: "Client" }),
+    ]);
 
     flushSync(() => {
       root.unmount();
