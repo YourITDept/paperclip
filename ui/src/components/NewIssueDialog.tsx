@@ -1663,7 +1663,7 @@ export function NewIssueDialog() {
                           ) : null}
                         </>
                       ) : (
-                        <span className="text-muted-foreground">Set watchdog agent</span>
+                        <span className="text-muted-foreground">Set watchdog</span>
                       )}
                     </button>
                   </PopoverTrigger>

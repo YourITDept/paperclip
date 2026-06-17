@@ -1009,7 +1009,7 @@ describe("NewIssueDialog", () => {
     });
     await flush();
 
-    expect(container.textContent).toContain("Set watchdog agent");
+    expect(container.textContent).toContain("Set watchdog");
     expect(container.querySelector('textarea[placeholder^="What should the watchdog"]')).not.toBeNull();
 
     act(() => root.unmount());

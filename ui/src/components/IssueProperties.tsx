@@ -991,6 +991,9 @@ export function IssueProperties({
         return agent ? <AgentIcon icon={agent.icon} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : null;
       })()}
       <span className="truncate">{agentName(issue.watchdog.watchdogAgentId)}</span>
+      {issue.watchdog.instructions?.trim() ? (
+        <span className="truncate text-muted-foreground">· {issue.watchdog.instructions.trim()}</span>
+      ) : null}
       {issue.watchdog.status === "disabled" ? (
         <span className="shrink-0 text-xs text-muted-foreground">(disabled)</span>
       ) : null}
