@@ -122,17 +122,6 @@ type StageConfig = {
   [key: string]: unknown;
 };
 
-type IntakeSettingsFieldType = "select" | "text" | "multiline";
-
-type IntakeSettingsField = {
-  key: string;
-  label: string;
-  type: IntakeSettingsFieldType;
-  required: boolean;
-  options: string[];
-  defaultValue: string | number | boolean | null;
-};
-
 const STAGE_NAV_GROUPS: Array<{
   label: string;
   items: Array<{ id: StageSectionKey; label: string; icon: typeof Circle }>;
@@ -208,12 +197,6 @@ const ROUTINE_VARIABLE_TYPES: ReadonlySet<RoutineVariable["type"]> = new Set([
   "boolean",
   "select",
 ]);
-const INTAKE_FIELD_TYPES: ReadonlySet<IntakeSettingsFieldType> = new Set(["text", "multiline", "select"]);
-const INTAKE_FIELD_TYPE_LABELS: Record<IntakeSettingsFieldType, string> = {
-  text: "Text",
-  multiline: "Long text",
-  select: "Select",
-};
 
 /**
  * Read stage `config.variables` into the routine variable shape, tolerating
@@ -256,76 +239,6 @@ function toRoutineVariables(raw: unknown): RoutineVariable[] {
     });
   }
   return result;
-}
-
-function intakeDefaultValue(raw: unknown): IntakeSettingsField["defaultValue"] {
-  return typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean" ? raw : null;
-}
-
-function intakeOptions(raw: unknown): string[] {
-  return Array.isArray(raw)
-    ? raw.filter((option): option is string => typeof option === "string" && option.trim().length > 0)
-    : [];
-}
-
-function stageIntakeFields(stage: PipelineStage | null | undefined): IntakeSettingsField[] {
-  const fields: IntakeSettingsField[] = [{
-    key: "title",
-    label: "Name",
-    type: "text",
-    required: true,
-    options: [],
-    defaultValue: null,
-  }];
-  const variables = stageConfig(stage).variables;
-  if (!Array.isArray(variables)) return fields;
-
-  for (const raw of variables) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-    const variable = raw as Record<string, unknown>;
-    const routineName = typeof variable.name === "string" && variable.name.trim().length > 0
-      ? variable.name.trim()
-      : null;
-    const legacyKey = typeof variable.key === "string" && variable.key.trim().length > 0
-      ? variable.key.trim()
-      : null;
-    const rawType = typeof variable.type === "string" ? variable.type : "text";
-    const options = intakeOptions(variable.options);
-
-    if (routineName) {
-      fields.push({
-        key: routineName,
-        label: typeof variable.label === "string" && variable.label.trim().length > 0
-          ? variable.label.trim()
-          : routineName,
-        type: rawType === "select" ? "select" : rawType === "textarea" || rawType === "multiline" ? "multiline" : "text",
-        required: variable.required === true,
-        options,
-        defaultValue: intakeDefaultValue(variable.defaultValue),
-      });
-      continue;
-    }
-
-    if (!legacyKey || variable.showInAddForm !== true) continue;
-    if (typeof variable.label !== "string" || variable.label.trim().length === 0) continue;
-    fields.push({
-      key: legacyKey,
-      label: variable.label.trim(),
-      type: INTAKE_FIELD_TYPES.has(rawType as IntakeSettingsFieldType) ? (rawType as IntakeSettingsFieldType) : "text",
-      required: variable.required === true,
-      options,
-      defaultValue: intakeDefaultValue(variable.defaultValue),
-    });
-  }
-
-  return fields;
-}
-
-function formatIntakeDefaultValue(value: IntakeSettingsField["defaultValue"]) {
-  if (value === null) return "None";
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "string" && value.length === 0) return "\"\"";
-  return String(value);
 }
 
 function stageConfig(stage: PipelineStage | null | undefined): StageConfig {
@@ -1315,8 +1228,6 @@ export function PipelineSettings() {
       JSON.stringify(savedStageForm) !== JSON.stringify(currentStageForm)) ||
     instructionsBodyDirty ||
     variablesDirty;
-  const selectedStageIsIntakeStage = selectedStage?.id === stages[0]?.id;
-  const selectedStageIntakeFields = selectedStageIsIntakeStage ? stageIntakeFields(selectedStage) : [];
 
   // --- "Break into pieces" derived values -------------------------------
   const breakdownTargetOptions = (pipelinesListQuery.data ?? []).filter(
@@ -1824,50 +1735,6 @@ export function PipelineSettings() {
                             </p>
                           </div>
                         </FieldRow>
-
-                        {selectedStageIsIntakeStage ? (
-                          <FieldRow label="Intake fields">
-                            <div className="space-y-3">
-                              <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-                                These fields power Add item forms and other pipelines' Carry over pickers.
-                              </p>
-                              <div className="overflow-hidden rounded-md border border-border">
-                                {selectedStageIntakeFields.map((field) => (
-                                  <div
-                                    key={field.key}
-                                    className="grid gap-3 border-b border-border/70 px-3 py-2.5 text-sm last:border-b-0 sm:grid-cols-[minmax(0,1.25fr)_7rem_minmax(0,1fr)_minmax(0,1fr)]"
-                                  >
-                                    <div className="min-w-0">
-                                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                                        <span className="font-medium text-foreground">{field.label}</span>
-                                        <span className="text-xs text-muted-foreground">
-                                          {field.required ? "Required" : "Optional"}
-                                        </span>
-                                      </div>
-                                      <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
-                                        {field.key}
-                                      </p>
-                                    </div>
-                                    <div className="min-w-0">
-                                      <p className="text-xs text-muted-foreground">Type</p>
-                                      <p className="truncate text-foreground">{INTAKE_FIELD_TYPE_LABELS[field.type]}</p>
-                                    </div>
-                                    <div className="min-w-0">
-                                      <p className="text-xs text-muted-foreground">Options</p>
-                                      <p className="truncate text-foreground">
-                                        {field.options.length > 0 ? field.options.join(", ") : "None"}
-                                      </p>
-                                    </div>
-                                    <div className="min-w-0">
-                                      <p className="text-xs text-muted-foreground">Default</p>
-                                      <p className="truncate text-foreground">{formatIntakeDefaultValue(field.defaultValue)}</p>
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          </FieldRow>
-                        ) : null}
 
                         {stageKind === "review" ? (
                           <FieldRow label="Approver">

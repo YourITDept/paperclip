@@ -350,7 +350,7 @@ describe("PipelineSettings", () => {
     queryClient.clear();
   });
 
-  it("shows intake fields in the first stage Automation section", async () => {
+  it("shows intake fields only in the lower editor", async () => {
     const intakePipeline = makePipeline();
     const intakeStage = intakePipeline.stages[0]!;
     const intakeStageConfig =
@@ -394,18 +394,30 @@ describe("PipelineSettings", () => {
     await flushQueries();
 
     expect(container.textContent).toContain("Intake fields");
-    expect(container.textContent).toContain("These fields power Add item forms and other pipelines' Carry over pickers.");
-    expect(container.textContent).toContain("Name");
-    expect(container.textContent).toContain("title");
-    expect(container.textContent).toContain("Customer");
-    expect(container.textContent).toContain("customer");
-    expect(container.textContent).toContain("Release tag");
-    expect(container.textContent).toContain("release_tag");
-    expect(container.textContent).toContain("Feature angle");
-    expect(container.textContent).toContain("feature_angle");
-    expect(container.textContent).toContain("Reliability, Workflow clarity");
-    expect(container.textContent).toContain("Workflow clarity");
-    expect(container.textContent).not.toContain("Internal note");
+    expect(container.textContent).not.toContain("These fields power Add item forms and other pipelines' Carry over pickers.");
+    expect(container.textContent).toContain("{{customer}}");
+    expect(container.textContent).toContain("{{release_tag}}");
+    expect(container.textContent).toContain("{{feature_angle}}");
+    expect(
+      Array.from(container.querySelectorAll<HTMLInputElement>("input")).some((input) =>
+        input.value === "Customer"
+      ),
+    ).toBe(true);
+    expect(
+      Array.from(container.querySelectorAll<HTMLInputElement>("input")).some((input) =>
+        input.value === "Release tag"
+      ),
+    ).toBe(true);
+    expect(
+      Array.from(container.querySelectorAll<HTMLInputElement>("input")).some((input) =>
+        input.value === "Feature angle"
+      ),
+    ).toBe(true);
+    expect(
+      Array.from(container.querySelectorAll<HTMLInputElement>("input")).some((input) =>
+        input.value === "Reliability, Workflow clarity"
+      ),
+    ).toBe(true);
 
     const reviewStageButton = container.querySelector<HTMLButtonElement>('button[aria-label="Review"]')!;
     flushSync(() => {
