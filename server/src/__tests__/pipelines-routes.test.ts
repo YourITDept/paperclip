@@ -1361,6 +1361,59 @@ describeEmbeddedPostgres("pipeline routes", () => {
     }
   });
 
+  it("rejects reserved Paperclip env keys during stage automation env saves", async () => {
+    const company = await seedCompany();
+    const [agent] = await db.insert(agents).values({
+      companyId: company.id,
+      name: "Stage Agent",
+      role: "worker",
+      status: "idle",
+    }).returning();
+    const http = request(app(boardActor));
+    const pipeline = await http.post(`/api/companies/${company.id}/pipelines`).send({ key: "reserved-env", name: "Reserved env" }).expect(201);
+    const stage = pipeline.body.stages.find((item: { key: string }) => item.key === "in_progress");
+    const configured = await http
+      .patch(`/api/pipelines/${pipeline.body.id}/stages/${stage.id}`)
+      .send({ config: { automation: { assigneeAgentId: agent!.id, instructionsBody: "Use env." } } })
+      .expect(200);
+    const routineId = configured.body.config.onEnter.routineId as string;
+
+    await http
+      .patch(`/api/pipelines/${pipeline.body.id}/stages/${stage.id}/automation-env`)
+      .send({ env: { SAFE_VALUE: { type: "plain", value: "ok" } } })
+      .expect(200);
+
+    const rejected = await http
+      .patch(`/api/pipelines/${pipeline.body.id}/stages/${stage.id}/automation-env`)
+      .send({
+        env: {
+          PAPERCLIP_API_KEY: { type: "plain", value: "should-not-persist" },
+          SAFE_VALUE: { type: "plain", value: "updated" },
+        },
+      })
+      .expect(422);
+
+    expect(rejected.body.error).toContain("PAPERCLIP_API_KEY");
+    expect(rejected.body).toMatchObject({
+      code: "reserved_env_key",
+      details: { key: "PAPERCLIP_API_KEY" },
+    });
+
+    const [routine] = await db
+      .select({ env: routines.env })
+      .from(routines)
+      .where(eq(routines.id, routineId));
+    expect(routine?.env).toEqual({ SAFE_VALUE: { type: "plain", value: "ok" } });
+    expect(JSON.stringify(routine?.env)).not.toContain("PAPERCLIP_API_KEY");
+    expect(JSON.stringify(routine?.env)).not.toContain("should-not-persist");
+
+    const detail = await http.get(`/api/pipelines/${pipeline.body.id}`).expect(200);
+    const detailStage = detail.body.stages.find((item: { id: string }) => item.id === stage.id);
+    expect(detailStage.config.automation.env).toEqual({ SAFE_VALUE: { type: "plain", value: "ok" } });
+    expect(JSON.stringify(detailStage.config.automation.env)).not.toContain("PAPERCLIP_API_KEY");
+    expect(JSON.stringify(detailStage.config.automation.env)).not.toContain("should-not-persist");
+  });
+
   it("writes an audit event when an agent removes a case issue link", async () => {
     const company = await seedCompany();
     const [agent] = await db.insert(agents).values({

@@ -94,6 +94,24 @@ describeEmbeddedPostgres("secretService", () => {
     ).rejects.toThrow(/same company/i);
   });
 
+  it("rejects reserved Paperclip keys during env normalization", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+
+    await expect(
+      svc.normalizeEnvBindingsForPersistence(companyId, {
+        PAPERCLIP_API_KEY: { type: "plain", value: "should-not-persist" },
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("PAPERCLIP_API_KEY"),
+      details: {
+        code: "reserved_env_key",
+        key: "PAPERCLIP_API_KEY",
+      },
+    });
+  });
+
   it("prevents duplicate bindings for a target config path", async () => {
     const companyId = await seedCompany();
     const svc = secretService(db);

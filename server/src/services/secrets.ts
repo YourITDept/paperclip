@@ -58,6 +58,7 @@ import { isSecretProviderClientError } from "../secrets/types.js";
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SENSITIVE_ENV_KEY_RE =
   /(api[-_]?key|access[-_]?token|auth(?:_?token)?|authorization|bearer|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connectionstring)/i;
+const RESERVED_ENV_KEY_PREFIX = "PAPERCLIP_";
 const REDACTED_SENTINEL = "***REDACTED***";
 const COMING_SOON_SECRET_PROVIDERS: ReadonlySet<SecretProvider> = new Set([
   "gcp_secret_manager",
@@ -216,6 +217,10 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function isSensitiveEnvKey(key: string) {
   return SENSITIVE_ENV_KEY_RE.test(key);
+}
+
+function isReservedPaperclipEnvKey(key: string) {
+  return key.startsWith(RESERVED_ENV_KEY_PREFIX);
 }
 
 function normalizeSecretKey(input: string) {
@@ -665,6 +670,12 @@ export function secretService(db: Db) {
     for (const [key, rawBinding] of Object.entries(record)) {
       if (!ENV_KEY_RE.test(key)) {
         throw unprocessable(`Invalid environment variable name: ${key}`);
+      }
+      if (isReservedPaperclipEnvKey(key)) {
+        throw unprocessable(`Reserved environment variable name cannot be persisted: ${key}`, {
+          code: "reserved_env_key",
+          key,
+        });
       }
 
       const parsed = envBindingSchema.safeParse(rawBinding);
