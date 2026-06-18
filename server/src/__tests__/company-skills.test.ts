@@ -185,6 +185,36 @@ describe("project workspace skill discovery", () => {
       ],
     });
   });
+
+  it("parses YAML block-scalar descriptions from SKILL.md frontmatter", async () => {
+    const workspace = await makeTempDir("paperclip-block-scalar-skill-");
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.writeFile(
+      path.join(workspace, "SKILL.md"),
+      [
+        "---",
+        "name: Block Scalar Skill",
+        "description: >",
+        "  First line",
+        "  second line",
+        "",
+        "  Third paragraph",
+        "---",
+        "",
+        "# Block Scalar Skill",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const imported = await readLocalSkillImportFromDirectory(
+      "33333333-3333-4333-8333-333333333333",
+      workspace,
+      { inventoryMode: "full" },
+    );
+
+    expect(imported.description).toBe("First line second line\n\nThird paragraph");
+  });
 });
 
 describe("missing local skill reconciliation", () => {
