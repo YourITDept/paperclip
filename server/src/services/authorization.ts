@@ -771,7 +771,7 @@ export function authorizationService(db: Db) {
           action: input.action,
           companyId: boundary.companyId,
           issueId: input.resource.issueId,
-          issueAssigneeAgentId: input.resource.assigneeAgentId,
+          issueAssigneeAgentId: input.resource.assigneeAgentId ?? null,
           actorAgentId: input.actorAgentId,
         })
       ) {
@@ -1269,7 +1269,7 @@ export function authorizationService(db: Db) {
           action: input.action,
           companyId,
           issueId: resource.issueId,
-          issueAssigneeAgentId: resource.assigneeAgentId,
+          issueAssigneeAgentId: resource.assigneeAgentId ?? null,
           actorAgentId,
         })
       ) {
