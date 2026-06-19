@@ -110,6 +110,7 @@ import { executionWorkspaceService as executionWorkspaceServiceDirect } from "..
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { readAcceptedPlanConfirmationTarget } from "../services/issues.js";
+import { runSecurityReviewGateForCreatedIssue } from "../services/security-review-hook.js";
 import { environmentService } from "../services/environments.js";
 import { redactSensitiveText } from "../redaction.js";
 import {
@@ -1775,7 +1776,7 @@ export function issueRoutes(
       assigneeUserId: string | null;
       status: string;
     },
-    action: "issue:read" | "issue:mutate",
+    action: "issue:comment" | "issue:read" | "issue:mutate",
   ) {
     return access.decide({
       actor: req.actor,
@@ -1805,6 +1806,33 @@ export function issueRoutes(
     if (decision.allowed) return true;
     res.status(403).json({ error: "Issue is outside this actor's authorization boundary" });
     return false;
+  }
+
+  async function assertAgentIssueCommentAllowed(
+    req: Request,
+    res: Response,
+    issue: {
+      id: string;
+      companyId: string;
+      projectId: string | null;
+      parentId: string | null;
+      status: string;
+      assigneeAgentId: string | null;
+      assigneeUserId: string | null;
+    },
+  ) {
+    if (req.actor.type !== "agent") return true;
+    const actorAgentId = req.actor.agentId;
+    if (!actorAgentId) {
+      res.status(403).json({ error: "Agent authentication required" });
+      return false;
+    }
+    const boundaryDecision = await decideIssueAccess(req, issue, "issue:comment");
+    if (!boundaryDecision.allowed) {
+      res.status(403).json({ error: "Issue is outside this actor's authorization boundary" });
+      return false;
+    }
+    return true;
   }
 
   async function filterIssuesForActor<T extends Parameters<typeof decideIssueAccess>[1]>(req: Request, rows: T[]) {
@@ -4439,6 +4467,29 @@ export function issueRoutes(
       });
     }
 
+    const securityReviewGate = await runSecurityReviewGateForCreatedIssue(db, issue, {
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      userId: actor.actorType === "user" ? actor.actorId : null,
+    });
+
+    if (securityReviewGate.status === "created") {
+      const reviewIssue = await svc.getById(securityReviewGate.reviewIssueId);
+      if (reviewIssue) {
+        void queueIssueAssignmentWakeup({
+          heartbeat,
+          issue: reviewIssue,
+          reason: "issue_assigned",
+          mutation: "create",
+          contextSource: "security_review_gate",
+          requestedByActorType: "system",
+          requestedByActorId: "security_review_gate",
+        });
+      }
+    }
+
     void queueIssueAssignmentWakeup({
       heartbeat,
       issue,
@@ -4453,6 +4504,9 @@ export function issueRoutes(
       ...issue,
       relatedWork: referenceSummary,
       referencedIssueIdentifiers: referenceSummary.outbound.map((item) => item.issue.identifier ?? item.issue.id),
+      ...(securityReviewGate.status === "created" || securityReviewGate.status === "failed"
+        ? { securityReviewGate }
+        : {}),
     });
   });
 
@@ -6624,7 +6678,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
-    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+    if (!(await assertAgentIssueCommentAllowed(req, res, issue))) return;
     if (!assertStructuredCommentFieldsAllowed(req, res, {
       presentation: req.body.presentation,
       metadata: req.body.metadata,

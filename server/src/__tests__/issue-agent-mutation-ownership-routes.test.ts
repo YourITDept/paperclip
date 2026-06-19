@@ -316,12 +316,14 @@ describe("agent issue mutation checkout ownership", () => {
     mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
       allowed:
         input.action === "tasks:assign" ||
+        input.action === "issue:comment" ||
         input.action === "issue:read" ||
         input.action === "issue:mutate" ||
         input.action === "company_scope:read",
       action: input.action,
       reason:
         input.action === "tasks:assign" ||
+          input.action === "issue:comment" ||
           input.action === "issue:read" ||
           input.action === "issue:mutate" ||
           input.action === "company_scope:read"
@@ -329,6 +331,7 @@ describe("agent issue mutation checkout ownership", () => {
           : "deny_missing_grant",
       explanation:
         input.action === "tasks:assign" ||
+          input.action === "issue:comment" ||
           input.action === "issue:read" ||
           input.action === "issue:mutate" ||
           input.action === "company_scope:read"
@@ -568,7 +571,6 @@ describe("agent issue mutation checkout ownership", () => {
   it.each([
     ["patch", (app: express.Express) => request(app).patch(`/api/issues/${issueId}`).send({ title: "Blocked" })],
     ["delete", (app: express.Express) => request(app).delete(`/api/issues/${issueId}`)],
-    ["comment", (app: express.Express) => request(app).post(`/api/issues/${issueId}/comments`).send({ body: "blocked" })],
     [
       "document upsert",
       (app: express.Express) =>
@@ -606,6 +608,86 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockWorkProductService.update).not.toHaveBeenCalled();
     expect(mockStorageService.putFile).not.toHaveBeenCalled();
     expect(mockStorageService.deleteObject).not.toHaveBeenCalled();
+  });
+
+  it("allows mentioned peer agents to post comments without ownership of an active checkout", async () => {
+    mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+      allowed: input.action === "issue:comment",
+      action: input.action,
+      reason: input.action === "issue:comment" ? "allow_issue_mention_grant" : "deny_missing_grant",
+      explanation:
+        input.action === "issue:comment"
+          ? "Allowed by a mention-scoped issue comment grant."
+          : "Missing permission.",
+    }));
+
+    const res = await request(await createApp(peerActor()))
+      .post(`/api/issues/${issueId}/comments`)
+      .send({ body: "I can respond here." });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      issueId,
+      "I can respond here.",
+      expect.any(Object),
+      expect.any(Object),
+    );
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-mentioned peer agents from posting comments", async () => {
+    mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+      allowed: input.action === "issue:read",
+      action: input.action,
+      reason: input.action === "issue:read" ? "allow_explicit_grant" : "deny_missing_grant",
+      explanation: input.action === "issue:read" ? "Allowed by test read grant." : "Missing permission.",
+    }));
+
+    const res = await request(await createApp(peerActor()))
+      .post(`/api/issues/${issueId}/comments`)
+      .send({ body: "I was not mentioned." });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Issue is outside this actor's authorization boundary");
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+  });
+
+  it("keeps true issue mutations denied for mentioned peer agents", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({ status: "todo", assigneeAgentId: ownerAgentId }));
+    mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+      allowed: input.action === "issue:comment" || input.action === "issue:mutate",
+      action: input.action,
+      reason:
+        input.action === "issue:comment"
+          ? "allow_issue_mention_grant"
+          : input.action === "issue:mutate"
+            ? "allow_explicit_grant"
+            : "deny_missing_grant",
+      explanation:
+        input.action === "issue:comment"
+          ? "Allowed by a mention-scoped issue comment grant."
+          : input.action === "issue:mutate"
+            ? "Allowed by test boundary default."
+            : "Missing permission.",
+    }));
+
+    const res = await request(await createApp(peerActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "done" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Agent cannot mutate another agent's issue");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("denies cross-company agents before comment authorization is evaluated", async () => {
+    const res = await request(await createApp(peerActor({ companyId: "99999999-9999-4999-8999-999999999999" })))
+      .post(`/api/issues/${issueId}/comments`)
+      .send({ body: "Wrong company." });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(mockAccessService.decide).not.toHaveBeenCalledWith(expect.objectContaining({ action: "issue:comment" }));
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
   });
 
   it("rejects the checked-out owner without a run id on attachment upload (401)", async () => {
@@ -975,7 +1057,6 @@ describe("agent issue mutation checkout ownership", () => {
 
   it.each([
     ["todo", "patch", (app: express.Express) => request(app).patch(`/api/issues/${issueId}`).send({ title: "Todo update" })],
-    ["todo", "comment", (app: express.Express) => request(app).post(`/api/issues/${issueId}/comments`).send({ body: "Todo noise" })],
     ["blocked", "patch", (app: express.Express) => request(app).patch(`/api/issues/${issueId}`).send({ title: "Blocked update" })],
   ])("rejects peer agent %s issue %s mutations outside active checkout ownership", async (status, _kind, sendRequest) => {
     mockIssueService.getById.mockResolvedValue(makeIssue({ status: status as "todo" | "blocked", assigneeAgentId: ownerAgentId }));
