@@ -110,7 +110,6 @@ import { executionWorkspaceService as executionWorkspaceServiceDirect } from "..
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { readAcceptedPlanConfirmationTarget } from "../services/issues.js";
-import { runSecurityReviewGateForCreatedIssue } from "../services/security-review-hook.js";
 import { environmentService } from "../services/environments.js";
 import { redactSensitiveText } from "../redaction.js";
 import {
@@ -4467,29 +4466,6 @@ export function issueRoutes(
       });
     }
 
-    const securityReviewGate = await runSecurityReviewGateForCreatedIssue(db, issue, {
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      userId: actor.actorType === "user" ? actor.actorId : null,
-    });
-
-    if (securityReviewGate.status === "created") {
-      const reviewIssue = await svc.getById(securityReviewGate.reviewIssueId);
-      if (reviewIssue) {
-        void queueIssueAssignmentWakeup({
-          heartbeat,
-          issue: reviewIssue,
-          reason: "issue_assigned",
-          mutation: "create",
-          contextSource: "security_review_gate",
-          requestedByActorType: "system",
-          requestedByActorId: "security_review_gate",
-        });
-      }
-    }
-
     void queueIssueAssignmentWakeup({
       heartbeat,
       issue,
@@ -4504,9 +4480,6 @@ export function issueRoutes(
       ...issue,
       relatedWork: referenceSummary,
       referencedIssueIdentifiers: referenceSummary.outbound.map((item) => item.issue.identifier ?? item.issue.id),
-      ...(securityReviewGate.status === "created" || securityReviewGate.status === "failed"
-        ? { securityReviewGate }
-        : {}),
     });
   });
 
