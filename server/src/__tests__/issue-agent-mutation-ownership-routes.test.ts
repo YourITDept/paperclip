@@ -652,6 +652,22 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
   });
 
+  it("rejects peer agents from listing comments when issue read is outside their boundary", async () => {
+    mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+      allowed: false,
+      action: input.action,
+      reason: "deny_low_trust_boundary",
+      explanation: "Issue is outside this low-trust boundary.",
+    }));
+
+    const res = await request(await createApp(peerActor()))
+      .get(`/api/issues/${issueId}/comments`);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Issue is outside this actor's authorization boundary");
+    expect(mockAccessService.decide).toHaveBeenCalledWith(expect.objectContaining({ action: "issue:read" }));
+  });
+
   it("keeps true issue mutations denied for mentioned peer agents", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue({ status: "todo", assigneeAgentId: ownerAgentId }));
     mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
