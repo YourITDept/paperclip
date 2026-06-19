@@ -1,4 +1,4 @@
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -868,19 +868,19 @@ export function authorizationService(db: Db) {
     return isAgentInSubtree(db, companyId, managerAgentId, assigneeAgentId);
   }
 
-  async function commentAuthorCanGrantIssueMention(input: {
-    companyId: string;
+  function commentAuthorCanGrantIssueMention(input: {
     mentionedAgentId: string;
     issueAssigneeAgentId: string | null;
     authorAgentId: string | null;
     authorUserId: string | null;
+    activeAuthorUserIds: Set<string>;
   }) {
     if (input.authorAgentId) {
       if (input.authorAgentId === input.mentionedAgentId) return false;
       return input.issueAssigneeAgentId === input.authorAgentId;
     }
     if (input.authorUserId) {
-      return Boolean(await getActiveMembership(input.companyId, "user", input.authorUserId));
+      return input.activeAuthorUserIds.has(input.authorUserId);
     }
     return false;
   }
@@ -906,14 +906,30 @@ export function authorizationService(db: Db) {
         isNull(issueComments.deletedAt),
       ));
 
-    for (const row of rows) {
-      if (!extractAgentMentionIds(row.body).includes(input.actorAgentId)) continue;
-      const authorCanGrant = await commentAuthorCanGrantIssueMention({
-        companyId: input.companyId,
+    const mentionRows = rows.filter((row) => extractAgentMentionIds(row.body).includes(input.actorAgentId));
+    const authorUserIds = [...new Set(mentionRows.flatMap((row) => row.authorUserId ? [row.authorUserId] : []))];
+    const activeAuthorUserIds = new Set(
+      authorUserIds.length === 0
+        ? []
+        : await db
+          .select({ principalId: companyMemberships.principalId })
+          .from(companyMemberships)
+          .where(and(
+            eq(companyMemberships.companyId, input.companyId),
+            eq(companyMemberships.principalType, "user"),
+            eq(companyMemberships.status, "active"),
+            inArray(companyMemberships.principalId, authorUserIds),
+          ))
+          .then((memberships) => memberships.map((membership) => membership.principalId)),
+    );
+
+    for (const row of mentionRows) {
+      const authorCanGrant = commentAuthorCanGrantIssueMention({
         mentionedAgentId: input.actorAgentId,
         issueAssigneeAgentId: input.issueAssigneeAgentId,
         authorAgentId: row.authorAgentId,
         authorUserId: row.authorUserId,
+        activeAuthorUserIds,
       });
       if (authorCanGrant) {
         logger.info({
