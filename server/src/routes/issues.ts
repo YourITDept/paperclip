@@ -6668,12 +6668,20 @@ export function issueRoutes(
     const reopenRequested = req.body.reopen === true;
     const resumeRequested = req.body.resume === true;
     const interruptRequested = req.body.interrupt === true;
+    const isClosed = isClosedIssueStatus(issue.status);
+    const isBlocked = issue.status === "blocked";
+    if (
+      isClosed &&
+      req.actor.type === "agent" &&
+      issue.assigneeAgentId !== null &&
+      issue.assigneeAgentId !== req.actor.agentId
+    ) {
+      if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+    }
     if (resumeRequested === true && !(await assertExplicitResumeIntentAllowed(req, res, issue))) return;
     if (resumeRequested !== true && reopenRequested === true && req.actor.type === "agent") {
       if (!(await assertExplicitResumeIntentAllowed(req, res, issue))) return;
     }
-    const isClosed = isClosedIssueStatus(issue.status);
-    const isBlocked = issue.status === "blocked";
     const explicitMoveToTodoRequested = reopenRequested || resumeRequested === true;
     const scheduledRetryForHumanComment =
       shouldHumanCommentResumeInProgressScheduledRetry({
