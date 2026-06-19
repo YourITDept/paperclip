@@ -994,6 +994,11 @@ describe("NewIssueDialog", () => {
   });
 
   it("reveals the watchdog editor from the overflow menu", async () => {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({
+      enableIsolatedWorkspaces: false,
+      enableTaskWatchdogs: true,
+    });
+
     const { root } = renderDialog(container);
     await flush();
 
@@ -1016,6 +1021,10 @@ describe("NewIssueDialog", () => {
   });
 
   it("submits the configured watchdog from a restored draft", async () => {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({
+      enableIsolatedWorkspaces: false,
+      enableTaskWatchdogs: true,
+    });
     localStorage.setItem(
       "paperclip:issue-draft",
       JSON.stringify({
@@ -1101,10 +1110,15 @@ describe("NewIssueDialog", () => {
     });
 
     it("uses NUX work-mode labels and brand status hues when the flag is on", async () => {
-      mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableConferenceRoomChat: true });
+      mockInstanceSettingsApi.getExperimental.mockResolvedValue({
+        enableConferenceRoomChat: true,
+        enableIsolatedWorkspaces: false,
+      });
 
       const { root } = renderDialog(container);
-      await flush();
+      await waitForAssertion(() => {
+        expect(workModeOption("standard")?.textContent).toContain("Agent mode");
+      });
 
       expect(workModeOption("standard")?.textContent).toContain("Agent mode");
       expect(workModeOption("ask")?.textContent).toContain("Ask mode");

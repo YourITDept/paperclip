@@ -69,6 +69,11 @@ const mockIssueThreadInteractionService = vi.hoisted(() => ({
   expireStaleRequestConfirmationsForIssueDocument: vi.fn(async () => []),
   listForIssue: vi.fn(async () => []),
 }));
+const mockIssueApprovalService = vi.hoisted(() => ({
+  link: vi.fn(),
+  unlink: vi.fn(),
+  listApprovalsForIssue: vi.fn(async () => []),
+}));
 const mockIssueRecoveryActionService = vi.hoisted(() => ({
   getActiveForIssue: vi.fn(async () => null),
   listActiveForIssues: vi.fn(async () => new Map()),
@@ -158,7 +163,7 @@ function registerRouteMocks() {
       })),
       listCompanyIds: vi.fn(async () => [companyId]),
     }),
-    issueApprovalService: () => ({}),
+    issueApprovalService: () => mockIssueApprovalService,
     issueRecoveryActionService: () => mockIssueRecoveryActionService,
     issueReferenceService: () => ({
       deleteDocumentSource: async () => undefined,
@@ -431,6 +436,10 @@ describe("agent issue mutation checkout ownership", () => {
     mockHeartbeatService.getActiveRunForAgent.mockResolvedValue(null);
     mockHeartbeatService.cancelRun.mockReset();
     mockHeartbeatService.cancelRun.mockResolvedValue(null);
+    mockIssueApprovalService.link.mockReset();
+    mockIssueApprovalService.unlink.mockReset();
+    mockIssueApprovalService.listApprovalsForIssue.mockReset();
+    mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([]);
     mockIssueThreadInteractionService.listForIssue.mockReset();
     mockIssueThreadInteractionService.listForIssue.mockResolvedValue([]);
     mockIssueService.remove.mockReset();
@@ -786,9 +795,18 @@ describe("agent issue mutation checkout ownership", () => {
           provider: "test",
           title: "Artifact",
         }),
+      "Cheap status-only recovery runs cannot update issue documents",
     ],
-    ["work product update", (app: express.Express) => request(app).patch("/api/work-products/product-1").send({ title: "Blocked" })],
-    ["work product delete", (app: express.Express) => request(app).delete("/api/work-products/product-1")],
+    [
+      "work product update",
+      (app: express.Express) => request(app).patch("/api/work-products/product-1").send({ title: "Blocked" }),
+      "Cheap status-only recovery runs cannot update issue documents",
+    ],
+    [
+      "work product delete",
+      (app: express.Express) => request(app).delete("/api/work-products/product-1"),
+      "Cheap status-only recovery runs cannot update issue documents",
+    ],
     [
       "low-trust promotion",
       (app: express.Express) =>
@@ -798,6 +816,7 @@ describe("agent issue mutation checkout ownership", () => {
           title: "Promoted artifact",
           summary: "Sanitized output",
         }),
+      "Cheap status-only recovery runs cannot update issue documents",
     ],
     [
       "attachment upload",
@@ -805,9 +824,28 @@ describe("agent issue mutation checkout ownership", () => {
         request(app)
           .post(`/api/companies/${companyId}/issues/${issueId}/attachments`)
           .attach("file", Buffer.from("report"), { filename: "report.txt", contentType: "text/plain" }),
+      "Cheap status-only recovery runs cannot update issue documents",
     ],
-    ["attachment delete", (app: express.Express) => request(app).delete("/api/attachments/attachment-1")],
-  ])("blocks cheap status-only recovery runs from %s", async (_name, sendRequest) => {
+    [
+      "attachment delete",
+      (app: express.Express) => request(app).delete("/api/attachments/attachment-1"),
+      "Cheap status-only recovery runs cannot update issue documents",
+    ],
+    [
+      "issue approval link",
+      (app: express.Express) =>
+        request(app).post(`/api/issues/${issueId}/approvals`).send({
+          approvalId: "88888888-8888-4888-8888-888888888888",
+        }),
+      "Cheap status-only recovery runs cannot create or modify approvals",
+    ],
+    [
+      "issue approval unlink",
+      (app: express.Express) =>
+        request(app).delete(`/api/issues/${issueId}/approvals/88888888-8888-4888-8888-888888888888`),
+      "Cheap status-only recovery runs cannot create or modify approvals",
+    ],
+  ])("blocks cheap status-only recovery runs from %s", async (_name, sendRequest, expectedError) => {
     const app = await createApp(
       ownerActor(),
       createRunContextDb({
@@ -822,7 +860,7 @@ describe("agent issue mutation checkout ownership", () => {
     const res = await sendRequest(app);
 
     expect(res.status, JSON.stringify(res.body)).toBe(403);
-    expect(res.body.error).toContain("Cheap status-only recovery runs cannot update issue documents");
+    expect(res.body.error).toContain(expectedError);
     expect(mockIssueService.assertCheckoutOwner).toHaveBeenCalledWith(issueId, ownerAgentId, ownerRunId);
     expect(mockWorkProductService.createForIssue).not.toHaveBeenCalled();
     expect(mockWorkProductService.update).not.toHaveBeenCalled();
@@ -830,6 +868,8 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockStorageService.putFile).not.toHaveBeenCalled();
     expect(mockStorageService.deleteObject).not.toHaveBeenCalled();
     expect(mockIssueService.removeAttachment).not.toHaveBeenCalled();
+    expect(mockIssueApprovalService.link).not.toHaveBeenCalled();
+    expect(mockIssueApprovalService.unlink).not.toHaveBeenCalled();
   });
 
   it.each([
