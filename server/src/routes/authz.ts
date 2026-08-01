@@ -256,7 +256,7 @@ export type ActorSecretContext = {
   consumerId: string;
   actorType: "agent" | "user";
   actorId: string | null;
-  actorSource: "local_implicit" | "session" | "board_key" | "agent_key" | "agent_jwt" | "cloud_tenant";
+  actorSource: "local_implicit" | "session" | "board_key" | "agent_key" | "agent_jwt" | "cloud_tenant" | "proxy_header";
   responsibleUserId: string | null;
 };
 

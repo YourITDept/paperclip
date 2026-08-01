@@ -15,6 +15,11 @@ import {
 import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
 import { isUuidLike, normalizeAgentApiKeyScope, type DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
+import {
+  extractProxyHeaderEmail,
+  resolveProxyHeaderAuthConfig,
+  resolveProxyHeaderUser,
+} from "../auth/proxy-header-auth.js";
 import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -184,6 +189,16 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         if (cloudTenantActor) {
           req.actor = {
             ...cloudTenantActor,
+            runId: runIdHeader ?? undefined,
+          };
+          next();
+          return;
+        }
+
+        const proxyHeaderActor = await resolveProxyHeaderActor(db, req);
+        if (proxyHeaderActor) {
+          req.actor = {
+            ...proxyHeaderActor,
             runId: runIdHeader ?? undefined,
           };
           next();
@@ -382,6 +397,73 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
     };
 
     next();
+  };
+}
+
+/**
+ * Authenticate from a trusted reverse proxy's identity header
+ * (e.g. `X-Forwarded-User` set by traefik-forward-auth / oauth2-proxy).
+ *
+ * Off unless `PAPERCLIP_PROXY_AUTH_ENABLED=true`. See
+ * `../auth/proxy-header-auth.ts` for the security model — in short, the header
+ * is the credential, so this is only safe when the listen port is unreachable
+ * except through the proxy.
+ *
+ * Deliberately unlike the Cloud tenant path: it provisions no company, creates
+ * no membership, and never touches `instanceUserRoles`. The proxy asserts *who
+ * the user is*; what they may do stays entirely under Paperclip's own
+ * authorization model, exactly as for a password session. A user the proxy
+ * authenticates but who has no memberships simply sees nothing.
+ *
+ * Returns null on any doubt — unknown email, malformed header, disabled — and
+ * the caller falls through to the normal session path.
+ */
+export async function resolveProxyHeaderActor(
+  db: Db,
+  req: Request,
+): Promise<Express.Request["actor"] | null> {
+  const config = resolveProxyHeaderAuthConfig();
+  if (!config.enabled) return null;
+
+  const email = extractProxyHeaderEmail(req.headers[config.headerName], config);
+  if (!email) return null;
+
+  let user: Awaited<ReturnType<typeof resolveProxyHeaderUser>>;
+  try {
+    user = await resolveProxyHeaderUser(db, email, config);
+  } catch (err) {
+    logger.error({ err }, "Failed to resolve trusted proxy header user; denying request");
+    return null;
+  }
+  if (!user) {
+    logger.warn(
+      { email, autoProvision: config.autoProvision },
+      "Trusted proxy asserted an email with no matching Paperclip user",
+    );
+    return null;
+  }
+  if (user.provisioned) {
+    logger.info({ userId: user.id, email }, "Provisioned Paperclip user from trusted proxy header");
+  }
+
+  const [roleRow, memberships] = await Promise.all([
+    db
+      .select({ id: instanceUserRoles.id })
+      .from(instanceUserRoles)
+      .where(and(eq(instanceUserRoles.userId, user.id), eq(instanceUserRoles.role, "instance_admin")))
+      .then((rows) => rows[0] ?? null),
+    loadActiveUserCompanyMemberships(db, user.id),
+  ]);
+
+  return {
+    type: "board",
+    userId: user.id,
+    userName: user.name,
+    userEmail: user.email,
+    companyIds: memberships.map((row) => row.companyId),
+    memberships,
+    isInstanceAdmin: Boolean(roleRow),
+    source: "proxy_header",
   };
 }
 
