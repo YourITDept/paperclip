@@ -680,6 +680,7 @@ export function readExecutionWorkspaceConfig(metadata: Record<string, unknown> |
   const config: ExecutionWorkspaceConfig = {
     environmentId: readNullableString(raw.environmentId),
     provisionCommand: readNullableString(raw.provisionCommand),
+    runtimeProvisionCommand: readNullableString(raw.runtimeProvisionCommand),
     teardownCommand: readNullableString(raw.teardownCommand),
     cleanupCommand: readNullableString(raw.cleanupCommand),
     workspaceRuntime: cloneRecord(raw.workspaceRuntime),
@@ -704,6 +705,7 @@ export function mergeExecutionWorkspaceConfig(
   const current = readExecutionWorkspaceConfig(metadata) ?? {
     environmentId: null,
     provisionCommand: null,
+    runtimeProvisionCommand: null,
     teardownCommand: null,
     cleanupCommand: null,
     workspaceRuntime: null,
@@ -719,6 +721,10 @@ export function mergeExecutionWorkspaceConfig(
   const nextConfig: ExecutionWorkspaceConfig = {
     environmentId: patch.environmentId !== undefined ? readNullableString(patch.environmentId) : current.environmentId,
     provisionCommand: patch.provisionCommand !== undefined ? readNullableString(patch.provisionCommand) : current.provisionCommand,
+    runtimeProvisionCommand:
+      patch.runtimeProvisionCommand !== undefined
+        ? readNullableString(patch.runtimeProvisionCommand)
+        : current.runtimeProvisionCommand,
     teardownCommand: patch.teardownCommand !== undefined ? readNullableString(patch.teardownCommand) : current.teardownCommand,
     cleanupCommand: patch.cleanupCommand !== undefined ? readNullableString(patch.cleanupCommand) : current.cleanupCommand,
     workspaceRuntime: patch.workspaceRuntime !== undefined ? cloneRecord(patch.workspaceRuntime) : current.workspaceRuntime,
@@ -740,6 +746,7 @@ export function mergeExecutionWorkspaceConfig(
     nextMetadata.config = {
       environmentId: nextConfig.environmentId,
       provisionCommand: nextConfig.provisionCommand,
+      runtimeProvisionCommand: nextConfig.runtimeProvisionCommand,
       teardownCommand: nextConfig.teardownCommand,
       cleanupCommand: nextConfig.cleanupCommand,
       workspaceRuntime: nextConfig.workspaceRuntime,
@@ -1975,30 +1982,31 @@ export function executionWorkspaceService(db: Db) {
           sourceIssueStatusChanged = sourceBefore.status !== updatedIssue.status;
         }
 
-        const [auditComment] = await tx
-          .insert(issueComments)
-          .values({
-            companyId: lockedWorkspace.companyId,
-            issueId: lockedWorkspace.sourceIssueId,
-            authorAgentId: input.actor.actorType === "agent" ? input.actor.agentId : null,
-            authorUserId: input.actor.actorType === "user" ? input.actor.actorId : null,
+        // Keep all actor-authored comments on the central attribution path so
+        // an agent reconcile records its signed responsible user and policy
+        // reason just like comments written through the issue routes.
+        const { issueService } = await import("./issues.js");
+        const auditComment = await issueService(txDb).addComment(
+          lockedWorkspace.sourceIssueId,
+          formatBranchReconcileAuditComment({
+            mode: input.mode,
+            reason,
+            workspaceId: existing.id,
+            inspection,
+            recoveryActionId: recoveryAction?.id ?? null,
+            rescueRef,
+          }),
+          {
+            agentId: input.actor.actorType === "agent" ? input.actor.agentId ?? undefined : undefined,
+            userId: input.actor.actorType === "user" ? input.actor.actorId : undefined,
+            runId: input.actor.runId,
+          },
+          {
             authorType: input.actor.actorType,
-            createdByRunId: input.actor.runId,
-            body: formatBranchReconcileAuditComment({
-              mode: input.mode,
-              reason,
-              workspaceId: existing.id,
-              inspection,
-              recoveryActionId: recoveryAction?.id ?? null,
-              rescueRef,
-            }),
-          })
-          .returning({ id: issueComments.id });
-
-        await tx
-          .update(issues)
-          .set({ updatedAt: now })
-          .where(eq(issues.id, lockedWorkspace.sourceIssueId));
+            authorizationReason: "execution_workspace_branch_reconcile",
+          },
+          tx,
+        );
 
         return {
           workspace: toExecutionWorkspace(updatedRow, lockedRuntimeServices),
