@@ -4617,7 +4617,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     leaseId: string,
     actor?: ActorInfo,
     accessContext?: {
-      actorSource?: "local_implicit" | "session" | "board_key" | "agent_key" | "agent_jwt" | "cloud_tenant";
+      actorSource?: "local_implicit" | "session" | "board_key" | "agent_key" | "agent_jwt" | "cloud_tenant" | "proxy_header";
       issueId?: string | null;
       heartbeatRunId?: string | null;
     },
