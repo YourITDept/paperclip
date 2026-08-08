@@ -51,11 +51,12 @@ Also required:
 - `PAPERCLIP_DEPLOYMENT_MODE=authenticated` — in `local_trusted` every request
   is already an implicit admin and none of the identity paths run.
 - `PAPERCLIP_ALLOWED_HOSTNAMES` must include the external hostname.
-- `PAPERCLIP_PUBLIC_URL` **must** be the external `https://` URL so cookies,
-  trusted origins, and the board mutation guard resolve correctly behind TLS
-  termination. A proxy-authenticated actor is deliberately *not* exempt from the
-  board mutation origin guard, so getting this wrong produces a distinctive
-  half-working state — see Verifying, check 4.
+- `PAPERCLIP_PUBLIC_URL` should be the external `https://` URL so cookies and
+  trusted origins resolve correctly behind TLS termination. For the board
+  mutation guard specifically it is a *fallback*, not the primary source: the
+  guard trusts origins derived from `X-Forwarded-Host` (or `Host`) first, and
+  Traefik sets that. An internal `PAPERCLIP_PUBLIC_URL` therefore does not by
+  itself break board mutations — verified, see Verifying, check 4.
 - `TRUST_PROXY` should be set so `req.ip` and request logs show real client
   addresses (e.g. `TRUST_PROXY=1` for a single proxy hop).
 
@@ -158,13 +159,18 @@ internal Docker network only.
    header; if the UI loads but never updates in real time, the header is not
    reaching `/api/companies/:id/events/ws`.
 4. **Writes work, not just reads.** Change something on the board and confirm it
-   saves. If reads render fine but every mutation returns
-   `403 Board mutation requires trusted browser origin`, the identity header is
-   working and the *origin* configuration is not: `PAPERCLIP_PUBLIC_URL` (and
-   `PAPERCLIP_ALLOWED_HOSTNAMES`) do not match the external origin the browser
-   actually sends. Proxy-authenticated actors are intentionally subject to the
-   origin guard, so this check cannot be skipped — a read-only smoke test will
-   pass on a deployment where nothing can be saved.
+   saves. Proxy-authenticated actors are intentionally *not* exempt from the
+   board mutation origin guard, so a read-only smoke test would pass on a
+   deployment where nothing can be saved — don't skip this.
+
+   The guard builds its trusted-origin set from `X-Forwarded-Host` (or `Host`)
+   and *then* `PAPERCLIP_PUBLIC_URL`, so a proxy that forwards the original host
+   — Traefik does — satisfies it even when `PAPERCLIP_PUBLIC_URL` points at an
+   internal address. If mutations do return
+   `403 Board mutation requires trusted browser origin` while reads work, the
+   identity header is fine and the origin configuration is not: check that the
+   proxy forwards `X-Forwarded-Host`, and set `PAPERCLIP_PUBLIC_URL` to the
+   external origin as the fallback.
 
 ## Implementation
 

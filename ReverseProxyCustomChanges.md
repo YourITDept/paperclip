@@ -577,11 +577,19 @@ drop our copy of `isCloudManagedInstance` and defer to master's re-export.
 4. **The board mutation guard still does not exempt `proxy_header`**
    ([`board-mutation-guard.ts:62-69`](server/src/middleware/board-mutation-guard.ts#L62-L69)),
    which remains correct — proxy-authenticated requests are real browser requests
-   and carry Origin/Referer. Worth restating because it makes
-   `PAPERCLIP_PUBLIC_URL` load-bearing: if it does not match the external origin,
-   every board mutation returns `403 Board mutation requires trusted browser origin`
-   while reads keep working. That is the failure mode to expect if the UI loads
-   but nothing can be saved.
+   and carry Origin/Referer.
+
+   *An earlier draft of this entry claimed this made `PAPERCLIP_PUBLIC_URL`
+   load-bearing, and that an internal value would 403 every board mutation. That
+   was wrong.* `trustedOriginsForRequest`
+   ([`board-mutation-guard.ts:19-33`](server/src/middleware/board-mutation-guard.ts#L19-L33))
+   builds its origin set from `X-Forwarded-Host` (or `Host`) **first**, and only
+   then adds `PAPERCLIP_PUBLIC_URL` as a fallback — the code comment there
+   describes this deployment exactly. Traefik forwards the original host, so
+   mutations succeed regardless. Confirmed empirically in the live check below,
+   with `PAPERCLIP_PUBLIC_URL` left at its internal value. This also means the
+   commented-out external URL in `Environment-dev2.txt` (disabled because of
+   agent call-back problems) does not need to be restored for the board to work.
 5. **One test needed a real fix, and it is a deployment-shaped bug, not merge
    fallout.** `proxy-header-actor.test.ts`'s "returns null when proxy auth is not
    enabled" case asserted the disabled path while reading the *ambient*
@@ -601,8 +609,41 @@ drop our copy of `isCloudManagedInstance` and defer to master's re-export.
 - `proxy-header-auth` + `proxy-header-actor` — 24/24 pass
 - Auth regression sweep (`cloud-tenant-actor`, `board-mutation-guard`,
   `auth-session-route`, `authorization-service`, `error-handler`) — 100/100 pass
-- **Still not done: no end-to-end run behind the real Traefik + forward-auth.**
-  Session 2's next step is still Session 4's next step.
+**Live verification — ported code, running against the real database**
+
+Started `WORKINGv2` from `/install/projects/paperclip` against the shared
+`maindb`, replacing the run-dir server. A `db:backup` was taken first
+(`pre-workingv2-migrate-20260808-171323.sql.gz`, 162 tables, verified readable).
+Worth noting: startup applied **14** migrations (`0198`–`0211`), not the 5 that
+separate `WORKINGON` from `WORKINGv2` — the database was further behind than the
+run-dir code was, so the backup mattered more than expected. `pg_dump` is not
+installed on this host; `db:backup` fell back to its JavaScript engine.
+
+| Check | Result |
+| --- | --- |
+| 1 — known email resolves | ✅ `paperclip:proxy_header:` session for the real user |
+| unknown email | ✅ denied |
+| no header | ✅ denied |
+| comma-joined identities | ✅ denied (append defence works) |
+| repeated header | ✅ denied |
+| malformed (no `@`) | ✅ denied |
+| upper-cased email | ✅ same user id — no duplicate provisioned |
+| 2 — direct access blocked | ⚠️ not runnable from this host, see above |
+| 3 — WS upgrade | ✅ `101` with the header, `403` without |
+| 4 — board mutations | ✅ pass with `X-Forwarded-Host` + `Origin`; `403` with no origin; `403` cross-origin |
+| bearer precedence | ✅ a bearer token makes the proxy header inert — agent/CLI traffic cannot be hijacked or broken by it |
+
+The cross-origin and no-origin 403s are the CSRF protection still doing its job
+for `proxy_header` actors, which is the intended design.
+
+**Still not done: no end-to-end run through the real Traefik + forward-auth
+chain** — the above drives the server directly with synthesized proxy headers.
+That exercises every code path this feature owns, but not the proxy's own
+behaviour (that it overwrites rather than appends `X-Forwarded-User`, and that
+OIDC login round-trips). Compose config at
+`/install/projects/Octobot-Docker/3-TraefikForward/docker-compose.yml` does set
+`authResponseHeaders=X-Forwarded-User` and `trustForwardHeader=true`, so it is
+configured as this doc assumes.
 
 **Runbook check 2 — partially run, INCONCLUSIVE. Needs an off-host re-run.**
 
