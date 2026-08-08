@@ -604,24 +604,29 @@ drop our copy of `isCloudManagedInstance` and defer to master's re-export.
 - **Still not done: no end-to-end run behind the real Traefik + forward-auth.**
   Session 2's next step is still Session 4's next step.
 
-**🔴 Runbook check 2 FAILS on the currently running deployment — action required**
+**Runbook check 2 — partially run, INCONCLUSIVE. Needs an off-host re-run.**
 
 Ran the `doc/REVERSE-PROXY-AUTH.md` §Verifying checks against the live server
-(`/install/paperclip-run`, pid 30673, the Session 2 code). Check 2 — "direct
-access is impossible" — **fails**, and the deployment is in exactly the state the
-security model says it must never be in.
+(`/install/paperclip-run`, pid 30673, the Session 2 code).
 
-Observed:
+**Read the scope of this carefully — the check was run from the wrong place.**
+Check 2 specifies "from another host on the network". It was run *from this host*,
+which is inside the trust boundary, so it cannot answer the question it exists to
+answer. Recorded here because the sub-facts are still worth having, not as a
+verdict.
 
-- The listener is on `0.0.0.0:3100`, not loopback and not an internal-only
-  container network. It is reachable directly on the host's LAN address
-  (`172.16.10.2`), bypassing the proxy entirely.
+Established:
+
+- The listener is on `0.0.0.0:3100` (`bind: "lan"`, `host: "0.0.0.0"` in
+  `/shared/paperclip/instances/default/config.json`), not loopback and not an
+  internal-only container network.
 - `PAPERCLIP_PROXY_AUTH_ENABLED=true` and `PAPERCLIP_DEPLOYMENT_MODE=authenticated`
   are set on the running process, so the header path is live.
-- The `PAPERCLIP_ALLOWED_HOSTNAMES` guard rejects a bare-IP request, which looks
-  protective but is not: it reads the `Host` header, which the client controls.
-  Sending `Host: devpaperclip40` satisfies it.
-- With that, a forged header from the network authenticates as a real user:
+- The `PAPERCLIP_ALLOWED_HOSTNAMES` guard rejects a bare-IP request but is not a
+  security control here: it reads the `Host` header, which the client controls.
+  `Host: devpaperclip40` satisfies it.
+- A request carrying a forged header that **does** reach the port authenticates
+  as a real user, with no credential and no proxy involvement:
 
   ```
   curl -H 'Host: devpaperclip40' -H 'X-Forwarded-User: <known-email>' \
@@ -629,29 +634,36 @@ Observed:
   → {"session":{"id":"paperclip:proxy_header:…"},"user":{…}}
   ```
 
-  The `paperclip:proxy_header:` session prefix confirms it resolved through
-  `resolveProxyHeaderActor`. This succeeded for more than one existing account.
-  No credential, no cookie, no proxy involvement.
+  The `paperclip:proxy_header:` prefix confirms it resolved through
+  `resolveProxyHeaderActor`. Succeeded for more than one existing account.
 
-This is not a code defect — the code is doing exactly what §"Security model" says
-it does, and it failed closed on unknown emails and on auto-provisioning (off).
-It is a **deployment** defect: requirement (1), "the listen port is unreachable
-except through the proxy", is not met. Anything that can route to
-`172.16.10.2:3100` can currently sign in as any Paperclip user.
+**Not established: whether anything off this host can reach `:3100`.** The
+operator reports a firewall that admits traffic only via the reverse proxy, with
+Docker routing inward from there. If that holds, requirement (1) is met, check 2
+passes, and the above is simply the expected in-boundary behaviour — the header
+is *supposed* to be the credential once a request is inside.
 
-Remediation, any one of which closes it (bind is the real fix):
+The code is not implicated either way: it failed closed on unknown emails and on
+auto-provisioning (off), exactly per §"Security model".
 
-1. Bind the listener to loopback or the internal Docker network and let Traefik
-   be the only route in; publish no host port.
-2. Failing that, firewall `:3100` to the proxy's source address only.
-3. As a stopgap while neither is in place, unset `PAPERCLIP_PROXY_AUTH_ENABLED`
-   and use password auth — the exposure only exists while the header is trusted.
+**To settle it, from a machine that is not this host and not the proxy:**
 
-The hostname allowlist should not be counted as a mitigation. Note also that
-`PAPERCLIP_PUBLIC_URL` is currently `http://devpaperclip40:3100` (internal), not
-the external `https://paperclip.dev.youraiengineroom.com` — per finding #4 above
-that will 403 every board mutation once traffic actually arrives through the
-proxy, while reads keep working.
+```
+curl -m 5 -H 'Host: devpaperclip40' -H 'X-Forwarded-User: <known-email>' \
+     http://172.16.10.2:3100/api/auth/get-session
+```
+
+Connection refused/timeout → check 2 passes. A JSON session body → requirement
+(1) is violated and the port needs firewalling to the proxy's source address (or
+binding off the LAN, which requires the proxy to reach it another way).
+
+Standing caveat regardless of the outcome: the hostname allowlist is not a
+mitigation, so the firewall is carrying the whole trust boundary on its own.
+
+Separately, `PAPERCLIP_PUBLIC_URL` is currently `http://devpaperclip40:3100`
+(internal), not the external `https://paperclip.dev.youraiengineroom.com` — per
+finding #4 above that will 403 every board mutation once traffic actually arrives
+through the proxy, while reads keep working.
 
 **Outcome:** The feature is back on current master, type-clean and test-clean,
 still off by default. `/install/projects/paperclip` now has its own
@@ -659,8 +671,8 @@ still off by default. `/install/projects/paperclip` now has its own
 
 **Next step — in this order:**
 
-1. **Close the `:3100` exposure above.** This outranks the port work; it is live
-   right now on the Session 2 code, independently of anything in this session.
+1. **Re-run check 2 from an off-host machine** (command above) to convert the
+   inconclusive result into a pass or a real finding.
 2. Fix `PAPERCLIP_PUBLIC_URL` to the external HTTPS URL before testing through
    the proxy, or mutations will 403 while reads succeed.
 3. Point the running server at this tree and re-run all four runbook checks,
