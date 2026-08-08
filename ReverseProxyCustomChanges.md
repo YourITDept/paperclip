@@ -604,16 +604,70 @@ drop our copy of `isCloudManagedInstance` and defer to master's re-export.
 - **Still not done: no end-to-end run behind the real Traefik + forward-auth.**
   Session 2's next step is still Session 4's next step.
 
+**🔴 Runbook check 2 FAILS on the currently running deployment — action required**
+
+Ran the `doc/REVERSE-PROXY-AUTH.md` §Verifying checks against the live server
+(`/install/paperclip-run`, pid 30673, the Session 2 code). Check 2 — "direct
+access is impossible" — **fails**, and the deployment is in exactly the state the
+security model says it must never be in.
+
+Observed:
+
+- The listener is on `0.0.0.0:3100`, not loopback and not an internal-only
+  container network. It is reachable directly on the host's LAN address
+  (`172.16.10.2`), bypassing the proxy entirely.
+- `PAPERCLIP_PROXY_AUTH_ENABLED=true` and `PAPERCLIP_DEPLOYMENT_MODE=authenticated`
+  are set on the running process, so the header path is live.
+- The `PAPERCLIP_ALLOWED_HOSTNAMES` guard rejects a bare-IP request, which looks
+  protective but is not: it reads the `Host` header, which the client controls.
+  Sending `Host: devpaperclip40` satisfies it.
+- With that, a forged header from the network authenticates as a real user:
+
+  ```
+  curl -H 'Host: devpaperclip40' -H 'X-Forwarded-User: <known-email>' \
+       http://172.16.10.2:3100/api/auth/get-session
+  → {"session":{"id":"paperclip:proxy_header:…"},"user":{…}}
+  ```
+
+  The `paperclip:proxy_header:` session prefix confirms it resolved through
+  `resolveProxyHeaderActor`. This succeeded for more than one existing account.
+  No credential, no cookie, no proxy involvement.
+
+This is not a code defect — the code is doing exactly what §"Security model" says
+it does, and it failed closed on unknown emails and on auto-provisioning (off).
+It is a **deployment** defect: requirement (1), "the listen port is unreachable
+except through the proxy", is not met. Anything that can route to
+`172.16.10.2:3100` can currently sign in as any Paperclip user.
+
+Remediation, any one of which closes it (bind is the real fix):
+
+1. Bind the listener to loopback or the internal Docker network and let Traefik
+   be the only route in; publish no host port.
+2. Failing that, firewall `:3100` to the proxy's source address only.
+3. As a stopgap while neither is in place, unset `PAPERCLIP_PROXY_AUTH_ENABLED`
+   and use password auth — the exposure only exists while the header is trusted.
+
+The hostname allowlist should not be counted as a mitigation. Note also that
+`PAPERCLIP_PUBLIC_URL` is currently `http://devpaperclip40:3100` (internal), not
+the external `https://paperclip.dev.youraiengineroom.com` — per finding #4 above
+that will 403 every board mutation once traffic actually arrives through the
+proxy, while reads keep working.
+
 **Outcome:** The feature is back on current master, type-clean and test-clean,
 still off by default. `/install/projects/paperclip` now has its own
 `node_modules` (it had none — that is why the first typecheck attempt failed).
 
-**Next step:** point the running server at this tree and run the three runbook
-checks in `doc/REVERSE-PROXY-AUTH.md` §Verifying — especially check 2, that a
-forged `X-Forwarded-User` against `:3100` from another host cannot connect. Then
-the two items still open since Session 1: admin bootstrap (§6 Q4; note
-`/bootstrap/claim` rejects `proxy_header` actors) and the agent/CLI proxy-bypass
-rule (Risk #2).
+**Next step — in this order:**
+
+1. **Close the `:3100` exposure above.** This outranks the port work; it is live
+   right now on the Session 2 code, independently of anything in this session.
+2. Fix `PAPERCLIP_PUBLIC_URL` to the external HTTPS URL before testing through
+   the proxy, or mutations will 403 while reads succeed.
+3. Point the running server at this tree and re-run all four runbook checks,
+   this time including check 4 (writes, not just reads).
+4. The two items still open since Session 1: admin bootstrap (§6 Q4; note
+   `/bootstrap/claim` rejects `proxy_header` actors) and the agent/CLI
+   proxy-bypass rule (Risk #2).
 
 ---
 
