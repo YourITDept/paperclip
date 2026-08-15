@@ -242,11 +242,21 @@ mkdir -p "$INSTANCE_ROOT"
 ensure_dir "$(dirname "$CONFIG_PATH")" "config directory"
 #ensure_dir "$LOG_DIR" "log directory"
 #ensure_dir "$PAPERCLIP_DB_BACKUP_DIR" "backup directory"
-# This rewrite truncates the file, so carry over the externally-managed URLs
-# rather than dropping them. They are never generated here - only preserved.
+# This rewrite truncates the file, so carry over every key the script does NOT
+# manage itself - the published URLs, PAPERCLIP_PROXY_AUTH_*, anything an
+# operator added by hand. An allowlist was tried first and was the wrong shape:
+# it silently dropped whatever nobody had thought to list, which is exactly how
+# a working deployment setting disappears during a re-onboard.
+MANAGED_ENV_KEYS="DATABASE_URL PAPERCLIP_DB_BACKUP_ENABLED PAPERCLIP_DB_BACKUP_INTERVAL_MINUTES
+PAPERCLIP_DB_BACKUP_RETENTION_DAYS PAPERCLIP_DB_BACKUP_DIR PAPERCLIP_LOG_DIR PORT SERVE_UI
+PAPERCLIP_ALLOWED_HOSTNAMES PAPERCLIP_STORAGE_PROVIDER PAPERCLIP_STORAGE_LOCAL_DIR
+PAPERCLIP_SECRETS_PROVIDER PAPERCLIP_SECRETS_STRICT_MODE PAPERCLIP_AGENT_JWT_SECRET"
 PRESERVED_ENV=""
 if [ -f "$ENV_PATH" ]; then
-  PRESERVED_ENV="$(grep -E '^(PAPERCLIP_PUBLIC_URL|PAPERCLIP_API_URL|PAPERCLIP_RUNTIME_API_URL)=' "$ENV_PATH" || true)"
+  PRESERVED_ENV="$(awk -v managed="$MANAGED_ENV_KEYS" '
+    BEGIN { n = split(managed, list, /[ \t\n]+/); for (i = 1; i <= n; i++) if (list[i] != "") seen[list[i]] = 1 }
+    /^[A-Za-z_][A-Za-z0-9_]*=/ { key = $0; sub(/=.*/, "", key); if (!(key in seen)) print }
+  ' "$ENV_PATH")"
 fi
 
 cat > "$ENV_PATH" <<EOF
@@ -267,6 +277,7 @@ PAPERCLIP_SECRETS_STRICT_MODE=$PAPERCLIP_SECRETS_STRICT_MODE
 PAPERCLIP_AGENT_JWT_SECRET=$PAPERCLIP_AGENT_JWT_SECRET
 EOF
 if [ -n "$PRESERVED_ENV" ]; then
+  printf '\n# Preserved from the previous .env - not managed by this script\n' >> "$ENV_PATH"
   printf '%s\n' "$PRESERVED_ENV" >> "$ENV_PATH"
 fi
 chmod 600 "$ENV_PATH"
@@ -284,13 +295,26 @@ echo "Using CLI: ${PAPERCLIP_CMD[*]}"
 # "${PAPERCLIP_CMD[@]}" onboard --config "$CONFIG_PATH" --yes --bind lan --install-service
 "${PAPERCLIP_CMD[@]}" onboard --config "$CONFIG_PATH" --yes --bind lan
 
-# --------------------------------------------- log dir (no env var exists) ---
-# Quickstart hardcodes logging.logDir to <instanceRoot>/logs, so patch it in.
+# ------------------------------------------- post-onboard config patches ----
+# None of these have an onboard env var, so they are applied to the written
+# config directly.
+#
+#   logging.logDir      quickstart hardcodes <instanceRoot>/logs
+#   auth.disableSignUp  no password self-registration on this instance
+#   telemetry.enabled   off
+#
+# Closing signup here is only safe because the trusted proxy provisions users:
+# resolveProxyHeaderUser inserts into authUsers directly, bypassing Better Auth,
+# so disableSignUp does not block it (server/src/auth/proxy-header-auth.ts).
+# If proxy auth is ever off, this leaves NO way to create the first account -
+# onboard with it enabled, or use --lock-signup after claiming instead.
 node -e '
   const fs = require("fs");
   const [p, dir] = process.argv.slice(1);
   const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
   cfg.logging = { ...cfg.logging, mode: "file", logDir: dir };
+  cfg.auth = { ...cfg.auth, disableSignUp: true };
+  cfg.telemetry = { ...cfg.telemetry, enabled: false };
   fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
 ' "$CONFIG_PATH" "$LOG_DIR"
 
@@ -314,14 +338,17 @@ if ! "${PAPERCLIP_CMD[@]}" auth bootstrap-ceo --config "$CONFIG_PATH" --base-url
 fi
 
 echo
-echo "IMPORTANT - the instance is unclaimed and signup is open. Until you claim it,"
-echo "anyone who can reach port $PORT can sign up and become the instance admin."
-echo "Do this now, in order:"
+echo "Password signup is disabled and telemetry is off in $CONFIG_PATH."
+echo
+echo "IMPORTANT - the instance is unclaimed. Claiming is first come, first served"
+echo "among users who can sign in, so do this before anyone else reaches it:"
 echo "  1. Start the server:  PAPERCLIP_CONFIG=\"$CONFIG_PATH\" ${PAPERCLIP_CMD[*]} run"
-echo "  2. Open $PAPERCLIP_BASE_URL and sign up as the admin account"
-echo "  3. Claim the instance - open the invite URL printed above, or accept the"
-echo "     claim prompt the UI shows while the instance is unclaimed"
-echo "  4. Close signup:      $0 --lock-signup"
+echo "  2. Open $PAPERCLIP_BASE_URL as the admin account"
+echo "  3. Claim the instance by opening the invite URL printed above"
+echo
+echo "With the trusted proxy on, anyone it authenticates gets an account"
+echo "automatically and could claim first - so claim promptly. The UI's own claim"
+echo "button rejects proxy-authenticated users; the invite URL is the path that works."
 
 # ------------------------------------------------------------ starting it ---
 # onboard --yes already started the server above. To start it again later, the
