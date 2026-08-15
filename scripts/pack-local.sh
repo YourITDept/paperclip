@@ -278,7 +278,11 @@ chmod +x "$OUT/install.sh"
 ARCHIVE=""
 if [ "$archive_format" != "none" ]; then
   echo "  [6/6] Rolling the bundle into a single archive..."
-  BUNDLE_NAME="paperclip-bundle-$VERSION"
+  # Deliberately unversioned: the archive and the directory it extracts to keep
+  # the same names on every build, so install commands, scripts and docs never
+  # have to be reworded or globbed. The build is still identified by the version
+  # stamped into the packages, which `paperclipai --version` reports.
+  BUNDLE_NAME="paperclip-bundle"
   ARCHIVE_DIR="$(dirname "$OUT")"
   stage="$(mktemp -d "${TMPDIR:-/tmp}/paperclip-pack-local-archive.XXXXXX")"
   ln -s "$OUT" "$stage/$BUNDLE_NAME"
