@@ -228,16 +228,46 @@ fs.writeFileSync(`${process.env.OUT_DIR}/package.json`, JSON.stringify(manifest,
 cat > "$OUT/install.sh" <<'INSTALL_EOF'
 #!/usr/bin/env bash
 # Install this bundle on a target host. No repo, no build, no pnpm.
+#
+# Usage:
+#   ./install.sh                      # install here, beside this script
+#   ./install.sh --prefix /opt/paperclip
 set -euo pipefail
+
 BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$BUNDLE_DIR"
+TARGET="$BUNDLE_DIR"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --prefix) TARGET="${2:?--prefix needs a directory}"; shift 2 ;;
+    -h|--help) sed -n '2,6p' "$0"; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+if ! mkdir -p "$TARGET" 2>/dev/null; then
+  echo "Cannot create install directory: $TARGET" >&2
+  exit 1
+fi
+TARGET="$(cd "$TARGET" && pwd)"
+
+if [ "$TARGET" != "$BUNDLE_DIR" ]; then
+  # Copy the tarballs and manifest across so the install root is self-contained
+  # and can be reinstalled offline later. This also keeps the file: specs in
+  # package.json relative, so nothing has to be rewritten.
+  echo "Staging bundle into $TARGET"
+  cp "$BUNDLE_DIR"/*.tgz "$BUNDLE_DIR/package.json" "$TARGET/"
+  cp "$BUNDLE_DIR/install.sh" "$TARGET/install.sh"
+fi
+
+cd "$TARGET"
 npm install --no-audit --no-fund
 echo
 echo "Installed. The CLI lives at:"
-echo "  $BUNDLE_DIR/node_modules/.bin/paperclipai"
+echo "  $TARGET/node_modules/.bin/paperclipai"
 echo
 echo "Add it to PATH for this shell:"
-echo "  export PATH=\"$BUNDLE_DIR/node_modules/.bin:\$PATH\""
+echo "  export PATH=\"$TARGET/node_modules/.bin:\$PATH\""
 INSTALL_EOF
 chmod +x "$OUT/install.sh"
 
@@ -289,7 +319,7 @@ if [ -n "$ARCHIVE" ]; then
   else
     echo "  cd /srv && tar xzf $(basename "$ARCHIVE")"
   fi
-  echo "  /srv/$BUNDLE_NAME/install.sh"
+  echo "  /srv/$BUNDLE_NAME/install.sh                        # or: --prefix /opt/paperclip"
   echo "  export PATH=\"/srv/$BUNDLE_NAME/node_modules/.bin:\$PATH\""
 else
   echo "  cp -r $OUT /srv/paperclip-bundle"
