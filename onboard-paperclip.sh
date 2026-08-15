@@ -50,6 +50,31 @@ export PAPERCLIP_STORAGE_LOCAL_DIR="$INSTANCE_ROOT/data/storage"
 export PAPERCLIP_SECRETS_PROVIDER=local_encrypted
 export PAPERCLIP_SECRETS_STRICT_MODE=false
 
+# --bind lan forces deploymentMode=authenticated, which requires the auth secret
+# in the PROCESS environment - not merely in the .env file. The check reads
+# process.env with no file fallback (cli/src/checks/deployment-auth-check.ts).
+#
+# onboard does generate this secret itself, but too late to satisfy that check:
+# because this script pre-creates the .env below, the CLI's loader memoizes the
+# path (loadedEnvFiles in cli/src/config/env.ts) while the file still lacks the
+# key, writes the secret to the file without touching process.env, and never
+# re-reads it. Exporting it up front makes onboard, doctor and the server agree.
+# The server takes this in place of BETTER_AUTH_SECRET (server/src/auth/better-auth.ts).
+#
+# An existing secret is reused, so re-onboarding does not rotate it and
+# invalidate sessions or agent tokens issued by a previous install.
+if [ -z "${PAPERCLIP_AGENT_JWT_SECRET:-}" ] && [ -f "$ENV_PATH" ]; then
+  PAPERCLIP_AGENT_JWT_SECRET="$(sed -n 's/^PAPERCLIP_AGENT_JWT_SECRET=//p' "$ENV_PATH" | tail -1)"
+fi
+if [ -z "${PAPERCLIP_AGENT_JWT_SECRET:-}" ]; then
+  if command -v openssl > /dev/null 2>&1; then
+    PAPERCLIP_AGENT_JWT_SECRET="$(openssl rand -hex 32)"
+  else
+    PAPERCLIP_AGENT_JWT_SECRET="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
+  fi
+fi
+export PAPERCLIP_AGENT_JWT_SECRET
+
 # ---------------------------------------------------------------- guard -----
 # onboard preserves an existing config and applies none of the above.
 if [ -f "$CONFIG_PATH" ]; then
@@ -95,6 +120,7 @@ PAPERCLIP_STORAGE_PROVIDER=$PAPERCLIP_STORAGE_PROVIDER
 PAPERCLIP_STORAGE_LOCAL_DIR=$PAPERCLIP_STORAGE_LOCAL_DIR
 PAPERCLIP_SECRETS_PROVIDER=$PAPERCLIP_SECRETS_PROVIDER
 PAPERCLIP_SECRETS_STRICT_MODE=$PAPERCLIP_SECRETS_STRICT_MODE
+PAPERCLIP_AGENT_JWT_SECRET=$PAPERCLIP_AGENT_JWT_SECRET
 EOF
 chmod 600 "$ENV_PATH"
 
