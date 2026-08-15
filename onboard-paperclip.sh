@@ -3,14 +3,66 @@
 #
 # onboard has no per-value flags: --yes selects quickstart (no prompts) and every
 # value comes from the environment (ONBOARD_ENV_KEYS in cli/src/commands/onboard.ts).
+#
+# Usage:
+#   ./onboard-paperclip.sh                 # onboard this host
+#   ./onboard-paperclip.sh --lock-signup   # close signup once the CEO has claimed
+#
+# Two-phase on purpose. In authenticated/private mode the server exposes
+# POST /api/bootstrap/claim (server/src/routes/access.ts), which makes ANY
+# signed-in browser user the first instance admin - no invite token needed,
+# first come first served. With signup open, whoever reaches the port first can
+# take the instance. But signup cannot simply be disabled up front either: there
+# is no CLI command that creates a user, so the intended admin would have no way
+# to sign up and claim. So: onboard with signup open, claim immediately, then
+# run --lock-signup to shut the door. Claiming is what permanently closes the
+# claim route (later attempts get already_claimed); --lock-signup stops further
+# account creation.
 set -euo pipefail
+
+MODE="onboard"
+FORCE_LOCK=false
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --lock-signup) MODE="lock-signup"; shift ;;
+    --force) FORCE_LOCK=true; shift ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+# ------------------------------------------------------------------ cli -----
+# Works both inside a checkout and on a host that only has the packaged CLI.
+# Preference order: an explicit PAPERCLIP_CLI, then a real paperclipai on PATH
+# (an installed bundle), then the workspace wrapper. PAPERCLIP_CLI may include
+# arguments, e.g. PAPERCLIP_CLI="node /srv/paperclip-bundle/cli.js" or a path to
+# a bundle's binary that is not on PATH.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "${PAPERCLIP_CLI:-}" ]; then
+  read -r -a PAPERCLIP_CMD <<< "$PAPERCLIP_CLI"
+elif command -v paperclipai > /dev/null 2>&1; then
+  PAPERCLIP_CMD=(paperclipai)
+elif command -v pnpm > /dev/null 2>&1 && [ -f "$SCRIPT_DIR/pnpm-workspace.yaml" ]; then
+  # --dir keeps this working when invoked from outside the checkout.
+  PAPERCLIP_CMD=(pnpm --dir "$SCRIPT_DIR" paperclipai)
+elif [ "$MODE" = "onboard" ]; then
+  echo "No Paperclip CLI found." >&2
+  echo "  Install the bundle so 'paperclipai' is on PATH, or set PAPERCLIP_CLI." >&2
+  exit 1
+else
+  # --lock-signup only needs node and curl; the CLI name is just printed as a
+  # restart hint, so a missing CLI must not block locking the instance down.
+  PAPERCLIP_CMD=(paperclipai)
+fi
 
 # ---------------------------------------------------------------- paths -----
 export PAPERCLIP_HOME="${PAPERCLIP_HOME:-$HOME/.paperclip}"
 export PAPERCLIP_INSTANCE_ID="${PAPERCLIP_INSTANCE_ID:-default}"
 INSTANCE_ROOT="$PAPERCLIP_HOME/instances/$PAPERCLIP_INSTANCE_ID"
 #CONFIG_PATH="$INSTANCE_ROOT/config.json"
-CONFIG_PATH="/install/config/paperclip/config.json"
+# PAPERCLIP_CONFIG wins when set, so a caller can point this at another instance
+# without editing the script; otherwise the host default applies.
+CONFIG_PATH="${PAPERCLIP_CONFIG:-/install/config/paperclip/config.json}"
 #ENV_PATH="$INSTANCE_ROOT/.env"
 # The CLI resolves the env file as dirname(configPath)/.env, so it must stay a
 # sibling of the config - derive it rather than repeating the path.
@@ -75,6 +127,67 @@ if [ -z "${PAPERCLIP_AGENT_JWT_SECRET:-}" ]; then
 fi
 export PAPERCLIP_AGENT_JWT_SECRET
 
+# ------------------------------------------------------- lock signup mode ---
+# Sets auth.disableSignUp=true, closing account creation once the instance has
+# an admin. Refuses to run while the instance is still unclaimed: with no admin
+# and no signup there is no way back in short of editing the config by hand.
+if [ "$MODE" = "lock-signup" ]; then
+  [ -f "$CONFIG_PATH" ] || {
+    echo "No config at $CONFIG_PATH - run this script without --lock-signup first." >&2
+    exit 1
+  }
+
+  # bootstrapStatus is "ready" once an instance_admin exists (server/src/routes/health.ts).
+  health_json="$(curl -fsS --max-time 5 "http://127.0.0.1:$PORT/api/health" 2>/dev/null || true)"
+  claim_status="unreachable"
+  if [ -n "$health_json" ]; then
+    claim_status="$(printf '%s' "$health_json" | node -e '
+      let raw = "";
+      process.stdin.on("data", (d) => { raw += d; });
+      process.stdin.on("end", () => {
+        try { process.stdout.write(JSON.parse(raw).bootstrapStatus ?? "unknown"); }
+        catch { process.stdout.write("unknown"); }
+      });
+    ' 2>/dev/null || echo "unknown")"
+  fi
+
+  if [ "$claim_status" != "ready" ] && [ "$FORCE_LOCK" = false ]; then
+    case "$claim_status" in
+      bootstrap_pending)
+        echo "Refusing to disable signup: this instance has no admin yet." >&2
+        echo "  Sign in at http://$(hostname -f):$PORT and claim it first." >&2
+        ;;
+      *)
+        echo "Refusing to disable signup: could not confirm the instance is claimed" >&2
+        echo "  (server on port $PORT did not answer /api/health: $claim_status)." >&2
+        echo "  Start the server and retry, so the claim state can be verified." >&2
+        ;;
+    esac
+    echo "  Override with --force if you are certain an admin already exists." >&2
+    exit 1
+  fi
+
+  node -e '
+    const fs = require("fs");
+    const [p] = process.argv.slice(1);
+    const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
+    cfg.auth = { ...cfg.auth, disableSignUp: true };
+    fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
+  ' "$CONFIG_PATH"
+  echo "Signup disabled in $CONFIG_PATH (auth.disableSignUp=true)."
+
+  # PAPERCLIP_AUTH_DISABLE_SIGN_UP overrides the file outright
+  # (server/src/config.ts), so a stale entry would silently undo the edit.
+  if grep -q '^PAPERCLIP_AUTH_DISABLE_SIGN_UP=' "$ENV_PATH" 2>/dev/null; then
+    echo "WARNING: $ENV_PATH sets PAPERCLIP_AUTH_DISABLE_SIGN_UP, which overrides the" >&2
+    echo "         config file. Remove it or set it to true, or this change has no effect." >&2
+  fi
+
+  echo "Restart the server for it to take effect:"
+  echo "  PAPERCLIP_CONFIG=\"$CONFIG_PATH\" ${PAPERCLIP_CMD[*]} run"
+  exit 0
+fi
+
 # ---------------------------------------------------------------- guard -----
 # onboard preserves an existing config and applies none of the above.
 if [ -f "$CONFIG_PATH" ]; then
@@ -133,8 +246,9 @@ chmod 600 "$ENV_PATH"
 # --config pins the config (and therefore the sibling .env) to $INSTANCE_ROOT.
 # Without it the CLI searches cwd upward for .paperclip/config.json and would
 # silently use that instead - this script runs from a repo checkout.
-# pnpm paperclipai onboard --config "$CONFIG_PATH" --yes --bind lan --install-service
-pnpm paperclipai onboard --config "$CONFIG_PATH" --yes --bind lan
+echo "Using CLI: ${PAPERCLIP_CMD[*]}"
+# "${PAPERCLIP_CMD[@]}" onboard --config "$CONFIG_PATH" --yes --bind lan --install-service
+"${PAPERCLIP_CMD[@]}" onboard --config "$CONFIG_PATH" --yes --bind lan
 
 # --------------------------------------------- log dir (no env var exists) ---
 # Quickstart hardcodes logging.logDir to <instanceRoot>/logs, so patch it in.
@@ -146,14 +260,22 @@ node -e '
   fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
 ' "$CONFIG_PATH" "$LOG_DIR"
 
-# pnpm paperclipai service restart --instance "$PAPERCLIP_INSTANCE_ID" || true
-pnpm paperclipai doctor --config "$CONFIG_PATH" --yes
+# "${PAPERCLIP_CMD[@]}" service restart --instance "$PAPERCLIP_INSTANCE_ID" || true
+"${PAPERCLIP_CMD[@]}" doctor --config "$CONFIG_PATH" --yes
 echo "Onboarded: config=$CONFIG_PATH logs=$LOG_DIR backups=$PAPERCLIP_DB_BACKUP_DIR"
+echo
+echo "IMPORTANT - the instance is unclaimed and signup is open. Until you claim it,"
+echo "anyone who can reach port $PORT can sign up and become the instance admin."
+echo "Do this now, in order:"
+echo "  1. Start the server:  PAPERCLIP_CONFIG=\"$CONFIG_PATH\" ${PAPERCLIP_CMD[*]} run"
+echo "  2. Open http://$(hostname -f):$PORT and sign up as the admin account"
+echo "  3. Claim the instance when prompted"
+echo "  4. Close signup:      $0 --lock-signup"
 
 # ------------------------------------------------------------ starting it ---
 # onboard --yes already started the server above. To start it again later, the
 # config path must be passed explicitly or the CLI will look in ~/.paperclip:
 #
-#   pnpm paperclipai run --config "$CONFIG_PATH" --instance "$PAPERCLIP_INSTANCE_ID"
+#   paperclipai run --config "$CONFIG_PATH" --instance "$PAPERCLIP_INSTANCE_ID"
 #
-# or equivalently: PAPERCLIP_CONFIG="$CONFIG_PATH" pnpm paperclipai run
+# or equivalently: PAPERCLIP_CONFIG="$CONFIG_PATH" paperclipai run
