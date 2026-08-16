@@ -6,6 +6,7 @@
 #
 # Usage:
 #   ./onboard-paperclip.sh                 # onboard this host
+#   ./onboard-paperclip.sh --apply-config  # re-apply config patches to an existing install
 #   ./onboard-paperclip.sh --lock-signup   # close signup once the CEO has claimed
 #
 # Two-phase on purpose. In authenticated/private mode the server exposes
@@ -25,8 +26,9 @@ FORCE_LOCK=false
 while [ $# -gt 0 ]; do
   case "$1" in
     --lock-signup) MODE="lock-signup"; shift ;;
+    --apply-config) MODE="apply-config"; shift ;;
     --force) FORCE_LOCK=true; shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -126,6 +128,15 @@ export PAPERCLIP_STORAGE_LOCAL_DIR="$INSTANCE_ROOT/data/storage"
 export PAPERCLIP_SECRETS_PROVIDER=local_encrypted
 export PAPERCLIP_SECRETS_STRICT_MODE=false
 
+# The master key for the local_encrypted provider, kept beside config.json and
+# .env rather than under the instance root. It is not instance state: losing it
+# makes every stored secret permanently undecryptable, so it belongs with the
+# files that are deliberately preserved, next to the JWT secret that is already
+# in .env. onboard honours this env var (ONBOARD_ENV_KEYS in
+# cli/src/commands/onboard.ts), so a fresh install writes the key here directly
+# and nothing has to be moved afterwards.
+export PAPERCLIP_SECRETS_MASTER_KEY_FILE="${PAPERCLIP_SECRETS_MASTER_KEY_FILE:-$(dirname "$CONFIG_PATH")/secrets/master.key}"
+
 # --bind lan forces deploymentMode=authenticated, which requires the auth secret
 # in the PROCESS environment - not merely in the .env file. The check reads
 # process.env with no file fallback (cli/src/checks/deployment-auth-check.ts).
@@ -150,6 +161,100 @@ if [ -z "${PAPERCLIP_AGENT_JWT_SECRET:-}" ]; then
   fi
 fi
 export PAPERCLIP_AGENT_JWT_SECRET
+
+# ------------------------------------------- post-onboard config patches ----
+# Applied after onboarding, and re-appliable to an existing install with
+# --apply-config. None of these have an onboard env var, so they are written to
+# the config file directly. Kept in one function so the two callers cannot drift.
+#
+#   logging.logDir      quickstart hardcodes <instanceRoot>/logs; use LOG_DIR
+#   auth.disableSignUp  no password self-registration on this instance
+#   telemetry.enabled   off
+#
+# Closing signup is only safe because the trusted proxy provisions users:
+# resolveProxyHeaderUser inserts into authUsers directly, bypassing Better Auth,
+# so disableSignUp does not block it (server/src/auth/proxy-header-auth.ts).
+# With proxy auth off this leaves NO way to create the first account, hence the
+# warning below.
+apply_config_patches() {
+  # Pointing logging.logDir at a directory that does not exist leaves the server
+  # unable to write logs; create it here rather than finding out at startup.
+  if ! mkdir -p "$LOG_DIR" 2>/dev/null || [ ! -w "$LOG_DIR" ]; then
+    echo "WARNING: log directory $LOG_DIR is not writable by $(id -un)." >&2
+    echo "         Fix: sudo install -d -o \"$(id -un)\" -g \"$(id -gn)\" \"$LOG_DIR\"" >&2
+  fi
+
+  # Secrets key: create the directory private, then MOVE any existing key before
+  # the config is repointed. The other order is destructive - the CLI would find
+  # no key at the new path, generate a fresh one, and every secret encrypted
+  # under the old key would be unrecoverable.
+  secrets_dir="$(dirname "$PAPERCLIP_SECRETS_MASTER_KEY_FILE")"
+  mkdir -p "$secrets_dir"
+  chmod 700 "$secrets_dir" 2>/dev/null || true
+
+  current_key="$(node -e '
+    const fs = require("fs");
+    try {
+      const cfg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      process.stdout.write(cfg.secrets?.localEncrypted?.keyFilePath ?? "");
+    } catch { process.stdout.write(""); }
+  ' "$CONFIG_PATH")"
+
+  if [ -n "$current_key" ] && [ "$current_key" != "$PAPERCLIP_SECRETS_MASTER_KEY_FILE" ] && [ -f "$current_key" ]; then
+    if [ -f "$PAPERCLIP_SECRETS_MASTER_KEY_FILE" ]; then
+      echo "WARNING: master keys exist at BOTH paths:" >&2
+      echo "           $current_key" >&2
+      echo "           $PAPERCLIP_SECRETS_MASTER_KEY_FILE" >&2
+      echo "         Leaving both untouched - picking one could orphan stored secrets." >&2
+      echo "         Resolve by hand, then re-run." >&2
+    else
+      mv "$current_key" "$PAPERCLIP_SECRETS_MASTER_KEY_FILE"
+      echo "Moved secrets master key: $current_key -> $PAPERCLIP_SECRETS_MASTER_KEY_FILE"
+    fi
+  fi
+  if [ -f "$PAPERCLIP_SECRETS_MASTER_KEY_FILE" ]; then
+    chmod 600 "$PAPERCLIP_SECRETS_MASTER_KEY_FILE"
+  fi
+
+  node -e '
+    const fs = require("fs");
+    const [p, dir, keyPath] = process.argv.slice(1);
+    const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
+    cfg.logging = { ...cfg.logging, mode: "file", logDir: dir };
+    cfg.auth = { ...cfg.auth, disableSignUp: true };
+    cfg.telemetry = { ...cfg.telemetry, enabled: false };
+    cfg.secrets = {
+      ...cfg.secrets,
+      localEncrypted: { ...cfg.secrets?.localEncrypted, keyFilePath: keyPath },
+    };
+    fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
+  ' "$CONFIG_PATH" "$LOG_DIR" "$PAPERCLIP_SECRETS_MASTER_KEY_FILE"
+  echo "Config patched: logging.logDir=$LOG_DIR, auth.disableSignUp=true, telemetry.enabled=false"
+  echo "                secrets.keyFilePath=$PAPERCLIP_SECRETS_MASTER_KEY_FILE (dir 700, key 600)"
+
+  if [ "${PAPERCLIP_PROXY_AUTH_ENABLED:-}" != "true" ]; then
+    echo "WARNING: PAPERCLIP_PROXY_AUTH_ENABLED is not 'true' in this environment." >&2
+    echo "         Signup is now disabled and nothing else provisions users, so no" >&2
+    echo "         new account can be created until proxy auth is on." >&2
+  fi
+}
+
+# ------------------------------------------------------- apply config mode ---
+# Re-applies the patches above without re-onboarding. The normal path exits
+# early when a config already exists, so this is how an existing install picks
+# up changed values (a moved log directory, telemetry, signup).
+if [ "$MODE" = "apply-config" ]; then
+  [ -f "$CONFIG_PATH" ] || {
+    echo "No config at $CONFIG_PATH - run this script without --apply-config first." >&2
+    exit 1
+  }
+  cp -p "$CONFIG_PATH" "$CONFIG_PATH.bak"
+  apply_config_patches
+  echo "Previous config saved to $CONFIG_PATH.bak"
+  echo "Restart the server for it to take effect:"
+  echo "  PAPERCLIP_CONFIG=\"$CONFIG_PATH\" ${PAPERCLIP_CMD[*]} run"
+  exit 0
+fi
 
 # ------------------------------------------------------- lock signup mode ---
 # Sets auth.disableSignUp=true, closing account creation once the instance has
@@ -250,7 +355,8 @@ ensure_dir "$(dirname "$CONFIG_PATH")" "config directory"
 MANAGED_ENV_KEYS="DATABASE_URL PAPERCLIP_DB_BACKUP_ENABLED PAPERCLIP_DB_BACKUP_INTERVAL_MINUTES
 PAPERCLIP_DB_BACKUP_RETENTION_DAYS PAPERCLIP_DB_BACKUP_DIR PAPERCLIP_LOG_DIR PORT SERVE_UI
 PAPERCLIP_ALLOWED_HOSTNAMES PAPERCLIP_STORAGE_PROVIDER PAPERCLIP_STORAGE_LOCAL_DIR
-PAPERCLIP_SECRETS_PROVIDER PAPERCLIP_SECRETS_STRICT_MODE PAPERCLIP_AGENT_JWT_SECRET"
+PAPERCLIP_SECRETS_PROVIDER PAPERCLIP_SECRETS_STRICT_MODE PAPERCLIP_AGENT_JWT_SECRET
+PAPERCLIP_SECRETS_MASTER_KEY_FILE"
 PRESERVED_ENV=""
 if [ -f "$ENV_PATH" ]; then
   PRESERVED_ENV="$(awk -v managed="$MANAGED_ENV_KEYS" '
@@ -274,6 +380,7 @@ PAPERCLIP_STORAGE_PROVIDER=$PAPERCLIP_STORAGE_PROVIDER
 PAPERCLIP_STORAGE_LOCAL_DIR=$PAPERCLIP_STORAGE_LOCAL_DIR
 PAPERCLIP_SECRETS_PROVIDER=$PAPERCLIP_SECRETS_PROVIDER
 PAPERCLIP_SECRETS_STRICT_MODE=$PAPERCLIP_SECRETS_STRICT_MODE
+PAPERCLIP_SECRETS_MASTER_KEY_FILE=$PAPERCLIP_SECRETS_MASTER_KEY_FILE
 PAPERCLIP_AGENT_JWT_SECRET=$PAPERCLIP_AGENT_JWT_SECRET
 EOF
 if [ -n "$PRESERVED_ENV" ]; then
@@ -295,28 +402,7 @@ echo "Using CLI: ${PAPERCLIP_CMD[*]}"
 # "${PAPERCLIP_CMD[@]}" onboard --config "$CONFIG_PATH" --yes --bind lan --install-service
 "${PAPERCLIP_CMD[@]}" onboard --config "$CONFIG_PATH" --yes --bind lan
 
-# ------------------------------------------- post-onboard config patches ----
-# None of these have an onboard env var, so they are applied to the written
-# config directly.
-#
-#   logging.logDir      quickstart hardcodes <instanceRoot>/logs
-#   auth.disableSignUp  no password self-registration on this instance
-#   telemetry.enabled   off
-#
-# Closing signup here is only safe because the trusted proxy provisions users:
-# resolveProxyHeaderUser inserts into authUsers directly, bypassing Better Auth,
-# so disableSignUp does not block it (server/src/auth/proxy-header-auth.ts).
-# If proxy auth is ever off, this leaves NO way to create the first account -
-# onboard with it enabled, or use --lock-signup after claiming instead.
-node -e '
-  const fs = require("fs");
-  const [p, dir] = process.argv.slice(1);
-  const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
-  cfg.logging = { ...cfg.logging, mode: "file", logDir: dir };
-  cfg.auth = { ...cfg.auth, disableSignUp: true };
-  cfg.telemetry = { ...cfg.telemetry, enabled: false };
-  fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
-' "$CONFIG_PATH" "$LOG_DIR"
+apply_config_patches
 
 # "${PAPERCLIP_CMD[@]}" service restart --instance "$PAPERCLIP_INSTANCE_ID" || true
 "${PAPERCLIP_CMD[@]}" doctor --config "$CONFIG_PATH" --yes
