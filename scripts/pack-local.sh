@@ -17,9 +17,15 @@ set -euo pipefail
 # The bundle directory is also rolled into a single archive so it can be moved
 # to the target host as one file.
 #
+# Every build starts from a clean dist/ across the workspace. Incremental output
+# is not trustworthy for packaging: a stale dist/ can keep files a later build
+# never overwrites, so a bundle silently ships an older artifact than the
+# checkout it claims to be. Use --skip-clean only for a throwaway fast rebuild.
+#
 # Usage:
-#   ./scripts/pack-local.sh                       # build, pack, emit .tar.gz
-#   ./scripts/pack-local.sh --skip-build          # reuse existing dist/ output
+#   ./scripts/pack-local.sh                       # clean, build, pack, emit .tar.gz
+#   ./scripts/pack-local.sh --skip-clean          # keep existing dist/, still build
+#   ./scripts/pack-local.sh --skip-build          # reuse existing dist/ output (implies --skip-clean)
 #   ./scripts/pack-local.sh --version 0.0.0-rp.3  # stamp a specific version
 #   ./scripts/pack-local.sh --out /srv/paperclip-bundle
 #   ./scripts/pack-local.sh --zip                 # .zip instead of .tar.gz
@@ -33,6 +39,7 @@ cd "$REPO_ROOT"
 VERSION=""
 OUT="$REPO_ROOT/releases/local"
 skip_build=false
+skip_clean=false
 archive_format="tar"
 
 while [ $# -gt 0 ]; do
@@ -40,9 +47,11 @@ while [ $# -gt 0 ]; do
     --version) VERSION="${2:?--version needs a value}"; shift 2 ;;
     --out) OUT="${2:?--out needs a value}"; shift 2 ;;
     --skip-build) skip_build=true; shift ;;
+    --skip-clean) skip_clean=true; shift ;;
     --zip) archive_format="zip"; shift ;;
     --no-archive) archive_format="none"; shift ;;
-    -h|--help) sed -n '3,30p' "$0"; exit 0 ;;
+    # Print the whole header comment, so adding usage lines never truncates -h.
+    -h|--help) awk 'NR > 3 { if (!/^#/) exit; print }' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -111,16 +120,34 @@ echo "==> Packing $VERSION into $OUT"
 # end rather than silently reverted.
 DIRTY_BEFORE="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no || true)"
 
+# Reusing existing output is the whole point of --skip-build, so it cannot clean.
+[ "$skip_build" = false ] || skip_clean=true
+
+# Wiping dist/ everywhere is what makes the bundle match this checkout. Package
+# builds are not all idempotent over a populated dist/ — some copy trees in
+# rather than replacing them — so a leftover dist/ can survive a rebuild and be
+# packed as though it were current.
+if [ "$skip_clean" = false ]; then
+  # `run` is not optional: pnpm has a builtin `clean` command that shadows the
+  # package script and rejects --recursive, so `pnpm -r clean` fails outright.
+  echo "  [1/7] Cleaning workspace dist output (pnpm -r run clean)..."
+  pnpm -r run clean
+elif [ "$skip_build" = false ]; then
+  echo "  [1/7] Skipping clean (--skip-clean); building over existing dist output"
+else
+  echo "  [1/7] Skipping clean (--skip-build reuses existing dist output)"
+fi
+
 if [ "$skip_build" = false ]; then
-  echo "  [1/6] Building the workspace (pnpm build)..."
+  echo "  [2/7] Building the workspace (pnpm build)..."
   pnpm build
 else
-  echo "  [1/6] Skipping workspace build (--skip-build); reusing existing dist output"
+  echo "  [2/7] Skipping workspace build (--skip-build); reusing existing dist output"
 fi
 
 # The server serves the UI from its own ui-dist when SERVE_UI=true, so the
 # static assets have to be inside the server tarball.
-echo "  [2/6] Staging server ui-dist and skills..."
+echo "  [3/7] Staging server ui-dist and skills..."
 export PAPERCLIP_RELEASE_REUSE_UI_DIST=1
 bash "$REPO_ROOT/scripts/prepare-server-ui-dist.sh"
 for pkg_dir in "${SKILL_PKGS[@]}"; do
@@ -128,14 +155,14 @@ for pkg_dir in "${SKILL_PKGS[@]}"; do
   cp -r "$REPO_ROOT/skills" "$REPO_ROOT/$pkg_dir/skills"
 done
 
-echo "  [3/6] Stamping version $VERSION across public packages..."
+echo "  [4/7] Stamping version $VERSION across public packages..."
 backup_rewritten_files
 node "$REPO_ROOT/scripts/release-package-map.mjs" set-version "$VERSION"
 
-echo "  [4/6] Bundling the CLI (esbuild) and generating its publish manifest..."
+echo "  [5/7] Bundling the CLI (esbuild) and generating its publish manifest..."
 bash "$REPO_ROOT/scripts/build-npm.sh" --skip-checks --skip-typecheck > /dev/null
 
-echo "  [5/6] Packing tarballs..."
+echo "  [6/7] Packing tarballs..."
 rm -f "$OUT"/*.tgz "$OUT"/package.json "$OUT"/install.sh
 
 # Every @paperclipai package reachable from the CLI or the server. Anything
@@ -277,7 +304,7 @@ chmod +x "$OUT/install.sh"
 # copying the (large) bundle a second time; tar -h and zip both follow it.
 ARCHIVE=""
 if [ "$archive_format" != "none" ]; then
-  echo "  [6/6] Rolling the bundle into a single archive..."
+  echo "  [7/7] Rolling the bundle into a single archive..."
   # Deliberately unversioned: the archive and the directory it extracts to keep
   # the same names on every build, so install commands, scripts and docs never
   # have to be reworded or globbed. The build is still identified by the version
@@ -299,7 +326,7 @@ if [ "$archive_format" != "none" ]; then
 
   rm -rf "$stage"
 else
-  echo "  [6/6] Skipping archive (--no-archive)"
+  echo "  [7/7] Skipping archive (--no-archive)"
 fi
 
 # Put the tree back before reporting on it, so the version stamp itself is not
