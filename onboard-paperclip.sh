@@ -419,7 +419,7 @@ echo "Onboarded: config=$CONFIG_PATH logs=$LOG_DIR backups=$PAPERCLIP_DB_BACKUP_
 # started - but the URL is not usable until it is. Non-fatal: onboarding has
 # already succeeded by this point, and the command can be re-run at any time.
 echo
-if ! "${PAPERCLIP_CMD[@]}" auth bootstrap-ceo --config "$CONFIG_PATH" --base-url "https://${PAPERCLIP_BASE_URL}"; then
+if ! "${PAPERCLIP_CMD[@]}" auth bootstrap-ceo --config "$CONFIG_PATH" --base-url "https://${PAPERCLIP_FQDN}"; then
   echo "WARNING: could not create the bootstrap CEO invite (is the database reachable?)." >&2
   echo "  Retry: ${PAPERCLIP_CMD[*]} auth bootstrap-ceo --config \"$CONFIG_PATH\" --base-url \"https:\/\/${PAPERCLIP_FQDN}\"" >&2
 fi
