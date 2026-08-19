@@ -573,10 +573,14 @@ export async function testCodexAcpEnvironment(
         : null;
     const configuredApiKey = configApiKey ?? hostApiKey;
     const configuredCodexHome = isNonEmpty(envConfig.CODEX_HOME) ? envConfig.CODEX_HOME : null;
+    const managedCodexHomeOverride = isNonEmpty(envConfig.PAPERCLIP_CODEX_HOME)
+      ? envConfig.PAPERCLIP_CODEX_HOME
+      : null;
     const credentialReadiness = await evaluateCodexCredentialReadiness({
       env: process.env,
       companyId: ctx.companyId,
       configuredCodexHome,
+      managedCodexHomeOverride,
       configuredApiKey,
     });
 
@@ -615,10 +619,14 @@ export async function testCodexAcpEnvironment(
     // environment is not seeded, so only the adapter config key counts here.
     const configApiKey = isNonEmpty(envConfig.OPENAI_API_KEY) ? envConfig.OPENAI_API_KEY : null;
     const configuredCodexHome = isNonEmpty(envConfig.CODEX_HOME) ? envConfig.CODEX_HOME : null;
+    const managedCodexHomeOverride = isNonEmpty(envConfig.PAPERCLIP_CODEX_HOME)
+      ? envConfig.PAPERCLIP_CODEX_HOME
+      : null;
     const credentialReadiness = await evaluateCodexCredentialReadiness({
       env: process.env,
       companyId: ctx.companyId,
       configuredCodexHome,
+      managedCodexHomeOverride,
       configuredApiKey: configApiKey,
     });
     if (!credentialReadiness.ready) {

@@ -765,6 +765,61 @@ describe("evaluateCodexCredentialReadiness", () => {
     }
   });
 
+  it("resolves the effective home from PAPERCLIP_CODEX_HOME when no CODEX_HOME is configured", async () => {
+    const fx = await makeFixture();
+    try {
+      const override = path.join(fx.root, "override-codex-home");
+      await writeUsableAuth(override);
+      const result = await evaluateCodexCredentialReadiness({
+        env: fx.env,
+        companyId: "company-1",
+        configuredCodexHome: null,
+        managedCodexHomeOverride: override,
+        configuredApiKey: "",
+      });
+      // Still Paperclip-managed: the override relocates the home, it does not
+      // hand ownership to the user the way CODEX_HOME does.
+      expect(result).toMatchObject({ managed: true, authMode: "subscription", ready: true });
+      expect(result.effectiveHome).toBe(path.resolve(override));
+    } finally {
+      await fs.rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("lets an explicit CODEX_HOME win over PAPERCLIP_CODEX_HOME", async () => {
+    const fx = await makeFixture();
+    try {
+      const override = path.join(fx.root, "override-codex-home");
+      await writeUsableAuth(override);
+      const result = await evaluateCodexCredentialReadiness({
+        env: fx.env,
+        companyId: "company-1",
+        configuredCodexHome: fx.managedAgentHome,
+        managedCodexHomeOverride: override,
+        configuredApiKey: "",
+      });
+      expect(result.effectiveHome).toBe(path.resolve(fx.managedAgentHome));
+    } finally {
+      await fs.rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the default managed home when PAPERCLIP_CODEX_HOME is blank", async () => {
+    const fx = await makeFixture();
+    try {
+      const result = await evaluateCodexCredentialReadiness({
+        env: fx.env,
+        companyId: "company-1",
+        configuredCodexHome: null,
+        managedCodexHomeOverride: "   ",
+        configuredApiKey: "",
+      });
+      expect(result.effectiveHome).toBe(path.resolve(fx.managedCompanyHome));
+    } finally {
+      await fs.rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
   it("treats a non-empty resolved OPENAI_API_KEY as ready without touching disk", async () => {
     const fx = await makeFixture();
     try {

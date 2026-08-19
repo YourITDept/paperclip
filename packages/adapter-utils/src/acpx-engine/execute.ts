@@ -1028,11 +1028,20 @@ async function prepareCodexSkillRuntime(input: {
     typeof envConfig.CODEX_HOME === "string" && envConfig.CODEX_HOME.trim().length > 0
       ? path.resolve(envConfig.CODEX_HOME.trim())
       : null;
+  // PAPERCLIP_CODEX_HOME relocates the Paperclip-MANAGED home without opting out
+  // of management (CODEX_HOME above is the self-managed escape hatch). Mirrors
+  // the Codex CLI lane in adapters/codex-local/src/server/execute.ts so both
+  // engines resolve the same home from the same adapter-config env.
+  const managedCodexHomeOverride =
+    typeof envConfig.PAPERCLIP_CODEX_HOME === "string" &&
+    envConfig.PAPERCLIP_CODEX_HOME.trim().length > 0
+      ? path.resolve(envConfig.PAPERCLIP_CODEX_HOME.trim())
+      : null;
   const sourceCodexHome =
     typeof process.env.CODEX_HOME === "string" && process.env.CODEX_HOME.trim().length > 0
       ? path.resolve(process.env.CODEX_HOME.trim())
       : path.join(os.homedir(), ".codex");
-  const managedCodexHome = resolveManagedCodexHomeDir(input.companyId);
+  const managedCodexHome = managedCodexHomeOverride ?? resolveManagedCodexHomeDir(input.companyId);
   const effectiveCodexHome = configuredCodexHome ??
     await prepareManagedCodexHome({
       companyId: input.companyId,

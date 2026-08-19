@@ -378,6 +378,7 @@ export async function assertCodexCredentialsLaunchable(input: {
   runId: string;
   companyId: string;
   configuredCodexHome: string | null;
+  managedCodexHomeOverride?: string | null;
   configuredApiKey: string | null;
   effectiveCodexHome: string;
   target: MaybeResolvedExecutionTarget;
@@ -389,6 +390,7 @@ export async function assertCodexCredentialsLaunchable(input: {
     env: input.env ?? process.env,
     companyId: input.companyId,
     configuredCodexHome: input.configuredCodexHome,
+    managedCodexHomeOverride: input.managedCodexHomeOverride ?? null,
     configuredApiKey: input.configuredApiKey,
   });
   if (!credentialReadiness.managed || credentialReadiness.ready) return;
@@ -631,6 +633,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     typeof envConfig.CODEX_HOME === "string" && envConfig.CODEX_HOME.trim().length > 0
       ? path.resolve(envConfig.CODEX_HOME.trim())
       : null;
+  // PAPERCLIP_CODEX_HOME relocates the Paperclip-MANAGED home; it does not opt
+  // out of management the way CODEX_HOME does. The override still gets auth
+  // seeding, skill injection, and the PAPERCLIP_CODEX_PROVIDERS merge, so it
+  // can be set once at environment scope as an instance-wide default without
+  // turning every agent into a self-managed home. An explicit CODEX_HOME always
+  // wins: this is only consulted when no CODEX_HOME is configured.
+  const managedCodexHomeOverride =
+    typeof envConfig.PAPERCLIP_CODEX_HOME === "string" &&
+    envConfig.PAPERCLIP_CODEX_HOME.trim().length > 0
+      ? path.resolve(envConfig.PAPERCLIP_CODEX_HOME.trim())
+      : null;
   const codexSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredSkillNames = resolveCodexDesiredSkillNames(config, codexSkillEntries);
   if (!executionTargetIsRemote) {
@@ -672,15 +685,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     });
   }
   if (configuredCodexHome == null) {
-    await prepareManagedCodexHome(process.env, onLog, agent.companyId, {
-      apiKey: configuredOpenAiApiKey,
-    });
+    // prepareManagedCodexHome() derives the target from resolveManagedCodexHomeDir();
+    // with an override in play, seed the overridden path directly instead.
+    if (managedCodexHomeOverride) {
+      await seedManagedCodexHome(managedCodexHomeOverride, process.env, onLog, {
+        apiKey: configuredOpenAiApiKey,
+      });
+    } else {
+      await prepareManagedCodexHome(process.env, onLog, agent.companyId, {
+        apiKey: configuredOpenAiApiKey,
+      });
+    }
   } else if (configuredHomeIsManaged) {
     await seedManagedCodexHome(configuredCodexHome, process.env, onLog, {
       apiKey: configuredOpenAiApiKey,
     });
   }
-  const defaultCodexHome = resolveManagedCodexHomeDir(process.env, agent.companyId);
+  const defaultCodexHome =
+    managedCodexHomeOverride ?? resolveManagedCodexHomeDir(process.env, agent.companyId);
   const effectiveCodexHome = configuredCodexHome ?? defaultCodexHome;
   await fs.mkdir(effectiveCodexHome, { recursive: true });
 
@@ -698,6 +720,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     runId,
     companyId: agent.companyId,
     configuredCodexHome,
+    managedCodexHomeOverride,
     configuredApiKey: configuredOpenAiApiKey,
     effectiveCodexHome,
     target: executionTarget,

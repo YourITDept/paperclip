@@ -1190,6 +1190,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
       env: process.env,
       companyId: input.companyId,
       configuredCodexHome: readNonEmptyString(resolvedEnv.CODEX_HOME),
+      managedCodexHomeOverride: readNonEmptyString(resolvedEnv.PAPERCLIP_CODEX_HOME),
       configuredApiKey: readNonEmptyString(resolvedEnv.OPENAI_API_KEY),
     });
     if (readiness.managed && !readiness.ready) {

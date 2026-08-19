@@ -794,6 +794,13 @@ export interface CodexCredentialReadinessInput {
   companyId: string | undefined;
   /** `config.env.CODEX_HOME` for the run, if any. */
   configuredCodexHome: string | null | undefined;
+  /**
+   * `config.env.PAPERCLIP_CODEX_HOME` for the run, if any. Relocates the
+   * Paperclip-managed home without making it self-managed, so readiness must
+   * inspect the overridden path rather than the default managed one. Ignored
+   * when `configuredCodexHome` is set, matching the execute-time precedence.
+   */
+  managedCodexHomeOverride?: string | null | undefined;
   /** Resolved `config.env.OPENAI_API_KEY` value (after secret resolution). */
   configuredApiKey: string | null | undefined;
 }
@@ -836,7 +843,12 @@ export async function evaluateCodexCredentialReadiness(
   const configuredHomeIsManaged =
     configuredCodexHome != null && isManagedCodexHomePath(env, input.companyId, configuredCodexHome);
   const effectiveHomeIsManaged = configuredCodexHome == null || configuredHomeIsManaged;
-  const effectiveHome = configuredCodexHome ?? resolveManagedCodexHomeDir(env, input.companyId);
+  const managedOverrideRaw = nonEmpty(input.managedCodexHomeOverride ?? undefined);
+  const managedCodexHomeOverride = managedOverrideRaw ? path.resolve(managedOverrideRaw) : null;
+  const effectiveHome =
+    configuredCodexHome ??
+    managedCodexHomeOverride ??
+    resolveManagedCodexHomeDir(env, input.companyId);
 
   if (!effectiveHomeIsManaged) {
     // Genuine external override: Paperclip never seeds or inspects it.
