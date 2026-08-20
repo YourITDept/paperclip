@@ -14,6 +14,7 @@ import {
   parseLocalProcessNetworkScope,
 } from "@paperclipai/adapter-utils/local-process-sandbox";
 import { inferOpenAiCompatibleBiller } from "@paperclipai/adapter-utils";
+import { resolveManagedCodexHomeOverride } from "@paperclipai/adapter-utils/server-utils";
 import {
   ensureAdapterExecutionTargetCommandResolvable,
   readAdapterExecutionTarget,
@@ -573,15 +574,16 @@ export async function testCodexAcpEnvironment(
         : null;
     const configuredApiKey = configApiKey ?? hostApiKey;
     const configuredCodexHome = isNonEmpty(envConfig.CODEX_HOME) ? envConfig.CODEX_HOME : null;
-    const managedCodexHomeOverride = isNonEmpty(envConfig.PAPERCLIP_CODEX_HOME)
-      ? envConfig.PAPERCLIP_CODEX_HOME
-      : null;
+    const managedCodexHomeOverride = resolveManagedCodexHomeOverride(envConfig, process.env);
     const credentialReadiness = await evaluateCodexCredentialReadiness({
       env: process.env,
       companyId: ctx.companyId,
       configuredCodexHome,
       managedCodexHomeOverride,
       configuredApiKey,
+      configuredProviders: isNonEmpty(envConfig.PAPERCLIP_CODEX_PROVIDERS)
+        ? envConfig.PAPERCLIP_CODEX_PROVIDERS
+        : process.env.PAPERCLIP_CODEX_PROVIDERS ?? null,
     });
 
     if (credentialReadiness.ready && credentialReadiness.authMode === "api") {
@@ -590,6 +592,15 @@ export async function testCodexAcpEnvironment(
         level: "info",
         message: "OPENAI_API_KEY is set for Codex ACP authentication.",
         detail: `Detected in ${configApiKey ? "adapter config env" : "server environment"}.`,
+      });
+    } else if (credentialReadiness.ready && credentialReadiness.authMode === "provider") {
+      checks.push({
+        code: "codex_acp_model_provider_auth",
+        level: "info",
+        message: `Codex ACP will authenticate through the "${credentialReadiness.modelProvider}" model provider.`,
+        detail:
+          `Configured in ${credentialReadiness.effectiveHome}. The provider supplies its own credential ` +
+          `(env_key or auth command), so no auth.json or OPENAI_API_KEY is required.`,
       });
     } else if (credentialReadiness.ready && !credentialReadiness.managed) {
       checks.push({
@@ -619,15 +630,16 @@ export async function testCodexAcpEnvironment(
     // environment is not seeded, so only the adapter config key counts here.
     const configApiKey = isNonEmpty(envConfig.OPENAI_API_KEY) ? envConfig.OPENAI_API_KEY : null;
     const configuredCodexHome = isNonEmpty(envConfig.CODEX_HOME) ? envConfig.CODEX_HOME : null;
-    const managedCodexHomeOverride = isNonEmpty(envConfig.PAPERCLIP_CODEX_HOME)
-      ? envConfig.PAPERCLIP_CODEX_HOME
-      : null;
+    const managedCodexHomeOverride = resolveManagedCodexHomeOverride(envConfig, process.env);
     const credentialReadiness = await evaluateCodexCredentialReadiness({
       env: process.env,
       companyId: ctx.companyId,
       configuredCodexHome,
       managedCodexHomeOverride,
       configuredApiKey: configApiKey,
+      configuredProviders: isNonEmpty(envConfig.PAPERCLIP_CODEX_PROVIDERS)
+        ? envConfig.PAPERCLIP_CODEX_PROVIDERS
+        : null,
     });
     if (!credentialReadiness.ready) {
       // Emit the neutral canonical check so the user interface can decide login

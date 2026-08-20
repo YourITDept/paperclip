@@ -8,6 +8,8 @@ import {
   ensureSymlink,
   evaluateCodexCredentialReadiness,
   mergeManagedCodexMcpGateways,
+  readCodexHomeCustomModelProvider,
+  readConfiguredCustomModelProvider,
   isManagedCodexHomePath,
   prepareManagedCodexHome,
   reconcileManagedCodexHome,
@@ -804,6 +806,94 @@ describe("evaluateCodexCredentialReadiness", () => {
     }
   });
 
+  // A managed home routed at a non-OpenAI provider has no auth.json to seed and
+  // no use for OPENAI_API_KEY: the credential lives in the provider table
+  // (env_key, or an auth command reading the run env). Gating those runs on
+  // OpenAI credentials blocked a fully-configured OpenRouter home before it
+  // could launch.
+  it("treats a home routed at a custom model provider as ready without any OpenAI credential", async () => {
+    const fx = await makeFixture();
+    try {
+      const override = path.join(fx.root, "openrouter-codex-home");
+      await fs.mkdir(override, { recursive: true });
+      await fs.writeFile(
+        path.join(override, "config.toml"),
+        [
+          'model = "deepseek/deepseek-v4-flash-0731"',
+          'model_provider = "openrouter"',
+          "",
+          "[model_providers.openrouter]",
+          'base_url = "https://openrouter.ai/api/v1"',
+          "",
+          "[model_providers.openrouter.auth]",
+          'command = "sh"',
+        ].join("\n"),
+        "utf8",
+      );
+      const result = await evaluateCodexCredentialReadiness({
+        // No shared-home auth anywhere: readiness must come from the provider.
+        env: { ...fx.env, CODEX_HOME: path.join(fx.root, "absent-shared-home") },
+        companyId: "company-1",
+        configuredCodexHome: null,
+        managedCodexHomeOverride: override,
+        configuredApiKey: "",
+      });
+      expect(result).toMatchObject({
+        managed: true,
+        authMode: "provider",
+        ready: true,
+        modelProvider: "openrouter",
+      });
+      expect(result.effectiveHome).toBe(path.resolve(override));
+    } finally {
+      await fs.rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  // The provider merge happens at execute time, after this gate runs, so a
+  // provider supplied only through the env var is not yet on disk.
+  it("treats a custom provider from PAPERCLIP_CODEX_PROVIDERS as ready", async () => {
+    const fx = await makeFixture();
+    try {
+      const result = await evaluateCodexCredentialReadiness({
+        env: { ...fx.env, CODEX_HOME: path.join(fx.root, "absent-shared-home") },
+        companyId: "company-1",
+        configuredCodexHome: null,
+        managedCodexHomeOverride: null,
+        configuredApiKey: "",
+        configuredProviders: JSON.stringify({
+          providers: { gateway: { base_url: "https://gw.example", env_key: "GW_KEY" } },
+          model_provider: "gateway",
+        }),
+      });
+      expect(result).toMatchObject({ authMode: "provider", ready: true, modelProvider: "gateway" });
+    } finally {
+      await fs.rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  // The conservative direction: an unusable provider config must not be read as
+  // a credential, or a genuinely credential-less run loses its clear blocker.
+  it("keeps the OpenAI credential requirement when the provider config is unusable", async () => {
+    const fx = await makeFixture();
+    try {
+      const override = path.join(fx.root, "half-configured-home");
+      await fs.mkdir(override, { recursive: true });
+      // Selector with no matching [model_providers.x] table — codex rejects this.
+      await fs.writeFile(path.join(override, "config.toml"), 'model_provider = "openrouter"\n', "utf8");
+      const result = await evaluateCodexCredentialReadiness({
+        env: { ...fx.env, CODEX_HOME: path.join(fx.root, "absent-shared-home") },
+        companyId: "company-1",
+        configuredCodexHome: null,
+        managedCodexHomeOverride: override,
+        configuredApiKey: "",
+      });
+      expect(result).toMatchObject({ authMode: "subscription", ready: false });
+    } finally {
+      await fs.rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
   it("falls back to the default managed home when PAPERCLIP_CODEX_HOME is blank", async () => {
     const fx = await makeFixture();
     try {
@@ -1317,5 +1407,87 @@ describe("stageCodexHomeForSync", () => {
       if (staged) await fs.rm(staged, { recursive: true, force: true });
       await fs.rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("readCodexHomeCustomModelProvider", () => {
+  async function withConfig(contents: string): Promise<string | null> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-provider-"));
+    try {
+      await fs.writeFile(path.join(dir, "config.toml"), contents, "utf8");
+      return await readCodexHomeCustomModelProvider(dir);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("returns null for a missing config.toml", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-provider-"));
+    try {
+      expect(await readCodexHomeCustomModelProvider(dir)).toBeNull();
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns the selected provider when its table is defined", async () => {
+    expect(
+      await withConfig('model_provider = "openrouter"\n\n[model_providers.openrouter]\nbase_url = "x"\n'),
+    ).toBe("openrouter");
+  });
+
+  it("reads a quoted table key", async () => {
+    expect(
+      await withConfig('model_provider = "my.gw"\n\n[model_providers."my.gw"]\nbase_url = "x"\n'),
+    ).toBe("my.gw");
+  });
+
+  it("ignores the built-in openai provider", async () => {
+    expect(await withConfig('model_provider = "openai"\n\n[model_providers.openai]\n')).toBeNull();
+  });
+
+  it("ignores a selector with no matching provider table", async () => {
+    expect(await withConfig('model_provider = "openrouter"\n')).toBeNull();
+  });
+
+  it("ignores a commented-out selector", async () => {
+    expect(
+      await withConfig('# model_provider = "openrouter"\n\n[model_providers.openrouter]\n'),
+    ).toBeNull();
+  });
+
+  // TOML puts root keys before the first table header, so a `model_provider`
+  // key appearing later belongs to that table (e.g. a profile), not the root.
+  it("ignores a model_provider key nested inside a table", async () => {
+    expect(
+      await withConfig('[profiles.other]\nmodel_provider = "openrouter"\n\n[model_providers.openrouter]\n'),
+    ).toBeNull();
+  });
+});
+
+describe("readConfiguredCustomModelProvider", () => {
+  it("returns the selected provider from a well-formed value", () => {
+    expect(
+      readConfiguredCustomModelProvider(
+        JSON.stringify({ providers: { gw: { base_url: "x" } }, model_provider: "gw" }),
+      ),
+    ).toBe("gw");
+  });
+
+  it("returns null for a selector with no matching provider entry", () => {
+    expect(
+      readConfiguredCustomModelProvider(JSON.stringify({ providers: { gw: {} }, model_provider: "other" })),
+    ).toBeNull();
+  });
+
+  it("returns null for blank, invalid, or openai-selecting values", () => {
+    expect(readConfiguredCustomModelProvider(null)).toBeNull();
+    expect(readConfiguredCustomModelProvider("   ")).toBeNull();
+    expect(readConfiguredCustomModelProvider("{not json")).toBeNull();
+    expect(
+      readConfiguredCustomModelProvider(
+        JSON.stringify({ providers: { openai: {} }, model_provider: "openai" }),
+      ),
+    ).toBeNull();
   });
 });

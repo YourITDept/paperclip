@@ -2,7 +2,7 @@
 name: codex-home-changes
 description: What the PAPERCLIP_CODEX_HOME ("Codex Home") change set is, why it exists, exactly what was modified, what is verified, and the ranked list of known gaps that explain why it does not yet behave as intended. Read this before touching any codex-local CODEX_HOME resolution code.
 metadata:
-  status: in-progress / not-working-as-intended
+  status: in-progress / openrouter path working; sections 5.2-5.6 open
   owner: Chris (cwa@youritdept.com)
   written: 2026-08-20
   base-commit: 35a3a08d "Check in for now"
@@ -26,10 +26,12 @@ Codex home: a new adapter-config env var **`PAPERCLIP_CODEX_HOME`**.
   staging all still happen — just at a path we chose instead of the default
   `<instanceRoot>/companies/<companyId>/codex-home`.
 
-The **source changes are complete and unit-tested** (52/52 pass in
-`packages/adapters/codex-local/src/server/codex-home.test.ts`), but **end-to-end
-behavior is wrong** — the override does not consistently take effect at runtime.
-Section 5 is the ranked list of why. Start there.
+**Status as of 2026-08-20:** the override now works for the case it was built for.
+The blocker was **not** the override plumbing — it was the credential gate, which
+recognised only OpenAI-shaped credentials and so rejected an OpenRouter home before
+dispatch. See **5.0**, which is the fix and the reproduction. 5.1 and 5.7 are fixed
+too; 5.2 through 5.6 are still open, and 5.6 is still a design decision, not a patch.
+Read 5.0 first, then section 8.
 
 The original one-line requirement, verbatim from `Codex_Home.md` on the
 `W2-v2026.817.0a-CODEX` branch:
@@ -168,11 +170,15 @@ Three new tests (+55):
 
 ```
 npx vitest run packages/adapters/codex-local/src/server/codex-home.test.ts
-# Test Files 1 passed (1) / Tests 52 passed (52)
+# Test Files 1 passed (1) / Tests 65 passed (65)   (52 before the 5.0 fix)
 ```
 
-That is the extent of the verification. **No end-to-end run has been confirmed
-working.** Unit tests cover the *resolution function* in isolation; they do not
+Since 2026-08-20 the OpenRouter path is also confirmed end to end — see 5.0. Three
+test failures in the wider suite (`acp.test.ts` staged-home count, and two `dist/`
+copies of tests whose fixtures are not emitted into `dist/`) are pre-existing and
+reproduce with the branch changes stashed.
+
+Original note: unit tests cover the *resolution function* in isolation. Unit tests cover the *resolution function* in isolation; they do not
 cover whether the override survives the full config → dispatch → adapter → spawn
 path, which is exactly where the reported problem is.
 
@@ -180,7 +186,54 @@ path, which is exactly where the reported problem is.
 
 Each of these is a real, code-confirmed gap. Work top-down.
 
-### 5.1 The Environment Test panel reads the HOST home, not the managed one — HIGH
+### 5.0 The credential gate rejects any non-OpenAI provider — WAS THE BLOCKER, FIXED
+
+Reproduced and fixed on 2026-08-20 while testing an OpenRouter home at
+`/home/octobot/codex-deepseek-v4-flash-0731`.
+
+`evaluateCodexCredentialReadiness()` recognised exactly two credential shapes:
+a usable `auth.json` (ChatGPT tokens or `OPENAI_API_KEY`) and a configured
+`OPENAI_API_KEY`. An OpenRouter home has neither — it authenticates through
+`[model_providers.openrouter.auth]`, a command that reads `$OPENROUTER_API_KEY`
+from the run environment. So the home came back `managed: true, ready: false`,
+and `heartbeat.ts:1189` threw `ConfigurationIncompleteFailure` **before dispatch**.
+The run never reached either lane, which is why the override looked inert and why
+setting `CODEX_HOME` to the same path "worked" — that is the self-managed escape
+hatch, which is always treated as ready.
+
+Measured, before the fix:
+
+```
+PAPERCLIP_CODEX_HOME only  {"managed":true,"authMode":"subscription","ready":false,...}
+CODEX_HOME instead         {"managed":false,"authMode":"subscription","ready":true,...}
+```
+
+This was never specific to `PAPERCLIP_CODEX_HOME`: it blocked the already-supported
+`PAPERCLIP_CODEX_PROVIDERS` path too, and any managed home routed at a gateway or
+OpenAI-compatible endpoint.
+
+Fix: readiness gained a third `authMode`, `"provider"`. A managed home whose
+`config.toml` selects a non-OpenAI `model_provider` **and** defines the matching
+`[model_providers.<id>]` table is ready — the provider owns its own credential, so
+there is nothing for Paperclip to provision. `PAPERCLIP_CODEX_PROVIDERS` is read
+the same way, because that merge happens at execute time, after the gate. A
+half-configured file (selector without a table) stays on the strict OpenAI path.
+If the provider key really is absent, Codex now fails at its first request with
+the provider's own error instead of being pre-empted by a misleading one.
+
+Verified end to end: `codex exec` and `codex-acp` (ACP lane, driven over stdio
+with `CODEX_HOME` pointed at the home and `OPENROUTER_API_KEY` inherited) both
+complete a prompt against `deepseek/deepseek-v4-flash-0731` via OpenRouter, and
+seeding the home is non-destructive — `ensureCopiedFile` is copy-if-absent, so the
+OpenRouter `config.toml` survives, and with no `auth.json` in the shared source
+home there is nothing to symlink over it.
+
+**Operational note:** `PAPERCLIP_CODEX_HOME` is read from the resolved *adapter
+config* env, never from the server's process env. Exporting it in the shell that
+starts Paperclip does nothing. Set it on the **Environment**, which is the base
+layer merged into every run (heartbeat.ts:1109-1113).
+
+### 5.1 The Environment Test panel reads the HOST home, not the managed one — FIXED
 
 `packages/adapters/codex-local/src/server/test.ts:300-307`:
 
@@ -196,7 +249,11 @@ do with the override. **If Chris is judging the change by the Test button, the T
 button is lying.** This is the single most likely explanation for "it doesn't seem
 to be doing what we think it's doing."
 
-Fix: thread the override into this lane the same way acp.ts does.
+Fixed 2026-08-20: `test.ts` now resolves the effective home with the same
+precedence as execute (`CODEX_HOME` > `PAPERCLIP_CODEX_HOME` > derived managed
+home), and reports provider-owned auth as its own check (`codex_model_provider_auth`)
+instead of warning about an `OPENAI_API_KEY` the run never reads. `acp.ts` gained
+the matching `codex_acp_model_provider_auth` check.
 
 ### 5.2 The remote/sandbox Test probe seeds the DEFAULT managed home — HIGH
 
@@ -273,10 +330,16 @@ site-by-site. Two coherent options:
 **Do not start coding section 5 fixes until this is decided** — 5.4 and 5.5 both
 depend on the answer.
 
-### 5.7 No observability — LOW severity, HIGH annoyance
+### 5.7 No observability — FIXED
 
-Nothing logs "override in effect" or "override ignored because CODEX_HOME is set."
-Every failure above is silent. The seeding log line
+Fixed 2026-08-20: both lanes now log the effective home and its provenance on
+every run — `[paperclip] Codex home "<path>" (from CODEX_HOME | PAPERCLIP_CODEX_HOME
+| the default managed path)`, and explicitly `"; PAPERCLIP_CODEX_HOME is set but
+outranked"` when an explicit `CODEX_HOME` wins. That last case is 5.3's silent
+failure, now visible in the run log.
+
+Original note: nothing logged "override in effect" or "override ignored because
+CODEX_HOME is set." Every failure above was silent. The seeding log line
 (`[paperclip] Using ... Codex home "<target>" (seeded from "<source>")`,
 codex-home.ts ~line 686) is the only signal, and it only fires on the seed path.
 
@@ -301,11 +364,13 @@ codex-home.ts ~line 686) is the only signal, and it only fires on the seed path.
 ## 7. Definition of done
 
 - [ ] Resolve the section 5.6 design fork (option (a) or (b)) and write the answer down.
-- [ ] Test lanes (5.1, 5.2) report on the same home the run uses.
+- [x] Non-OpenAI providers pass the credential gate (5.0).
+- [~] Test lanes: 5.1 fixed; 5.2 (sandbox probe seeds the default home) still open.
 - [ ] Per-agent key isolation (5.3) no longer silently defeats the override.
 - [ ] Startup reconciliation (5.4) and device-login promotion (5.5) target the effective home.
-- [ ] One log line naming the effective home and its provenance (`CODEX_HOME` / `PAPERCLIP_CODEX_HOME` / default) on every run (5.7).
-- [ ] An end-to-end run on a relocated home: agent starts, has credentials, skills are injected, work completes.
+- [x] One log line naming the effective home and its provenance (`CODEX_HOME` / `PAPERCLIP_CODEX_HOME` / default) on every run (5.7).
+- [ ] An end-to-end run on a relocated home *through a real agent heartbeat*: the
+      lanes themselves are verified (5.0), but a full agent run is not.
 - [ ] `docs/adapters/codex-local.md` updated — it documents the two-state model
       (see its "Managed `CODEX_HOME`" section, ~lines 48-91) and says nothing about
       the third state.

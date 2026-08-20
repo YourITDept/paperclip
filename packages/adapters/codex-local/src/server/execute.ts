@@ -47,6 +47,7 @@ import {
   stringifyPaperclipWakePayload,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   joinPromptSections,
+  resolveManagedCodexHomeOverride,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   parseLocalProcessFilesystemScope,
@@ -380,6 +381,7 @@ export async function assertCodexCredentialsLaunchable(input: {
   configuredCodexHome: string | null;
   managedCodexHomeOverride?: string | null;
   configuredApiKey: string | null;
+  configuredProviders?: string | null;
   effectiveCodexHome: string;
   target: MaybeResolvedExecutionTarget;
   cwd: string;
@@ -392,6 +394,7 @@ export async function assertCodexCredentialsLaunchable(input: {
     configuredCodexHome: input.configuredCodexHome,
     managedCodexHomeOverride: input.managedCodexHomeOverride ?? null,
     configuredApiKey: input.configuredApiKey,
+    configuredProviders: input.configuredProviders ?? null,
   });
   if (!credentialReadiness.managed || credentialReadiness.ready) return;
 
@@ -635,15 +638,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       : null;
   // PAPERCLIP_CODEX_HOME relocates the Paperclip-MANAGED home; it does not opt
   // out of management the way CODEX_HOME does. The override still gets auth
-  // seeding, skill injection, and the PAPERCLIP_CODEX_PROVIDERS merge, so it
-  // can be set once at environment scope as an instance-wide default without
-  // turning every agent into a self-managed home. An explicit CODEX_HOME always
-  // wins: this is only consulted when no CODEX_HOME is configured.
-  const managedCodexHomeOverride =
-    typeof envConfig.PAPERCLIP_CODEX_HOME === "string" &&
-    envConfig.PAPERCLIP_CODEX_HOME.trim().length > 0
-      ? path.resolve(envConfig.PAPERCLIP_CODEX_HOME.trim())
-      : null;
+  // seeding, skill injection, and the PAPERCLIP_CODEX_PROVIDERS merge, so it can
+  // be set once — on a Paperclip Environment, or in the server's own process env
+  // — as an instance-wide default without turning every agent into a
+  // self-managed home. An explicit CODEX_HOME always wins: this is only
+  // consulted when no CODEX_HOME is configured.
+  const managedCodexHomeOverride = resolveManagedCodexHomeOverride(envConfig, process.env);
   const codexSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredSkillNames = resolveCodexDesiredSkillNames(config, codexSkillEntries);
   if (!executionTargetIsRemote) {
@@ -653,6 +653,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     typeof envConfig.OPENAI_API_KEY === "string" && envConfig.OPENAI_API_KEY.trim().length > 0
       ? envConfig.OPENAI_API_KEY.trim()
       : null;
+  // Read for the credential gate below, which runs before prepareCodexRuntimeConfig()
+  // merges these providers into the home's config.toml. Falls back to the host
+  // value the merge itself falls back to (runtime-config.ts), so the gate and the
+  // merge agree on which provider the run will use.
+  const configuredCodexProviders =
+    typeof envConfig.PAPERCLIP_CODEX_PROVIDERS === "string" &&
+    envConfig.PAPERCLIP_CODEX_PROVIDERS.trim().length > 0
+      ? envConfig.PAPERCLIP_CODEX_PROVIDERS.trim()
+      : process.env.PAPERCLIP_CODEX_PROVIDERS ?? null;
   // A configured CODEX_HOME that lives under the Paperclip-managed company tree
   // (the per-agent home set by the server isolation guard) still needs auth
   // seeded — it ships with no credentials and OPENAI_API_KEY="" by default.
@@ -705,6 +714,21 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     managedCodexHomeOverride ?? resolveManagedCodexHomeDir(process.env, agent.companyId);
   const effectiveCodexHome = configuredCodexHome ?? defaultCodexHome;
   await fs.mkdir(effectiveCodexHome, { recursive: true });
+  // Name the effective home and where it came from on every run. Without this
+  // an ignored PAPERCLIP_CODEX_HOME (an explicit CODEX_HOME outranks it, and
+  // the per-agent key-isolation guard sets one implicitly) is silent, and the
+  // only way to tell which home a run used is to infer it from the seeding log
+  // line, which fires only on the seed path.
+  await onLog(
+    "stdout",
+    `[paperclip] Codex home "${effectiveCodexHome}" (from ${
+      configuredCodexHome
+        ? `CODEX_HOME${managedCodexHomeOverride ? "; PAPERCLIP_CODEX_HOME is set but outranked" : ""}`
+        : managedCodexHomeOverride
+        ? "PAPERCLIP_CODEX_HOME"
+        : "the default managed path"
+    }).\n`,
+  );
 
   // Never launch a managed CODEX_HOME with no credentials. Without auth.json
   // and with OPENAI_API_KEY="" the provider rejects every request with
@@ -722,6 +746,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     configuredCodexHome,
     managedCodexHomeOverride,
     configuredApiKey: configuredOpenAiApiKey,
+    configuredProviders: configuredCodexProviders,
     effectiveCodexHome,
     target: executionTarget,
     cwd,

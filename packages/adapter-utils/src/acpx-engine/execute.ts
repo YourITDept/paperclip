@@ -76,6 +76,7 @@ import {
   type AcpRuntimeUsageBreakdown,
   type AcpRuntimeUsageCost,
 } from "acpx/runtime";
+import { resolveManagedCodexHomeOverride } from "../server-utils.js";
 import {
   DEFAULT_ACP_ENGINE_AGENT,
   DEFAULT_ACP_ENGINE_MODE,
@@ -1032,11 +1033,7 @@ async function prepareCodexSkillRuntime(input: {
   // of management (CODEX_HOME above is the self-managed escape hatch). Mirrors
   // the Codex CLI lane in adapters/codex-local/src/server/execute.ts so both
   // engines resolve the same home from the same adapter-config env.
-  const managedCodexHomeOverride =
-    typeof envConfig.PAPERCLIP_CODEX_HOME === "string" &&
-    envConfig.PAPERCLIP_CODEX_HOME.trim().length > 0
-      ? path.resolve(envConfig.PAPERCLIP_CODEX_HOME.trim())
-      : null;
+  const managedCodexHomeOverride = resolveManagedCodexHomeOverride(envConfig, process.env);
   const sourceCodexHome =
     typeof process.env.CODEX_HOME === "string" && process.env.CODEX_HOME.trim().length > 0
       ? path.resolve(process.env.CODEX_HOME.trim())
@@ -1093,6 +1090,19 @@ async function prepareCodexSkillRuntime(input: {
   await writeManagedCodexSkillsManifest(skillsHome, selectedSkills.map((entry) => entry.runtimeName));
 
   input.env.CODEX_HOME = effectiveCodexHome;
+  // Provenance, not just the path: an explicit CODEX_HOME silently outranks
+  // PAPERCLIP_CODEX_HOME, so a run using the "wrong" home is otherwise
+  // indistinguishable from one using the right one.
+  await input.onLog(
+    "stdout",
+    `[paperclip] ACPX Codex home "${effectiveCodexHome}" (from ${
+      configuredCodexHome
+        ? `CODEX_HOME${managedCodexHomeOverride ? "; PAPERCLIP_CODEX_HOME is set but outranked" : ""}`
+        : managedCodexHomeOverride
+        ? "PAPERCLIP_CODEX_HOME"
+        : "the default managed path"
+    }).\n`,
+  );
 
   return {
     identity: {

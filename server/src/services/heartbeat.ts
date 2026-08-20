@@ -280,6 +280,7 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import { extractSkillMentionIds, isUuidLike } from "@paperclipai/shared";
 import { evaluateCodexCredentialReadiness } from "@paperclipai/adapter-codex-local/server";
+import { resolveManagedCodexHomeOverride } from "@paperclipai/adapter-utils/server-utils";
 import { environmentService } from "./environments.js";
 import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.js";
 import { environmentRuntimeService } from "./environment-runtime.js";
@@ -1190,8 +1191,12 @@ export async function resolveExecutionRunAdapterConfig(input: {
       env: process.env,
       companyId: input.companyId,
       configuredCodexHome: readNonEmptyString(resolvedEnv.CODEX_HOME),
-      managedCodexHomeOverride: readNonEmptyString(resolvedEnv.PAPERCLIP_CODEX_HOME),
+      // Host-env fallback included, so the pre-dispatch gate inspects the same
+      // home the adapter will resolve. Without it an engine-level default makes
+      // the gate check the derived managed home while the run uses the override.
+      managedCodexHomeOverride: resolveManagedCodexHomeOverride(resolvedEnv, process.env),
       configuredApiKey: readNonEmptyString(resolvedEnv.OPENAI_API_KEY),
+      configuredProviders: readNonEmptyString(resolvedEnv.PAPERCLIP_CODEX_PROVIDERS),
     });
     if (readiness.managed && !readiness.ready) {
       throw new ConfigurationIncompleteFailure(
