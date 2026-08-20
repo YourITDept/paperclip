@@ -1,0 +1,1 @@
+Making changes so I can use the Codex Home as a default. It needs to be set so that all new agents are at least using the default codex configuration, which is an Openrouter setup. 
