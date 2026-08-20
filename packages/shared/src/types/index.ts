@@ -407,6 +407,14 @@ export type {
   WorkspaceOperationPhase,
   WorkspaceOperationStatus,
 } from "./workspace-operation.js";
+export { WORKSPACE_READINESS_STATES } from "./workspace-readiness.js";
+export type {
+  WorkspaceLoginHandoffTicketResponse,
+  WorkspaceReadiness,
+  WorkspaceReadinessProbeResult,
+  WorkspaceReadinessState,
+  WorkspaceSeedReadinessState,
+} from "./workspace-readiness.js";
 export type {
   NormalizedWorkspaceFileAvailabilityQuery,
   WorkspaceFileAvailabilityQuery,
@@ -687,6 +695,8 @@ export type {
   RequestConfirmationResult,
   RequestConfirmationToolActionPayload,
   RequestConfirmationToolActionResult,
+  RequestConfirmationSecretProposalPayload,
+  RequestConfirmationSecretProposalResult,
   RequestCheckboxConfirmationOption,
   RequestCheckboxConfirmationPayload,
   RequestCheckboxConfirmationResult,

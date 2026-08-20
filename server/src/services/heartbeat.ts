@@ -471,6 +471,7 @@ const GIT_SENSITIVE_LOCAL_ADAPTER_TYPES = new Set([
   "gemini_local",
   "grok_local",
   "hermes_local",
+  "kimi_local",
   "opencode_local",
   "pi_local",
 ]);
@@ -771,6 +772,7 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
   "cursor",
   "gemini_local",
   "hermes_local",
+  "kimi_local",
   "opencode_local",
   "pi_local",
 ]);
@@ -2871,6 +2873,12 @@ export type ReferencedProjectFailureReason = "authorization" | "resolution" | "s
 export interface ReferencedProjectFailure {
   projectId: string;
   reason: ReferencedProjectFailureReason;
+  /**
+   * The failure message, when the layer that dropped the project produced one. A `staging` failure
+   * carries the remote extract or sync error here, so a reader of the run log learns why the project
+   * dropped. An `authorization` or `resolution` drop omits this field.
+   */
+  error?: string;
 }
 
 export interface ResolvedRunReferencedProjects {
@@ -3215,6 +3223,8 @@ export interface ReferencedProjectRunObservability {
   referenced_project_failures: Array<{
     project_id: string;
     reason: ReferencedProjectFailureReason;
+    /** The failure message for a `staging` drop; absent for an `authorization` or `resolution` drop. */
+    error?: string;
   }>;
 }
 
@@ -3237,6 +3247,9 @@ export function buildReferencedProjectRunObservability(input: {
     referenced_project_failures: input.failures.map((failure) => ({
       project_id: failure.projectId,
       reason: failure.reason,
+      // Carry the error only when the layer produced one, so an authorization or resolution drop
+      // stays a two-field entry and a staging drop names its reason.
+      ...(failure.error !== undefined ? { error: failure.error } : {}),
     })),
   };
 }
@@ -16073,6 +16086,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           failures: referencedProjectStagingFailures.map((failure) => ({
             projectId: failure.projectId,
             reason: "staging" as const,
+            error: failure.error,
           })),
         });
         logger.info(
