@@ -4,6 +4,7 @@ import path from "node:path";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
 import { readSubscriptionAccountId } from "./codex-auth-cache.js";
+import { resolveConfiguredVaultName, resolveVaultDir } from "./codex-vault.js";
 
 const TRUTHY_ENV_RE = /^(1|true|yes|on)$/i;
 const COPIED_SHARED_FILES = ["config.json", "config.toml", "instructions.md"] as const;
@@ -92,9 +93,27 @@ function readApiKeyFromAuthPayload(authPayload: unknown): string | null {
   return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
 }
 
+/**
+ * Resolves the home the managed seeding treats as the credential SOURCE.
+ *
+ * Precedence, highest first:
+ *   1. A named vault (`PAPERCLIP_CODEX_VAULT`) under the vault root. A vault is
+ *      a per-identity credential store, so binding a run to one makes that
+ *      identity's `auth.json` the symlink source for the agent's managed home.
+ *      Many agents can share one vault: they get their own runtime state and one
+ *      shared, rotating credential, which is what keeps single-use refresh
+ *      tokens from invalidating each other (#5028).
+ *   2. An explicit `CODEX_HOME` — the instance-global shared home.
+ *   3. `~/.codex`.
+ *
+ * A malformed vault name resolves to null in {@link resolveConfiguredVaultName}
+ * and therefore falls through to the existing behaviour rather than failing.
+ */
 export function resolveSharedCodexHomeDir(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
+  const vaultName = resolveConfiguredVaultName({}, env);
+  if (vaultName) return resolveVaultDir(vaultName, env);
   const fromEnv = nonEmpty(env.CODEX_HOME);
   return fromEnv ? path.resolve(fromEnv) : path.join(os.homedir(), ".codex");
 }

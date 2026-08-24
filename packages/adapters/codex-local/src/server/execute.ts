@@ -82,6 +82,11 @@ import {
   type ManagedCodexMcpGateway,
 } from "./codex-home.js";
 import {
+  CODEX_VAULT_ENV_KEY,
+  readVaultSummary,
+  resolveConfiguredVaultName,
+} from "./codex-vault.js";
+import {
   CODEX_SANDBOX_AUTH_EXISTS_COMMAND,
   CODEX_SANDBOX_AUTH_PRECEDENCE_WARNING,
   CODEX_SANDBOX_AUTH_PRECEDENCE_WARNING_LOG_LINE,
@@ -679,8 +684,42 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // holds no credential it does nothing (no random pick). This keeps the change
   // additive: the managed home still symlinks the shared `auth.json`, now at its
   // freshest same-identity copy. The off-switch (default on) skips the vend.
+  // The named credential vault for this run, if the agent is bound to one. A
+  // vault is a per-identity credential SOURCE: the managed home symlinks its
+  // `auth.json` instead of the instance-global shared one, so several agents can
+  // share one identity without holding independent copies of a single-use
+  // refresh token (#5028). The name is threaded through a derived environment
+  // rather than mutating `process.env`, so one run can never change what another
+  // concurrent run resolves.
+  const configuredVaultName = resolveConfiguredVaultName(envConfig, process.env);
+  const credentialEnv: NodeJS.ProcessEnv = configuredVaultName
+    ? { ...process.env, [CODEX_VAULT_ENV_KEY]: configuredVaultName }
+    : process.env;
+  if (configuredVaultName) {
+    // Name the vault and its credential state on every bound run. A vault that
+    // exists but holds no usable credential otherwise fails later as an opaque
+    // auth error, with nothing pointing at the empty vault as the cause.
+    const vaultSummary = await readVaultSummary(configuredVaultName, process.env).catch(() => null);
+    await onLog(
+      "stdout",
+      vaultSummary?.hasCredential
+        ? `[paperclip] Codex credential vault "${configuredVaultName}" (${vaultSummary.authMode}) -> ${vaultSummary.dir}\n`
+        : `[paperclip] Codex credential vault "${configuredVaultName}" holds no usable credential; run a device login for it.\n`,
+    );
+  } else if (
+    typeof envConfig[CODEX_VAULT_ENV_KEY] === "string" &&
+    (envConfig[CODEX_VAULT_ENV_KEY] as string).trim().length > 0
+  ) {
+    // A configured but malformed name degrades to the shared credential instead
+    // of failing the run. Silence would make that indistinguishable from an
+    // agent that was never bound to a vault at all.
+    await onLog(
+      "stderr",
+      `[paperclip] Ignoring an invalid ${CODEX_VAULT_ENV_KEY} value; using the shared Codex credential.\n`,
+    );
+  }
   if (isCodexAuthCacheEnabled(process.env)) {
-    const sharedHomeAuthPath = path.join(resolveSharedCodexHomeDir(process.env), "auth.json");
+    const sharedHomeAuthPath = path.join(resolveSharedCodexHomeDir(credentialEnv), "auth.json");
     await selectVendCredential(
       sharedHomeAuthPath,
       (accountId) => resolveCodexAuthCacheEntryPath(process.env, accountId, agent.companyId),
@@ -699,16 +738,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // prepareManagedCodexHome() derives the target from resolveManagedCodexHomeDir();
     // with an override in play, seed the overridden path directly instead.
     if (managedCodexHomeOverride) {
-      await seedManagedCodexHome(managedCodexHomeOverride, process.env, onLog, {
+      await seedManagedCodexHome(managedCodexHomeOverride, credentialEnv, onLog, {
         apiKey: configuredOpenAiApiKey,
       });
     } else {
-      await prepareManagedCodexHome(process.env, onLog, agent.companyId, {
+      await prepareManagedCodexHome(credentialEnv, onLog, agent.companyId, {
         apiKey: configuredOpenAiApiKey,
       });
     }
   } else if (configuredHomeIsManaged) {
-    await seedManagedCodexHome(configuredCodexHome, process.env, onLog, {
+    await seedManagedCodexHome(configuredCodexHome, credentialEnv, onLog, {
       apiKey: configuredOpenAiApiKey,
     });
   }

@@ -21,6 +21,35 @@ export {
   type CodexCredentialReadinessInput,
   type CodexCredentialAuthMode,
 } from "./codex-home.js";
+export {
+  CODEX_VAULT_CREDENTIAL_REJECTED,
+  CODEX_VAULT_ENV_KEY,
+  CODEX_VAULT_NAME_INVALID,
+  CODEX_VAULT_ROOT_ENV_KEY,
+  DEFAULT_CODEX_VAULT_ROOT,
+  assertValidVaultName,
+  ensureVaultDir,
+  isValidVaultName,
+  listVaults,
+  promoteVaultCredential,
+  readVaultSummary,
+  resolveConfiguredVaultName,
+  resolveVaultAuthPath,
+  resolveVaultConfigPath,
+  resolveVaultDir,
+  resolveVaultRoot,
+  type CodexVaultSummary,
+} from "./codex-vault.js";
+export {
+  CODEX_LOGIN_BIN_ENV_KEY,
+  MAX_HOST_AUTH_BYTES,
+  resolveCodexExecutable,
+  HOST_LOGIN_AUTH_READ_ERROR,
+  createHostLoginDriver,
+  createLoginStagingHome,
+  removeLoginStagingHome,
+  type HostLoginDriverOptions,
+} from "./host-login-pty.js";
 export { listCodexSkills, syncCodexSkills } from "./skills.js";
 export { testEnvironment } from "./test.js";
 export {

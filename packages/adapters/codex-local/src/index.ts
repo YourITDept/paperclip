@@ -101,6 +101,7 @@ Core fields:
 - command (string, optional): defaults to "codex"
 - extraArgs (string[], optional): additional CLI args
 - env (object, optional): KEY=VALUE environment variables
+- env.PAPERCLIP_CODEX_VAULT (string, optional): the name of a Codex credential vault under the vault root (default /sysops/llm/codex). Binding an agent to a vault makes that vault's auth.json the credential source for the run: the managed home symlinks it rather than copying it, so several agents can share one identity without invalidating each other's single-use refresh token. Leave unset to use the instance-global shared credential. An unknown or malformed name falls back to the shared credential and logs the fallback.
 - workspaceStrategy (object, optional): execution workspace strategy; currently supports { type: "git_worktree", baseRef?, branchTemplate?, worktreeParentDir? }
 - workspaceRuntime (object, optional): reserved for workspace runtime metadata; workspace runtime services are manually controlled from the workspace UI and are not auto-started by heartbeats
 - filesystemScope (string, optional): set to "workspace" to confine local CLI filesystem access with Bubblewrap. Off by default. The workspace and managed CODEX_HOME remain writable; other host paths are hidden.

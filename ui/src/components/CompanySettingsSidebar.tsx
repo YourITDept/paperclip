@@ -193,6 +193,13 @@ export function CompanySettingsSidebar() {
               icon={Cpu}
             />
           )}
+          {showPage("instance.adapters") && (
+            <SidebarNavItem
+              to={`${INSTANCE_SETTINGS_PATH_PREFIX}/codex-logins`}
+              label="Codex logins"
+              icon={KeyRound}
+            />
+          )}
         </div>
       </nav>
     </aside>
