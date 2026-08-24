@@ -1190,4 +1190,73 @@ describe("InviteLandingPage", () => {
       root.unmount();
     });
   });
+  it("shows no stale 'Invite not found' when a member opens the link with a warm session", async () => {
+    // The shape a real member hits: signed in already, so session and health are
+    // warm in the SPA cache while the invite fetch is still in flight. Every
+    // auto-accept term reads a field off an invite that has not landed yet, and
+    // an absent invite answers each one permissively — so the page used to fire
+    // acceptance against no invite, and the mutation's own `!invite` guard left
+    // "Invite not found" sitting under the "Already in this company" panel.
+    getSessionMock.mockResolvedValue({
+      session: { id: "session-1", userId: "user-1" },
+      user: { id: "user-1", name: "Jane Example", email: "jane@example.com", image: null },
+    });
+    listCompaniesMock.mockResolvedValue([{ id: "company-1", name: "Acme Robotics" }]);
+
+    let resolveInvite: ((value: unknown) => void) | undefined;
+    getInviteMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveInvite = resolve;
+        }),
+    );
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
+    });
+    queryClient.setQueryData(queryKeys.auth.session, {
+      session: { id: "session-1", userId: "user-1" },
+      user: { id: "user-1", name: "Jane Example", email: "jane@example.com", image: null },
+    });
+    queryClient.setQueryData(queryKeys.health, { status: "ok", deploymentMode: "authenticated" });
+
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/invite/pcp_invite_test"]}>
+          <QueryClientProvider client={queryClient}>
+            <Routes>
+              <Route path="/invite/:token" element={<InviteLandingPage />} />
+            </Routes>
+          </QueryClientProvider>
+        </MemoryRouter>,
+      );
+    });
+    await flushReact();
+
+    expect(acceptInviteMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveInvite?.({
+        id: "invite-1",
+        companyId: "company-1",
+        companyName: "Acme Robotics",
+        inviteType: "company_join",
+        allowedJoinTypes: "both",
+        humanRole: "operator",
+        expiresAt: "2027-03-07T00:10:00.000Z",
+      });
+    });
+    await flushReact();
+    await flushReact();
+    await flushReact();
+
+    expect(container.textContent).toContain("Already in this company");
+    expect(container.textContent).not.toContain("Invite not found");
+    expect(acceptInviteMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
 });

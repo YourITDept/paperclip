@@ -312,6 +312,14 @@ export function InviteLandingPage() {
     invite?.allowedJoinTypes !== "agent";
   const showsAgentForm = invite?.inviteType !== "bootstrap_ceo" && invite?.allowedJoinTypes === "agent";
   const shouldAutoAcceptHumanInvite =
+    // `invite` first: every term below reads a field off it, and an absent
+    // invite answers each one the permissive way (`undefined !== "bootstrap_ceo"`,
+    // no companyId to check membership against). A signed-in member opening the
+    // link with a warm session cache therefore auto-accepted while the invite
+    // fetch was still in flight, and the mutation's own `!invite` guard set
+    // "Invite not found" — a stale error that then sat under the
+    // "Already in this company" panel once the invite finally landed.
+    Boolean(invite) &&
     Boolean(sessionQuery.data) &&
     !showsAgentForm &&
     invite?.inviteType !== "bootstrap_ceo" &&
