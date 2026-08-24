@@ -24,10 +24,11 @@ import { cn } from "../lib/utils";
 
 // The Codex credential vault settings page.
 //
-// A vault is one named directory holding one Codex identity's credential. An
-// instance admin provisions a vault here by running a device login; agents then
-// bind to it with `env.PAPERCLIP_CODEX_VAULT`. Provisioning several vaults is how
-// one instance runs several agents against several Codex accounts.
+// Each entry is one named directory holding one Codex account's credential. An
+// instance admin provisions one here by running a device login; an agent then
+// uses it by setting `env.CODEX_HOME` to the directory's full path. Provisioning
+// several is how one instance runs several agents against several Codex
+// accounts.
 //
 // The one-time code is shown only to the admin who started the login and is
 // dropped as soon as the login completes.
@@ -66,7 +67,7 @@ function Countdown({ expiresAt }: { expiresAt: number }) {
   );
 }
 
-function CopyButton({ value }: { value: string }) {
+function CopyButton({ value, label = "Copy" }: { value: string; label?: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <Button
@@ -83,7 +84,7 @@ function CopyButton({ value }: { value: string }) {
       }}
     >
       {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-      {copied ? "Copied" : "Copy"}
+      {copied ? "Copied" : label}
     </Button>
   );
 }
@@ -126,7 +127,7 @@ function LoginPanel({
       <div className="space-y-2 py-2">
         <div className="flex items-center gap-2 text-sm text-green-400">
           <Check className="size-4" />
-          Signed in. The credential is stored in this vault.
+          Signed in. Copy this directory&rsquo;s path into an agent&rsquo;s CODEX_HOME.
         </div>
         <Button variant="outline" size="sm" onClick={onDone}>
           Done
@@ -248,11 +249,11 @@ export function InstanceCodexVaults() {
       <div className="space-y-1">
         <h1 className="text-xl font-bold">Codex logins</h1>
         <p className="text-sm text-muted-foreground">
-          Each login is stored in its own directory and holds one Codex account. Bind an agent to
-          one by setting{" "}
-          <code className="font-mono text-xs">PAPERCLIP_CODEX_VAULT</code> in its adapter
-          configuration. Several agents can share a login — they follow the same credential, so a
-          token refresh by one never signs the others out.
+          Each login is stored in its own directory and holds one Codex account. Point an agent at
+          one by setting <code className="font-mono text-xs">CODEX_HOME</code> to that
+          directory&rsquo;s full path in its adapter configuration. Several agents can share a
+          login — they read the same credential file, so a token refresh by one never signs the
+          others out.
         </p>
         {vaultsQuery.data?.root ? (
           <p className="font-mono text-xs text-muted-foreground">{vaultsQuery.data.root}</p>
@@ -352,8 +353,11 @@ export function InstanceCodexVaults() {
                       </Badge>
                     )}
                   </div>
-                  <div className="truncate font-mono text-xs text-muted-foreground">
-                    {vault.dir}
+                  <div className="flex items-center gap-1.5">
+                    <span className="truncate font-mono text-xs text-muted-foreground">
+                      {vault.dir}
+                    </span>
+                    <CopyButton value={vault.dir} label="Copy path" />
                   </div>
                   {vault.accountSuffix ? (
                     <div className="text-xs text-muted-foreground">

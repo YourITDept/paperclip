@@ -3,27 +3,31 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { withDirectoryMergeLock } from "@paperclipai/adapter-utils/workspace-restore-merge";
 
-// The named Codex credential vault store.
+// The named Codex home store.
 //
-// A vault is one operator-named directory that holds the durable credential for
-// exactly one Codex identity:
+// Each entry is one operator-named directory holding one Codex account:
 //
 //   /sysops/llm/codex/<name>/
 //   ├── auth.json     the credential (0600)
-//   └── config.toml   provider/trust configuration copied into agent homes
+//   └── config.toml   provider / trust configuration
 //
-// A vault is a credential SOURCE, not a run home. `seedManagedCodexHome`
-// symlinks `auth.json` out of it into each agent's own managed home, so many
-// agents share one credential while keeping their own runtime state.
+// Paperclip provisions the directory and runs a device login into it. An agent
+// then uses it by setting `CODEX_HOME` to the full path in its adapter config.
 //
-// Why the symlink matters: Codex refresh tokens rotate and are single-use. Two
-// agents holding independent COPIES of one identity's credential invalidate each
-// other on the next run (`refresh_token_reused`, #5028). One writable file per
-// identity, linked rather than copied, is the only shape that survives rotation.
+// That is the whole mechanism. `CODEX_HOME` is an existing, self-managed
+// override: Paperclip resolves it on both the CLI and ACP engines, performs no
+// seeding, and its credential-readiness gate treats it as ready without
+// inspection. Nothing here participates in run-time resolution.
 //
-// Security: a vault holds a full account credential. The store derives every
-// path by joining a validated name onto the fixed root, so a caller-supplied
-// name can never traverse out. Directories are 0700 and credentials 0600.
+// Several agents may share one directory. They then share one `auth.json` —
+// the same file, not copies — so the single-use refresh-token rotation Codex
+// performs is visible to all of them immediately. They also share the rest of
+// the directory (sqlite state, `sessions/`, and the `skills/` Paperclip injects
+// at run time); give each agent its own directory when that matters.
+//
+// Security: a directory holds a full account credential. Every path is derived
+// by joining a validated name onto a fixed root, so a caller-supplied name can
+// never traverse out. Directories are 0700 and credentials 0600.
 
 /**
  * The fixed default root for named vaults. `PAPERCLIP_CODEX_VAULT_ROOT`
@@ -31,8 +35,6 @@ import { withDirectoryMergeLock } from "@paperclipai/adapter-utils/workspace-res
  */
 export const DEFAULT_CODEX_VAULT_ROOT = "/sysops/llm/codex";
 
-/** The environment key an agent sets to bind its runs to a named vault. */
-export const CODEX_VAULT_ENV_KEY = "PAPERCLIP_CODEX_VAULT";
 /** The environment key that relocates the vault root. */
 export const CODEX_VAULT_ROOT_ENV_KEY = "PAPERCLIP_CODEX_VAULT_ROOT";
 
@@ -109,28 +111,9 @@ export function resolveVaultConfigPath(name: string, env: NodeJS.ProcessEnv = pr
   return path.join(resolveVaultDir(name, env), CONFIG_FILE_NAME);
 }
 
-/**
- * Reads the vault name an agent run is bound to, or null. Reads the run's
- * adapter config first and the host environment second, matching how
- * `PAPERCLIP_CODEX_PROVIDERS` resolves. An invalid name resolves to null rather
- * than throwing, so a malformed value degrades to the default shared credential
- * instead of failing the run; the execute path logs the fallback.
- */
-export function resolveConfiguredVaultName(
-  envConfig: Record<string, unknown>,
-  hostEnv: NodeJS.ProcessEnv = process.env,
-): string | null {
-  const fromConfig = typeof envConfig[CODEX_VAULT_ENV_KEY] === "string"
-    ? nonEmpty(envConfig[CODEX_VAULT_ENV_KEY] as string)
-    : null;
-  const candidate = fromConfig ?? nonEmpty(hostEnv[CODEX_VAULT_ENV_KEY]);
-  if (candidate === null) return null;
-  return isValidVaultName(candidate) ? candidate : null;
-}
-
-const DEFAULT_CONFIG_TOML = `# Paperclip Codex credential vault.
-# This file is copied into every agent home bound to this vault.
-# Add model providers, trusted projects, and MCP servers here.
+const DEFAULT_CONFIG_TOML = `# Paperclip-provisioned Codex home.
+# Point an agent here by setting CODEX_HOME to this directory.
+# Add model providers, trusted projects, and MCP servers below.
 `;
 
 /**

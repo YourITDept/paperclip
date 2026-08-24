@@ -11,11 +11,11 @@ import { getActorInfo } from "./authz.js";
 
 // The Codex credential vault routes.
 //
-// A vault is one named directory holding one Codex identity's durable
-// credential. Provisioning several vaults is how an instance runs several agents
-// against several Codex accounts: each agent binds to a vault through
-// `env.PAPERCLIP_CODEX_VAULT`, and the adapter symlinks that vault's `auth.json`
-// into the agent's own managed home.
+// A vault is one named directory holding one Codex account's durable credential.
+// Provisioning several is how an instance runs several agents against several
+// Codex accounts: an agent uses one by setting `env.CODEX_HOME` to the
+// directory's full path, which Paperclip already honours on both the CLI and ACP
+// engines as a self-managed home.
 //
 // Authorization: every route requires instance admin. A vault lives outside every
 // company's isolation boundary — the vault root is a host path, not company

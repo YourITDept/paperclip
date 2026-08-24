@@ -23,7 +23,6 @@ export {
 } from "./codex-home.js";
 export {
   CODEX_VAULT_CREDENTIAL_REJECTED,
-  CODEX_VAULT_ENV_KEY,
   CODEX_VAULT_NAME_INVALID,
   CODEX_VAULT_ROOT_ENV_KEY,
   DEFAULT_CODEX_VAULT_ROOT,
@@ -33,7 +32,6 @@ export {
   listVaults,
   promoteVaultCredential,
   readVaultSummary,
-  resolveConfiguredVaultName,
   resolveVaultAuthPath,
   resolveVaultConfigPath,
   resolveVaultDir,

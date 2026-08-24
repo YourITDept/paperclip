@@ -3,7 +3,6 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
-  CODEX_VAULT_ENV_KEY,
   CODEX_VAULT_NAME_INVALID,
   CODEX_VAULT_ROOT_ENV_KEY,
   DEFAULT_CODEX_VAULT_ROOT,
@@ -11,11 +10,9 @@ import {
   isValidVaultName,
   listVaults,
   readVaultSummary,
-  resolveConfiguredVaultName,
   resolveVaultDir,
   resolveVaultRoot,
 } from "./codex-vault.js";
-import { resolveSharedCodexHomeDir } from "./codex-home.js";
 
 let root: string;
 let env: NodeJS.ProcessEnv;
@@ -175,42 +172,5 @@ describe("listVaults", () => {
   it("lists empty when the root does not exist", async () => {
     const absent = { [CODEX_VAULT_ROOT_ENV_KEY]: path.join(root, "absent") };
     expect(await listVaults(absent)).toEqual([]);
-  });
-});
-
-describe("resolveConfiguredVaultName", () => {
-  it("prefers the agent config over the host environment", () => {
-    const hostEnv = { ...env, [CODEX_VAULT_ENV_KEY]: "host_vault" };
-    expect(resolveConfiguredVaultName({ [CODEX_VAULT_ENV_KEY]: "agent_vault" }, hostEnv)).toBe(
-      "agent_vault",
-    );
-    expect(resolveConfiguredVaultName({}, hostEnv)).toBe("host_vault");
-  });
-
-  it("degrades a malformed name to null rather than throwing", () => {
-    expect(resolveConfiguredVaultName({ [CODEX_VAULT_ENV_KEY]: "../escape" }, env)).toBeNull();
-    expect(resolveConfiguredVaultName({}, env)).toBeNull();
-  });
-});
-
-describe("resolveSharedCodexHomeDir precedence", () => {
-  it("prefers a named vault over CODEX_HOME", () => {
-    const withBoth = {
-      ...env,
-      CODEX_HOME: "/somewhere/else",
-      [CODEX_VAULT_ENV_KEY]: "chris_codex",
-    };
-    expect(resolveSharedCodexHomeDir(withBoth)).toBe(path.join(root, "chris_codex"));
-  });
-
-  it("falls back to CODEX_HOME when no vault is named", () => {
-    expect(resolveSharedCodexHomeDir({ ...env, CODEX_HOME: "/somewhere/else" })).toBe(
-      path.resolve("/somewhere/else"),
-    );
-  });
-
-  it("falls back to CODEX_HOME when the vault name is malformed", () => {
-    const bad = { ...env, CODEX_HOME: "/somewhere/else", [CODEX_VAULT_ENV_KEY]: "../escape" };
-    expect(resolveSharedCodexHomeDir(bad)).toBe(path.resolve("/somewhere/else"));
   });
 });

@@ -1,11 +1,10 @@
 import { api } from "./client";
 
 /**
- * A Codex credential vault: one named directory holding one Codex identity's
- * durable credential. Agents bind to a vault through `env.PAPERCLIP_CODEX_VAULT`,
- * and the adapter symlinks its `auth.json` into each agent's own managed home —
- * so several agents share one rotating credential instead of holding copies that
- * would invalidate each other.
+ * One named directory holding one Codex account's durable credential. An agent
+ * uses it by setting `env.CODEX_HOME` to the directory's full path. Several
+ * agents may share one: they read the same `auth.json`, so Codex's single-use
+ * refresh-token rotation stays consistent across all of them.
  *
  * The summary is non-secret: it carries a masked account suffix, never a token
  * and never a full account id.

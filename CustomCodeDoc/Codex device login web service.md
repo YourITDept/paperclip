@@ -2,103 +2,68 @@
 
 ---
 
-## 9. Paperclip integration — named credential vaults
+## 9. The final model — provision a directory, point CODEX_HOME at it
 
-Phase 1 is **implemented and tested**. It makes the multi-agent case work; the
-Settings UI (phase 2) sits on top of it.
+An earlier iteration added a `PAPERCLIP_CODEX_VAULT` variable that resolved a
+named directory into Paperclip's *managed* home machinery and symlinked
+`auth.json` out of it. **That has been reversed out.** What remains is simpler and
+uses only mechanisms that already existed.
 
-### The model
+### How it works
 
-A **vault** is one operator-named directory holding the durable credential for
-exactly one Codex identity:
+1. An instance admin provisions `/sysops/llm/codex/<name>/` from Settings and
+   runs a device login into it. The directory ends up holding `auth.json` and
+   `config.toml`.
+2. An agent uses that account by setting **`CODEX_HOME`** to the directory's full
+   path in its adapter config.
 
-```
-/sysops/llm/codex/<name>/
-├── auth.json     the credential (0600)
-└── config.toml   policy copied into every agent home bound to this vault
-```
+That is the entire mechanism.
 
-A vault is a credential **source**, not a run home. An agent bound to a vault
-keeps its own managed home for runtime state; only `auth.json` is shared, and it
-is shared by **symlink**.
+### Why this is better than the variable it replaced
 
-### Why symlink, not copy — the constraint that drives everything
+`CODEX_HOME` is an existing self-managed override, and being *outside* the
+Paperclip-managed tree is what makes it work cleanly:
 
-From [codex-home.ts:293](packages/adapters/codex-local/src/server/codex-home.ts#L293):
+- **Both engines already honour it.** The CLI lane reads it at
+  [execute.ts:642](packages/adapters/codex-local/src/server/execute.ts#L642); the
+  ACP lane reads it at
+  [acpx-engine/execute.ts:1039](packages/adapter-utils/src/acpx-engine/execute.ts#L1039).
+  The new variable was only wired into the CLI lane, so on a Node ≥ 24.11 host —
+  where ACP is the preferred auto lane — it silently did nothing.
+- **It passes the pre-dispatch gate.** `isManagedCodexHomePath` is true only under
+  `<instanceRoot>/companies/<companyId>`
+  ([codex-home.ts:157](packages/adapters/codex-local/src/server/codex-home.ts#L157)),
+  so an external path returns `{ managed: false, ready: true }` without
+  inspection. The new variable was invisible to that gate, so a vault-bound agent
+  could be blocked as "configuration incomplete".
+- **No seeding touches it.** Paperclip never rewrites the credential or config of
+  a self-managed home.
+- **Rotation is handled by construction.** Agents sharing a directory read the
+  *same* `auth.json` — not copies, not even symlinks — so Codex's single-use
+  refresh-token rotation (#5028) is consistent for all of them with no machinery
+  at all.
 
-> Codex refresh tokens rotate and are single-use, so a stale copy fails with
-> `refresh_token_reused` on the next run (#5028).
+Every open bug in the previous design — the ACP gap, the readiness gap, the
+missing name/path validation, the silent "set both and one wins" trap — was an
+artifact of the parallel mechanism. Deleting the mechanism deleted the bugs.
 
-So there can be exactly **one writable `auth.json` per identity**. If three agents
-each held a copy, whichever ran first would rotate the token and break the other
-two. The symlink means a rotation written through any agent's home lands on the
-vault file and is instantly visible to every other agent. This is the whole
-reason the feature is shaped this way, and it is the behaviour the integration
-test pins down.
+### The tradeoff
 
-### Resolution precedence
+Agents sharing one directory share more than the credential: `state_5.sqlite`,
+`sessions/`, `history.jsonl`, and the `skills/` Paperclip injects at run time
+([execute.ts:843](packages/adapters/codex-local/src/server/execute.ts#L843)).
+Codex uses WAL and ships a `thread-writer-locks/` directory, so concurrent access
+is anticipated, but two agents wanting different skill sets will overwrite each
+other's `skills/`. The fix stays within the same model: give each agent its own
+directory and log into each separately.
 
-`resolveSharedCodexHomeDir` now resolves the credential source in this order:
+### What was reverted
 
-1. **`PAPERCLIP_CODEX_VAULT`** — a validated name under the vault root
-2. **`CODEX_HOME`** — the instance-global shared home
-3. **`~/.codex`**
-
-A malformed name degrades to (2) and logs the fallback, rather than failing the
-run. The name is threaded through a *derived* environment inside `execute`, never
-by mutating `process.env`, so one run can never change what a concurrent run
-resolves.
-
-### Name validation
-
-`^[a-z0-9][a-z0-9_-]{1,39}$`, then joined onto the root, then re-checked to be a
-direct child of it. The pattern already excludes every separator, traversal,
-whitespace, control character, and shell metacharacter; the containment re-check
-is belt-and-braces. The root itself comes from a constant or
-`PAPERCLIP_CODEX_VAULT_ROOT`, never from a request.
-
-### Files changed
-
-| File | Change |
-|---|---|
-| `codex-vault.ts` | **New.** Name validation, path derivation, `ensureVaultDir`, `readVaultSummary`, `listVaults`. |
-| `codex-home.ts` | `resolveSharedCodexHomeDir` prefers a named vault (+1 import). |
-| `execute.ts` | Resolves the run's vault, builds `credentialEnv`, threads it into the cache vend and all three seeding calls, logs which vault a run used. |
-| `server/index.ts` | Barrel exports. |
-| `src/index.ts` | Documents `env.PAPERCLIP_CODEX_VAULT` in the agent configuration doc. |
-| `codex-vault.test.ts` | **New.** 19 unit tests. |
-| `codex-vault-seed.test.ts` | **New.** 5 integration tests for the multi-agent case. |
-
-Five files touched, two new source files, two new test files. No schema change was
-needed — `config.env` is free-form, so `PAPERCLIP_CODEX_VAULT` required no
-validator or migration work.
-
-### Test results
-
-`codex-vault.test.ts` — 19 passed. Name validation against 18 hostile inputs
-(traversal, separators, `$(id)`, backticks, newline, tab, uppercase, over-length),
-root resolution, 0700/0600 modes, tightening an existing 775 directory, never
-overwriting `config.toml` or touching `auth.json`, usable/unusable credential
-detection, account-id masking, listing and sorting, and the full
-`resolveSharedCodexHomeDir` precedence chain.
-
-`codex-vault-seed.test.ts` — 5 passed. The behaviour that matters:
-
-| Test | Proves |
-|---|---|
-| symlinks rather than copies | Both agent homes resolve to the same real vault file |
-| rotation propagates | A write through agent A's home is visible to B and C at once |
-| vaults stay isolated | Rotating one identity does not touch another |
-| re-seeding is idempotent | A second run keeps the link and the rotated credential |
-| `config.toml` is copied | A run scribbling on its own config cannot edit vault policy |
-
-Full adapter suite: **699 passed, 4 failed** — all four failures pre-existing and
-unrelated (three are stale compiled `dist/` tests missing fixtures; one is
-`src/server/acp.test.ts > keeps the host staged Codex home…`). Confirmed
-pre-existing by stashing the changes and re-running: it fails identically on a
-clean tree.
-
----
+`codex-home.ts`, `execute.ts`, and the adapter configuration doc are back to their
+pre-vault state. `codex-vault-seed.test.ts` (which tested the symlink sharing) and
+the resolution tests in `codex-vault.test.ts` are deleted. `codex-vault.ts` keeps
+only what the provisioning UI needs: name validation, directory creation,
+credential summaries, listing, and atomic promotion.
 
 ## 10. Phase 2 — the login lives inside Paperclip
 
