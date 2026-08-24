@@ -158,6 +158,7 @@ import {
 } from "./workspace-instance-cleanup.js";
 import { issueService } from "./issues.js";
 import { projectService } from "./projects.js";
+import { getEnvironmentDriverTraits } from "./environment-driver-traits.js";
 import { authorizationService, type AuthorizationActor } from "./authorization.js";
 import { createToolGatewayService } from "./tool-gateway.js";
 import { toolAccessService } from "./tool-access.js";
@@ -2851,7 +2852,7 @@ export function isMultiProjectWorkspaceSyncEnabled(
  * treated as local.
  */
 export function isRemoteExecutionEnvironmentDriver(driver: string | null | undefined): boolean {
-  return driver === "ssh" || driver === "sandbox" || driver === "plugin";
+  return getEnvironmentDriverTraits(driver)?.runsWorkspaceOffHost ?? false;
 }
 
 /**
@@ -2886,7 +2887,7 @@ export function isMultiProjectWorkspaceSyncRemoteEnabled(
  * confines each staged referenced tree.
  */
 export function isConfinedRemoteStagingDriver(driver: string | null | undefined): boolean {
-  return driver === "sandbox";
+  return getEnvironmentDriverTraits(driver)?.confinesStagedProjects ?? false;
 }
 
 /**

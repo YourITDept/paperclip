@@ -34,7 +34,8 @@ const DEFAULT_BRIDGE_MAX_DUPLEX_DECODER_BYTES = 8 * 1024 * 1024;
 // (PAPERCLIP_BRIDGE_RESPONSE_TIMEOUT_MS), so the host loop fails fast and writes
 // 503 responses before the in-sandbox client gives up. A silently unresponsive
 // sandbox channel makes a client call hang with no reject; this timeout turns
-// that hang into a caught error, so the loop `catch` runs `failPendingRequests`.
+// that hang into a caught error, so the poll loop can back off and retry while
+// the watchdog below decides when to fail the queued requests.
 const DEFAULT_BRIDGE_ITERATION_TIMEOUT_MS = 10_000;
 // Watchdog backstop for a hang that the per-iteration timeout does not catch
 // (for example many slow-but-under-timeout calls, or a stall outside the awaited
@@ -58,6 +59,12 @@ const MAX_BACKSTOP_WRITE_ATTEMPTS = 3;
 // The delay between two 504 backstop write attempts. It is short, so all retries
 // finish well under the in-sandbox 30s response deadline.
 const BACKSTOP_WRITE_RETRY_MS = 50;
+// Backoff cap between poll-loop retries after a transient iteration failure.
+// The cap keeps a recovering loop probing often enough to resume before the
+// in-sandbox 30s response deadline strands queued callers, while the
+// exponential ramp below it keeps a hard-down channel from burning an exec
+// call every poll interval.
+const MAX_TRANSIENT_ITERATION_BACKOFF_MS = 5_000;
 const REMOTE_WRITE_BASE64_CHUNK_SIZE = 32 * 1024;
 export const SANDBOX_CALLBACK_BRIDGE_ENTRYPOINT = "paperclip-bridge-server.mjs";
 const SANDBOX_EXEC_CHANNEL_ENV = "PAPERCLIP_SANDBOX_EXEC_CHANNEL";
@@ -1380,13 +1387,54 @@ export async function startSandboxCallbackBridgeWorker(input: {
       watchdogTimer.unref();
     }
     try {
+      // Consecutive transient poll failures. A single failed list call — one
+      // reset or slow sandbox exec — must not end the relay for the rest of the
+      // run: the in-sandbox gateway keeps queueing requests, so a dead loop
+      // strands every later API call from the agent (its status writes then look
+      // like connection failures and the issue loses its disposition). Back off
+      // and retry the poll instead. The watchdog stays the escalation path for a
+      // sustained outage — it fires after `watchdogTimeoutMs` without a
+      // successful iteration and fails the queued requests fast, while this loop
+      // keeps probing for recovery.
+      let consecutivePollFailures = 0;
       while (true) {
-        const fileNames = await withTimeout(
-          input.client.listJsonFiles(directories.requestsDir),
-          iterationTimeoutMs,
-          "Sandbox callback bridge list requests",
-        );
-        if (fileNames.length === 0) {
+        let fileNames: string[];
+        try {
+          fileNames = await withTimeout(
+            input.client.listJsonFiles(directories.requestsDir),
+            iterationTimeoutMs,
+            "Sandbox callback bridge list requests",
+          );
+          consecutivePollFailures = 0;
+        } catch (error) {
+          if (stopping) {
+            break;
+          }
+          consecutivePollFailures += 1;
+          const message = `${buildWorkerFailureMessage(error)} (transient poll failure ${consecutivePollFailures}; retrying)`;
+          if (consecutivePollFailures === 1) {
+            // Put the first failure of a streak on the run trace; later repeats
+            // only warn, so a flapping channel does not spam failed spans.
+            await surfaceRunError(new Error(message));
+          } else {
+            console.warn(`[paperclip] ${message}`);
+          }
+          const backoffMs = Math.min(
+            pollIntervalMs * 2 ** consecutivePollFailures,
+            MAX_TRANSIENT_ITERATION_BACKOFF_MS,
+          );
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          continue;
+        }
+        // A file whose attempt is still in flight (or waiting on its 504
+        // backstop) is not actionable: `processRequestFile` would skip it via
+        // the guard map. Treat an all-guarded listing like an empty one and
+        // sleep a poll interval. Re-listing immediately would spin the loop —
+        // an exec storm against a real sandbox channel, and with an in-memory
+        // client a pure-microtask loop that starves every timer in the process
+        // (including the guard's own backstop and abort timers).
+        const actionableFileNames = fileNames.filter((fileName) => !inFlightRequestGuards.has(fileName));
+        if (actionableFileNames.length === 0) {
           lastSuccessfulIterationAt = Date.now();
           if (stopping) {
             break;
@@ -1394,7 +1442,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
           await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
           continue;
         }
-        for (const fileName of fileNames) {
+        for (const fileName of actionableFileNames) {
           if (stopping && Date.now() >= stopDeadline) break;
           inFlight += 1;
           try {
@@ -1406,7 +1454,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
             // `task.run` after it. Without a runner, the request runs under the
             // run parent with no wrapper span, exactly like the earlier behavior.
             // The per-iteration timeout wraps the whole request, so a hung
-            // request rejects and the loop `catch` runs `failPendingRequests`.
+            // request rejects and the catch below runs the recovery pass.
             await withTimeout(
               input.runtimeSpan
                 ? input.runtimeSpan(CALLBACK_BRIDGE_RELAY_REQUEST_SPAN, () =>
@@ -1419,6 +1467,23 @@ export async function startSandboxCallbackBridgeWorker(input: {
               `Sandbox callback bridge process request ${fileName}`,
             );
             lastSuccessfulIterationAt = Date.now();
+          } catch (error) {
+            // A single request attempt failed or hung. Run the same recovery
+            // pass the loop previously died on — abort the in-flight handler
+            // (its 504 backstop keeps the caller from stranding) and 503 the
+            // unclaimed queued requests — but keep the loop alive afterward. A
+            // caller that sees the retry-safe 503 re-queues, and the recovered
+            // loop serves the retry; the old terminal catch left every later
+            // request to strand instead.
+            const message = buildWorkerFailureMessage(error);
+            await surfaceRunError(new Error(message));
+            try {
+              await failPendingRequests(message, { abandonInFlight: true });
+            } catch (failPendingError) {
+              console.warn(
+                `[paperclip] sandbox callback bridge failed to abort queued requests after a request failure: ${failPendingError instanceof Error ? failPendingError.message : String(failPendingError)}`,
+              );
+            }
           } finally {
             inFlight -= 1;
           }
@@ -1763,7 +1828,8 @@ export async function startSandboxCallbackBridgeServer(input: {
  * compatible with the host codec. {@link getSandboxDuplexGatewayCodecSource}
  * returns this exact source so a test can run every fixture vector against it.
  */
-const DUPLEX_GATEWAY_CODEC_SOURCE = `const DUPLEX_FRAME_VERSION = 1;
+const DUPLEX_GATEWAY_CODEC_SOURCE = `const DUPLEX_FRAME_VERSION = 2;
+const DUPLEX_BODY_CHUNK_RAW_BYTES = 256 * 1024;
 const DEFAULT_MAX_DUPLEX_FRAME_BYTES = 1000000;
 const DEFAULT_MAX_DUPLEX_REQUEST_ID_BYTES = 256;
 const DEFAULT_MAX_DUPLEX_DECODER_BYTES = ${DEFAULT_BRIDGE_MAX_DUPLEX_DECODER_BYTES};
@@ -1790,6 +1856,10 @@ function duplexIsStringRecord(value) {
     if (typeof entry !== "string") return false;
   }
   return true;
+}
+
+function duplexIsSafeNonNegativeInteger(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function encodeDuplexFrame(frame) {
@@ -1828,6 +1898,8 @@ function duplexValidateFrame(frame) {
       return duplexValidateRequest(frame);
     case "response":
       return duplexValidateResponse(frame);
+    case "body_chunk":
+      return duplexValidateBodyChunk(frame);
     case "ready":
       return duplexValidateReady(frame);
     case "heartbeat":
@@ -1847,7 +1919,7 @@ function duplexValidateRequest(frame) {
     typeof frame.method !== "string" ||
     typeof frame.path !== "string" ||
     typeof frame.query !== "string" ||
-    typeof frame.body !== "string" ||
+    !duplexIsSafeNonNegativeInteger(frame.bodyByteCount) ||
     !duplexIsStringRecord(frame.headers)
   ) {
     return duplexFail("malformed_frame", "request frame has a missing or wrong-typed field");
@@ -1862,7 +1934,7 @@ function duplexValidateResponse(frame) {
   if (
     typeof frame.id !== "string" ||
     typeof frame.status !== "number" ||
-    typeof frame.body !== "string" ||
+    !duplexIsSafeNonNegativeInteger(frame.bodyByteCount) ||
     !duplexIsStringRecord(frame.headers) ||
     typeof frame.outcome !== "string" ||
     !DUPLEX_RESPONSE_OUTCOMES.has(frame.outcome)
@@ -1871,6 +1943,19 @@ function duplexValidateResponse(frame) {
   }
   if (Buffer.byteLength(frame.id, "utf8") > DEFAULT_MAX_DUPLEX_REQUEST_ID_BYTES) {
     return duplexFail("id_too_large", "response frame id exceeds the maximum size");
+  }
+  return duplexOk(frame);
+}
+
+function duplexValidateBodyChunk(frame) {
+  if (typeof frame.id !== "string" || typeof frame.data !== "string") {
+    return duplexFail("malformed_frame", "body_chunk frame has a missing or wrong-typed field");
+  }
+  if (!duplexIsSafeNonNegativeInteger(frame.seq)) {
+    return duplexFail("malformed_frame", "body_chunk frame has a missing or wrong-typed seq");
+  }
+  if (Buffer.byteLength(frame.id, "utf8") > DEFAULT_MAX_DUPLEX_REQUEST_ID_BYTES) {
+    return duplexFail("id_too_large", "body_chunk frame id exceeds the maximum size");
   }
   return duplexOk(frame);
 }
@@ -2198,10 +2283,37 @@ async function runFileGateway() {
   });
 }
 
+// Split one whole body buffer into body_chunk frames. The gateway buffers the
+// whole source body once, then splits it here. Each frame carries one fixed raw
+// slice as base64 text, except the final frame, which carries the remaining
+// bytes. A zero-length body yields no frame. Send-side true streaming is a
+// separate goal; this whole-body split is acceptable for this gateway.
+function splitDuplexBodyIntoChunks(id, body) {
+  const frames = [];
+  let seq = 0;
+  for (let offset = 0; offset < body.length; offset += DUPLEX_BODY_CHUNK_RAW_BYTES) {
+    const slice = body.subarray(offset, offset + DUPLEX_BODY_CHUNK_RAW_BYTES);
+    frames.push({
+      version: DUPLEX_FRAME_VERSION,
+      type: "body_chunk",
+      id: id,
+      seq: seq,
+      data: slice.toString("base64"),
+    });
+    seq += 1;
+  }
+  return frames;
+}
+
 function runDuplexGateway() {
   // One outstanding local request per id. Each entry holds the HTTP resolver and
   // the wait-budget timer.
   const pending = new Map();
+  // One in-flight response reassembly per id. The host returns a response as an
+  // envelope frame that carries bodyByteCount, then the body_chunk frames that
+  // carry the body. The gateway reassembles the response body in memory here; it
+  // does not spill, because a production response body stays small.
+  const responseAssembly = new Map();
   let unavailable = false;
   let lossTriggered = false;
   let lastInboundAt = Date.now();
@@ -2243,25 +2355,100 @@ function runDuplexGateway() {
       });
     }
     pending.clear();
+    responseAssembly.clear();
     const exitTimer = setTimeout(() => process.exit(0), lossExitGraceMs);
     if (typeof exitTimer.unref === "function") exitTimer.unref();
+  }
+
+  // Fail one outstanding request with a bounded local 502. The gateway calls it
+  // when a response reassembly breaks: a reordered seq, a base64 that is not
+  // canonical, or a total that overruns the declared body size. The host is the
+  // response peer, so this is a defensive local error, not a channel loss.
+  function failRequest(id, message) {
+    responseAssembly.delete(id);
+    const entry = pending.get(id);
+    if (!entry) return;
+    pending.delete(id);
+    clearTimeout(entry.timer);
+    entry.resolve({
+      status: 502,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ error: message }),
+    });
   }
 
   function handleInboundFrame(frame) {
     if (frame.type === "response") {
       const entry = pending.get(frame.id);
       if (!entry) return;
-      pending.delete(frame.id);
-      clearTimeout(entry.timer);
       // Map an indeterminate outcome to a non-retryable 409, the same contract
       // the file gateway applies through the outcome header.
       const statusCode =
         frame.outcome === "indeterminate" ? 409 : typeof frame.status === "number" ? frame.status : 200;
-      entry.resolve({
+      const headers = frame.headers || {};
+      if (frame.bodyByteCount === 0) {
+        // A zero-length body accepts no body_chunk, so the response completes now.
+        pending.delete(frame.id);
+        responseAssembly.delete(frame.id);
+        clearTimeout(entry.timer);
+        entry.resolve({ status: statusCode, headers: headers, body: "" });
+        return;
+      }
+      // The body rides body_chunk frames that share this id. Record the envelope
+      // and wait for the chunks.
+      responseAssembly.set(frame.id, {
         status: statusCode,
-        headers: frame.headers || {},
-        body: typeof frame.body === "string" ? frame.body : "",
+        headers: headers,
+        bodyByteCount: frame.bodyByteCount,
+        received: 0,
+        nextSeq: 0,
+        chunks: [],
       });
+      return;
+    }
+    if (frame.type === "body_chunk") {
+      const asm = responseAssembly.get(frame.id);
+      if (!asm) return;
+      if (frame.seq !== asm.nextSeq) {
+        failRequest(frame.id, "duplex response body_chunk seq is out of order");
+        return;
+      }
+      const decoded = Buffer.from(frame.data, "base64");
+      if (decoded.toString("base64") !== frame.data) {
+        failRequest(frame.id, "duplex response body_chunk is not canonical base64");
+        return;
+      }
+      if (decoded.length === 0) {
+        failRequest(frame.id, "duplex response body_chunk is empty");
+        return;
+      }
+      if (asm.received + decoded.length > asm.bodyByteCount) {
+        failRequest(frame.id, "duplex response body overruns the declared size");
+        return;
+      }
+      const isFinal = asm.received + decoded.length === asm.bodyByteCount;
+      if (
+        decoded.length > DUPLEX_BODY_CHUNK_RAW_BYTES ||
+        (!isFinal && decoded.length !== DUPLEX_BODY_CHUNK_RAW_BYTES)
+      ) {
+        failRequest(frame.id, "duplex response body_chunk has the wrong size");
+        return;
+      }
+      asm.nextSeq += 1;
+      asm.received += decoded.length;
+      asm.chunks.push(decoded);
+      if (asm.received === asm.bodyByteCount) {
+        const entry = pending.get(frame.id);
+        responseAssembly.delete(frame.id);
+        if (!entry) return;
+        pending.delete(frame.id);
+        clearTimeout(entry.timer);
+        entry.resolve({
+          status: asm.status,
+          headers: asm.headers,
+          body: Buffer.concat(asm.chunks).toString("utf8"),
+        });
+      }
       return;
     }
     if (frame.type === "close") {
@@ -2320,11 +2507,14 @@ function runDuplexGateway() {
         return;
       }
       const requestId = randomUUID();
-      const requestBody = await readBody(req);
+      const requestBodyBuffer = Buffer.from(await readBody(req), "utf8");
       if (unavailable) {
         writeJsonResponse(res, 503, { error: "bridge_unavailable" });
         return;
       }
+      // The request body rides body_chunk frames. The envelope carries only the
+      // raw byte count, so the envelope stays small and the body splits into
+      // fixed-size slices that each stay under the frame bound.
       const requestFrame = {
         version: DUPLEX_FRAME_VERSION,
         type: "request",
@@ -2333,20 +2523,36 @@ function runDuplexGateway() {
         path: url.pathname,
         query: url.search,
         headers: normalizeHeaders(req.headers),
-        body: requestBody,
+        bodyByteCount: requestBodyBuffer.length,
       };
-      // Enforce the frame size bound on encode. When the request body makes the
-      // frame exceed the bound, fail this one local request with a clean 413. Do
-      // not write the frame and do not trigger loss. The frame never leaves the
-      // gateway, so no other in-flight request is affected and the channel stays
-      // open.
       const encodedRequest = encodeDuplexFrameChecked(requestFrame);
       if (!encodedRequest.ok) {
         writeJsonResponse(res, 413, { error: "request_too_large" });
         return;
       }
+      // Pre-encode every body_chunk frame and enforce the frame size bound on
+      // each. A fixed raw slice never exceeds the bound, so this guard is
+      // defensive. On a rejection, fail this one local request with a clean 413.
+      // The frames never leave the gateway, so no other in-flight request is
+      // affected and the channel stays open.
+      const chunkFrames = splitDuplexBodyIntoChunks(requestId, requestBodyBuffer);
+      const encodedChunks = [];
+      let chunkTooLarge = false;
+      for (const chunk of chunkFrames) {
+        const encodedChunk = encodeDuplexFrameChecked(chunk);
+        if (!encodedChunk.ok) {
+          chunkTooLarge = true;
+          break;
+        }
+        encodedChunks.push(encodedChunk.line);
+      }
+      if (chunkTooLarge) {
+        writeJsonResponse(res, 413, { error: "request_too_large" });
+        return;
+      }
       const response = await new Promise((resolve) => {
         const timer = setTimeout(() => {
+          responseAssembly.delete(requestId);
           if (pending.delete(requestId)) {
             resolve({
               status: 502,
@@ -2357,6 +2563,7 @@ function runDuplexGateway() {
         }, responseTimeoutMs);
         pending.set(requestId, { resolve: resolve, timer: timer });
         process.stdout.write(encodedRequest.line);
+        for (const line of encodedChunks) process.stdout.write(line);
       });
       res.statusCode = typeof response.status === "number" ? response.status : 200;
       for (const [key, value] of Object.entries(response.headers || {})) {
