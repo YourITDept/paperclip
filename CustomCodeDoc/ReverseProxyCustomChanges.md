@@ -5,6 +5,8 @@ re-applied to each new working branch — see §0.
 **Owner:** cwa@youritdept.com
 **Repo:** `YourITDept/paperclip` (fork of `paperclipai/paperclip`)
 **Created:** 2026-08-01 · **Last re-applied:** 2026-08-12 (Session 5)
+**Last synced:** 2026-08-27 (Session 7 — upstream merge, no re-apply needed; see
+[`SYNC-2026-08-27.md`](CustomCodeDoc/SYNC-2026-08-27.md))
 **Scope:** primarily the forward-auth add-on, plus any other change the fork must
 re-apply after taking a fresh upstream branch — see §0.1.
 
@@ -107,11 +109,33 @@ right end state is a PR to `paperclipai/paperclip`, after which this entry can b
 deleted rather than carried forever. Until that happens it has to be re-applied
 by hand.
 
-**Status:** as of Session 6 this lives in the working tree only and is **not yet
-committed**, so there is no SHA to cherry-pick. Record one here once it is
-committed.
+**Status:** committed in **`80b451e09`** ("LOoking good need to test",
+2026-08-24) and merged to `master` on 2026-08-27. It is an ancestor of
+`W4-20260827a`, so a branch descending from that already has it and needs no
+re-apply — check before re-adding it.
+
+**Session 7 caution — the assertion string is copy-coupled.** Upstream `#12243`
+("unify user-facing 'company' wording to 'organization'") renamed the panel
+heading, and the regression test's expected literal went stale even though the
+guard was fine. It now asserts `"Already in this organization"`. If this test
+fails after a re-branch, **read the failure before re-adding the guard**: a
+mismatch on the heading string is upstream copy drift, whereas a real lost guard
+shows `acceptInvite` having been called and `Invite not found` in the output.
 
 ### Method — cherry-pick, do not hand-rewrite
+
+> **First, check whether you need to re-apply at all.** Session 7 (2026-08-27)
+> found `W4-20260827a` already carried the whole add-on: `ddcd436f5` — the Session 5
+> successor to `265dea18a` — was already an ancestor, so cherry-picking would have
+> re-applied work that was present. One command settles it:
+>
+> ```bash
+> git merge-base --is-ancestor ddcd436f5 HEAD && echo "already carried — do NOT cherry-pick"
+> ```
+>
+> If the fork is now merging upstream *into* a long-lived working branch rather than
+> re-branching from upstream, this is the normal case and §0 is not the workflow you
+> want — see [`SYNC-2026-08-27.md`](CustomCodeDoc/SYNC-2026-08-27.md).
 
 The work exists as a real commit. **Check it is still reachable first:**
 
@@ -1007,6 +1031,88 @@ onboarding follow-ups — consumed-vs-unknown invite copy, an `invite.accepted`
 activity event, demoting the dead `!invite` guard, and auditing
 `requiresHumanAccount` / `showsAgentForm` for the same permissive-when-undefined
 shape — are tracked in the session working doc, not here.
+
+---
+
+### 2026-08-27 — Session 7: upstream sync (no re-apply needed)
+
+**Who:** Claude (Opus 5) with chris@anderson-family.com
+**Goal:** Bring `W4-20260827a` current with upstream, confirm every fork-carried
+change survived, and sync the fork's `master`, which was stranded at 2026-08-08.
+
+**The headline finding: this was not a re-apply.** §0 is written for "take a fresh
+upstream branch, cherry-pick the add-on back on." That is not what this checkout
+needed. `W4-20260827a` already carried all four documented change sets in its own
+history — `ddcd436f5` (this add-on, Session 5), `35a3a08d6`/`364ab4976`/`c894eb944`
+(Codex home), `d86144594` and neighbours (Codex vault), and `80b451e09` (the §0.1
+guard). Running `git cherry-pick -n 265dea18a` would have re-applied work already
+present. §0 now opens with a one-command check for this.
+
+The actual gap was the other direction: the branch was **89 commits behind**
+upstream and `master` was **406 behind**. There was no `upstream` remote at all;
+one was added.
+
+**Actions taken:** Tagged `pre-sync-backup-W4-20260827a`; merged `upstream/master`
+(89 commits); resolved 2 conflicts; fixed one stale assertion; merged
+`W4-20260827a` into `master`.
+
+**The two conflicts — both adjacency, neither semantic.** `server/src/app.ts`
+(our `codexVaultRoutes` import against upstream's new `instanceSettingsService`
+import) and `packages/adapters/codex-local/src/server/execute.ts` (our
+`PAPERCLIP_CODEX_HOME` resolution sitting directly above the `codexSkillEntries`
+assignment upstream rewrote to filter missing-source entries). Both sides kept in
+both files.
+
+Note the §0 table's pattern holds again: **the conflicting file moved.** Sessions 4
+and 5 conflicted in `middleware/auth.ts` and `realtime/live-events-ws.ts`
+respectively; this time both auto-merged and the conflicts landed somewhere new.
+Don't pattern-match on last time.
+
+**Files changed:** `server/src/app.ts`, `packages/adapters/codex-local/src/server/execute.ts`
+(conflict resolutions); `ui/src/pages/InviteLanding.test.tsx` (stale copy
+assertion); this file (§0 caveat, §0.1 #1 status + caution, header, this entry);
+new `CustomCodeDoc/SYNC-2026-08-27.md`.
+
+**Findings / decisions**
+
+1. **§0.1 did its job.** The only failing test in the entire repository after the
+   merge was the §0.1 canary — and the guard was intact. Upstream `#12243` renamed
+   the panel heading from "company" to "organization", so only the expected literal
+   was stale. The substantive assertions (no `Invite not found`, `acceptInvite`
+   never called) both still passed. The canary was then re-proved the Session 6
+   way: guard removed → 1 failed / 17 passed; restored → 18/18.
+2. **Trap #1 is still live on this box** and still matters — all three
+   `PAPERCLIP_PROXY_AUTH_*` vars are exported here. Feature suites were run both as
+   the box has them and with all three stripped; 24/24 identically. The `beforeEach`
+   pinning is earning its keep.
+3. **The actor precedence order is unmodified** by 89 upstream commits:
+   bearer → cloud tenant → proxy header → Better Auth session
+   (`middleware/auth.ts:237/240/250/259`). `auth.ts` auto-merged cleanly this time.
+4. **New environment dependency: Rust.** Upstream put a `cargo build --release
+   --locked` of `packages/paperclip-runner` in front of the server `typecheck`
+   script. The toolchain is pinned to 1.97.1 in `rust-toolchain.toml`, which is a
+   *rustup* feature — `brew install rust` is the wrong tool. Details and the
+   keg-only `PATH` line in `SYNC-2026-08-27.md` §5.
+5. **A vitest invocation gotcha:** running `server-utils.test.ts` via
+   `pnpm --filter … exec vitest` fails at *startup* on project resolution. Run it
+   from the repo root, as the Codex doc already says. Not a test failure.
+
+**Verification** (post-merge, full battery in `SYNC-2026-08-27.md` §6)
+
+- `proxy-header-auth` + `proxy-header-actor` — 24/24, both with and without the host env vars
+- auth regression sweep — 113/113 (baseline 110; upstream added 3)
+- extra auth suites — 72/72 (baseline 62)
+- `InviteLanding` — 18/18 after the copy fix; re-proved as a real guard
+- server typecheck (full, incl. the Rust runner build) and UI typecheck — both clean
+
+**Outcome:** `W4-20260827a` and `master` are both 0 commits behind upstream and
+carry identical trees. Nothing pushed in this session; the backup tag is still in
+place.
+
+**Next step:** (1) push both branches; (2) the upstream PR for §0.1 #1 is still
+unopened — it is now a committed, merged, SHA'd patch, which makes it easy to send
+and would let §0.1 be deleted; (3) still no end-to-end run through a real Traefik +
+forward-auth chain — unchanged since Session 2.
 
 ---
 
