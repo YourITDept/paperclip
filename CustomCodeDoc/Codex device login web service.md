@@ -289,6 +289,38 @@ names the agents that use an environment in its delete dialog.
 | `host-login-pty.test.ts` | 13 | — |
 | `codex-vault-login-service.test.ts` | 16 | +7 — sign-out/re-login cycle, cross-vault isolation, delete, unknown vault, the in-flight-login refusal on both paths, invalid names, db-unavailable degradation |
 
+### A light-theme trap worth knowing about
+
+`--destructive` and `--destructive-foreground` are **the same value** in the light
+theme and differ only in dark:
+
+```css
+:root  { --destructive: oklch(0.577 0.245 27.325);
+         --destructive-foreground: oklch(0.577 0.245 27.325); }   /* identical */
+.dark  { --destructive: oklch(0.637 0.237 25.331);
+         --destructive-foreground: oklch(0.985 0 0); }            /* white */
+```
+
+So the common-looking `className="bg-destructive text-destructive-foreground"` is
+**red text on a red background in light mode** — a 1:1 contrast ratio, invisible.
+The confirm button here originally carried it (copied from the environments
+delete dialog) and now uses `buttonVariants({ variant: "destructive" })` instead;
+the shadcn variant hardcodes `text-white` precisely to avoid this, and brings its
+own `dark:bg-destructive/60`.
+
+The row's delete control had a related problem: a `ghost` button whose only
+light-mode cue was a 10% red hover over `--accent`, which is `oklch(0.97 0 0)` —
+near-white. It now uses the bordered-destructive pattern from
+`AgentActionButtons` (`border-destructive/60 … dark:border-destructive/50`), so it
+stays red in dark mode and gains a visible border in light.
+
+**The same collision is still live in three upstream files** —
+`FolderControls.tsx:725`, `apps/Connections.tsx:466`, and
+`CompanyEnvironments.tsx:2599` — each a destructive confirm button with an
+unreadable label in the light theme. Not fixed here: they are upstream code, and
+patching them would add fork-carried changes to files upstream edits. Good
+upstream PR.
+
 ### Still open
 
 - **Re-login still does not warn.** `boundAgentCount` is computed for the

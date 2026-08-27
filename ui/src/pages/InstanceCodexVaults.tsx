@@ -28,7 +28,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
@@ -446,11 +446,11 @@ export function InstanceCodexVaults() {
                     </Button>
                   ) : null}
                   <Button
-                    variant="ghost"
-                    size="sm"
+                    variant="outline"
+                    size="icon-sm"
                     aria-label={`Delete ${vault.name}`}
                     title="Delete this login and its directory"
-                    className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    className="border-destructive/60 text-destructive hover:bg-destructive/10 hover:text-destructive dark:border-destructive/50"
                     disabled={busy || destructivePending}
                     onClick={() => {
                       setActionError(null);
@@ -523,7 +523,7 @@ export function InstanceCodexVaults() {
           <AlertDialogFooter>
             <AlertDialogCancel disabled={destructivePending}>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              className={buttonVariants({ variant: "destructive" })}
               data-testid="codex-vault-destructive-confirm"
               disabled={destructivePending}
               onClick={(event) => {
