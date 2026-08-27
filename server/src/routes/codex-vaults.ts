@@ -4,6 +4,7 @@ import { badRequest, conflict, forbidden, notFound } from "../errors.js";
 import {
   VaultLoginConflictError,
   VaultNameInvalidError,
+  VaultNotFoundError,
   codexVaultLoginService,
   type VaultLoginActor,
 } from "../services/codex-vault-login-service.js";
@@ -69,7 +70,7 @@ export function codexVaultRoutes(db: Db) {
   // carries a masked account suffix and never a token or a full account id.
   router.get("/instance/codex-vaults", async (req, res) => {
     assertCanManageVaults(req);
-    res.json({ root: service.vaultRoot(), vaults: await service.list() });
+    res.json({ root: service.vaultRoot(), vaults: await service.listWithUsage() });
   });
 
   // Create an empty vault. The login also creates the directory, so this exists
@@ -111,6 +112,43 @@ export function codexVaultRoutes(db: Db) {
     const session = service.read(req.params.sessionId as string, ownerId(req));
     if (!session) throw notFound("Login session not found.");
     res.json(session);
+  });
+
+  // Remove a vault's credential and keep the vault. The reversible half of
+  // "remove the authorization": the directory, its config.toml, and its path all
+  // survive, so an agent pointed at it keeps resolving and a later sign-in
+  // restores it. Idempotent — removing an already-empty vault is a 200, because
+  // the caller's intent ("this vault must hold no credential") is satisfied
+  // either way and a 404 here would only be a race with another admin.
+  router.delete("/instance/codex-vaults/:name/credential", async (req, res) => {
+    const actor = assertCanManageVaults(req);
+    const name = readVaultName(req.params.name);
+    try {
+      res.json(await service.removeCredential(name, actor));
+    } catch (error) {
+      if (error instanceof VaultNameInvalidError) throw badRequest(error.message);
+      if (error instanceof VaultNotFoundError) throw notFound(error.message);
+      // A sign-out during a login would race the same credential file.
+      if (error instanceof VaultLoginConflictError) throw conflict(error.message);
+      throw error;
+    }
+  });
+
+  // Delete a vault directory outright. Irreversible, and it breaks every agent
+  // whose CODEX_HOME names this path — the client is expected to have shown the
+  // bound-agent list from the listing before calling this.
+  router.delete("/instance/codex-vaults/:name", async (req, res) => {
+    const actor = assertCanManageVaults(req);
+    const name = readVaultName(req.params.name);
+    try {
+      const result = await service.remove(name, actor);
+      if (!result.deleted) throw notFound("Codex login not found.");
+      res.json(result);
+    } catch (error) {
+      if (error instanceof VaultNameInvalidError) throw badRequest(error.message);
+      if (error instanceof VaultLoginConflictError) throw conflict(error.message);
+      throw error;
+    }
   });
 
   // Cancel an in-flight login.

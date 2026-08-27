@@ -27,15 +27,18 @@ export {
   CODEX_VAULT_ROOT_ENV_KEY,
   DEFAULT_CODEX_VAULT_ROOT,
   assertValidVaultName,
+  deleteVault,
   ensureVaultDir,
   isValidVaultName,
   listVaults,
   promoteVaultCredential,
   readVaultSummary,
+  removeVaultCredential,
   resolveVaultAuthPath,
   resolveVaultConfigPath,
   resolveVaultDir,
   resolveVaultRoot,
+  vaultExists,
   type CodexVaultSummary,
 } from "./codex-vault.js";
 export {

@@ -16,6 +16,13 @@ export interface CodexVaultSummary {
   authMode: string | null;
   accountSuffix: string | null;
   lastRefresh: string | null;
+  /**
+   * How many agents name this directory as their `CODEX_HOME`. This is the blast
+   * radius of deleting the login, and it is advisory — it degrades to 0 if the
+   * agents table cannot be read, so treat a 0 as "no warning to show" rather
+   * than a guarantee that nothing is bound.
+   */
+  boundAgentCount: number;
 }
 
 export interface CodexVaultListResponse {
@@ -56,5 +63,19 @@ export const codexVaultsApi = {
     api.post<CodexVaultLoginSession>(
       `/instance/codex-vaults/login-sessions/${encodeURIComponent(sessionId)}/cancel`,
       {},
+    ),
+  /**
+   * Removes the credential and keeps the login. Reversible: the directory, its
+   * `config.toml`, and its path survive, so an agent pointed at it keeps
+   * resolving and signing in again restores it.
+   */
+  signOut: (name: string) =>
+    api.delete<CodexVaultSummary>(
+      `/instance/codex-vaults/${encodeURIComponent(name)}/credential`,
+    ),
+  /** Deletes the directory outright. Irreversible; breaks agents bound to it. */
+  remove: (name: string) =>
+    api.delete<{ name: string; deleted: boolean }>(
+      `/instance/codex-vaults/${encodeURIComponent(name)}`,
     ),
 };

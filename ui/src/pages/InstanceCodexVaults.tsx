@@ -7,7 +7,9 @@ import {
   ExternalLink,
   KeyRound,
   Loader2,
+  LogOut,
   Plus,
+  Trash2,
   X,
 } from "lucide-react";
 import {
@@ -15,6 +17,16 @@ import {
   type CodexVaultLoginSession,
   type CodexVaultSummary,
 } from "@/api/codexVaults";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -187,6 +199,12 @@ export function InstanceCodexVaults() {
   const [newName, setNewName] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  // The vault awaiting confirmation, and which destructive action was asked for.
+  // One piece of state rather than two booleans: the two actions are mutually
+  // exclusive and the dialog needs to know which one it is confirming.
+  const [pendingAction, setPendingAction] = useState<
+    { kind: "signOut" | "delete"; vault: CodexVaultSummary } | null
+  >(null);
 
   useEffect(() => {
     setBreadcrumbs([{ label: "Settings", href: "/company/settings" }, { label: "Codex logins" }]);
@@ -239,6 +257,30 @@ export function InstanceCodexVaults() {
   const cancelSession = useMutation({
     mutationFn: (id: string) => codexVaultsApi.cancelSession(id),
   });
+
+  const signOutVault = useMutation({
+    mutationFn: (name: string) => codexVaultsApi.signOut(name),
+    onSuccess: async () => {
+      setActionError(null);
+      setPendingAction(null);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.instance.codexVaults });
+    },
+    // The dialog stays open on failure so the message is attached to the action
+    // that produced it rather than appearing over the list with no context.
+    onError: (error: Error) => setActionError(error.message),
+  });
+
+  const removeVault = useMutation({
+    mutationFn: (name: string) => codexVaultsApi.remove(name),
+    onSuccess: async () => {
+      setActionError(null);
+      setPendingAction(null);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.instance.codexVaults });
+    },
+    onError: (error: Error) => setActionError(error.message),
+  });
+
+  const destructivePending = signOutVault.isPending || removeVault.isPending;
 
   const nameIsValid = useMemo(() => VAULT_NAME_RE.test(newName), [newName]);
   const busy = session !== null && session.state !== "success" && session.state !== "failed";
@@ -352,6 +394,13 @@ export function InstanceCodexVaults() {
                         No credential
                       </Badge>
                     )}
+                    {vault.boundAgentCount > 0 ? (
+                      <Badge variant="outline" className="text-muted-foreground">
+                        {vault.boundAgentCount === 1
+                          ? "1 agent"
+                          : `${vault.boundAgentCount} agents`}
+                      </Badge>
+                    ) : null}
                   </div>
                   <div className="flex items-center gap-1.5">
                     <span className="truncate font-mono text-xs text-muted-foreground">
@@ -368,20 +417,135 @@ export function InstanceCodexVaults() {
                     </div>
                   ) : null}
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={busy || startLogin.isPending}
-                  onClick={() => startLogin.mutate(vault.name)}
-                >
-                  <KeyRound className="size-3.5" />
-                  {vault.hasCredential ? "Sign in again" : "Sign in"}
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={busy || startLogin.isPending || destructivePending}
+                    onClick={() => startLogin.mutate(vault.name)}
+                  >
+                    <KeyRound className="size-3.5" />
+                    {vault.hasCredential ? "Sign in again" : "Sign in"}
+                  </Button>
+                  {/* Sign out is offered only when there is a credential to
+                      remove, so the row never presents a no-op action. */}
+                  {vault.hasCredential ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      aria-label={`Sign out ${vault.name}`}
+                      title="Remove the credential and keep this login"
+                      disabled={busy || destructivePending}
+                      onClick={() => {
+                        setActionError(null);
+                        setPendingAction({ kind: "signOut", vault });
+                      }}
+                    >
+                      <LogOut className="size-3.5" />
+                      Sign out
+                    </Button>
+                  ) : null}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    aria-label={`Delete ${vault.name}`}
+                    title="Delete this login and its directory"
+                    className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    disabled={busy || destructivePending}
+                    onClick={() => {
+                      setActionError(null);
+                      setPendingAction({ kind: "delete", vault });
+                    }}
+                  >
+                    <Trash2 className="size-3.5" />
+                  </Button>
+                </div>
               </div>
             ))}
           </div>
         )}
       </div>
+
+      <AlertDialog
+        open={pendingAction !== null}
+        onOpenChange={(open) => {
+          // Never let the dialog close out from under an in-flight request; the
+          // result still has to land somewhere the operator can see it.
+          if (!open && destructivePending) return;
+          if (!open) setPendingAction(null);
+        }}
+      >
+        <AlertDialogContent data-testid="codex-vault-destructive-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {pendingAction?.kind === "delete"
+                ? `Delete ${pendingAction.vault.name}?`
+                : `Sign out ${pendingAction?.vault.name ?? ""}?`}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingAction?.kind === "delete"
+                ? "The directory and everything in it — the credential, config.toml, and Codex session state — is permanently removed. This cannot be undone."
+                : "The credential is removed and the login is kept. The directory, its config.toml, and its path all survive, so agents pointed at it keep resolving and signing in again restores it."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          {pendingAction ? (
+            <div className="space-y-2 text-sm">
+              <p className="font-mono text-xs text-muted-foreground">
+                {pendingAction.vault.dir}
+              </p>
+              {/* The blast radius, stated before the operator commits. The count
+                  is advisory — it reads 0 when the agents table cannot be read —
+                  so it warns when it can and never blocks. */}
+              {pendingAction.vault.boundAgentCount > 0 ? (
+                <p
+                  className="flex items-start gap-2 rounded-md border border-border p-2 text-xs text-muted-foreground"
+                  data-testid="codex-vault-bound-agents"
+                >
+                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-yellow-500" />
+                  <span>
+                    {pendingAction.vault.boundAgentCount === 1
+                      ? "1 agent names this directory"
+                      : `${pendingAction.vault.boundAgentCount} agents name this directory`}{" "}
+                    as its <code className="font-mono">CODEX_HOME</code>.{" "}
+                    {pendingAction.kind === "delete"
+                      ? "Their runs will fail until they are pointed somewhere else."
+                      : "Their runs will fail to authenticate until this login is signed in again."}
+                  </span>
+                </p>
+              ) : null}
+              {actionError ? (
+                <p className="text-xs text-destructive">{actionError}</p>
+              ) : null}
+            </div>
+          ) : null}
+
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={destructivePending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              data-testid="codex-vault-destructive-confirm"
+              disabled={destructivePending}
+              onClick={(event) => {
+                // The dialog closes itself on action; keep it open so the
+                // pending state and any error stay visible until the call lands.
+                event.preventDefault();
+                if (!pendingAction) return;
+                if (pendingAction.kind === "delete") {
+                  removeVault.mutate(pendingAction.vault.name);
+                } else {
+                  signOutVault.mutate(pendingAction.vault.name);
+                }
+              }}
+            >
+              {destructivePending ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : null}
+              {pendingAction?.kind === "delete" ? "Delete" : "Sign out"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

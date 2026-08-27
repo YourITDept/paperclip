@@ -288,3 +288,86 @@ export async function promoteVaultCredential(
     }
   });
 }
+
+/** True when a vault directory exists. Distinguishes "no vault" from "no credential". */
+export async function vaultExists(
+  name: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
+  const dir = resolveVaultDir(name, env);
+  return fs
+    .stat(dir)
+    .then((stat) => stat.isDirectory())
+    .catch(() => false);
+}
+
+/**
+ * Removes a vault's credential, leaving the directory and its `config.toml` in
+ * place. This is the reversible half of "remove the authorization": the vault
+ * keeps its name, path, and provider configuration, so an agent already pointed
+ * at it keeps resolving, and a later device login re-populates it.
+ *
+ * Returns `true` when a credential was removed, `false` when there was none.
+ * The unlink runs under the same directory lock `promoteVaultCredential` takes,
+ * so it can never race a promotion into a half state.
+ */
+export async function removeVaultCredential(
+  name: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
+  const dir = resolveVaultDir(name, env);
+  // The lock resolves the directory's realpath, which throws ENOENT when there
+  // is no directory. Probe first so a missing vault is an ordinary `false`
+  // rather than a crash — callers that need to tell a missing vault apart from
+  // an empty one ask `vaultExists` before calling.
+  if (!(await vaultExists(name, env))) return false;
+  return withDirectoryMergeLock(dir, async () => {
+    try {
+      // `unlink`, not `rm`: the credential is a regular file (or a symlink into
+      // a shared home), and unlink removes the link without following it.
+      await fs.unlink(path.join(dir, AUTH_FILE_NAME));
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  });
+}
+
+/**
+ * Deletes a whole vault directory — credential, config, Codex session state, and
+ * anything else inside it.
+ *
+ * This is the irreversible half. `resolveVaultDir` has already proved the path
+ * is a direct child of the vault root and that the name matches the strict
+ * pattern, so the recursive remove can only ever land inside the root; the
+ * explicit re-check below states that invariant at the point where it matters,
+ * because this is the one call in the module that destroys data.
+ *
+ * Returns `true` when a directory was removed, `false` when there was none.
+ *
+ * Callers are responsible for warning about agents bound to this path. Nothing
+ * here can know: an agent references a vault by an opaque `CODEX_HOME` string in
+ * its adapter config, which this package cannot read.
+ */
+export async function deleteVault(
+  name: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
+  const dir = resolveVaultDir(name, env);
+  const root = resolveVaultRoot(env);
+  if (path.dirname(dir) !== root || dir === root) {
+    throw new Error(CODEX_VAULT_NAME_INVALID);
+  }
+  const existed = await fs
+    .stat(dir)
+    .then(() => true)
+    .catch(() => false);
+  if (!existed) return false;
+  // Take the directory lock so a concurrent promotion finishes first rather than
+  // writing a credential into a directory being removed underneath it.
+  await withDirectoryMergeLock(dir, async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  return true;
+}

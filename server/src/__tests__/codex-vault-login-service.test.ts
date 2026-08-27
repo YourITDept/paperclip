@@ -6,6 +6,7 @@ import type { Db } from "@paperclipai/db";
 import {
   VaultLoginConflictError,
   VaultNameInvalidError,
+  VaultNotFoundError,
   codexVaultLoginService,
   type VaultLoginActor,
   type VaultLoginSessionView,
@@ -317,5 +318,150 @@ describe("authorization and validation", () => {
     const created = await service.create("staged", ADMIN, env);
     expect(created.hasCredential).toBe(false);
     expect((await fs.stat(path.join(root, "staged"))).mode & 0o777).toBe(0o700);
+  });
+});
+
+describe("removing an authorization", () => {
+  it("signs a vault out, keeping the directory, and lets it be signed in again", async () => {
+    const started = await service.start(
+      {
+        vaultName: "revocable",
+        startedByUserId: ADMIN.actorId,
+        codexCommand: await fakeCodexFor("33333333-3333-3333-3333-cccccccccccc", "rev"),
+        env,
+      },
+      ADMIN,
+    );
+    expect((await settle(started.sessionId)).state).toBe("success");
+
+    const after = await service.removeCredential("revocable", ADMIN, env);
+    expect(after).toMatchObject({ name: "revocable", hasCredential: false, accountSuffix: null });
+
+    // The vault is still listed and its directory still exists, so an agent
+    // whose CODEX_HOME names it keeps resolving.
+    const listed = await service.list(env);
+    expect(listed.map((vault) => vault.name)).toEqual(["revocable"]);
+    await expect(fs.access(path.join(root, "revocable", "config.toml"))).resolves.toBeUndefined();
+
+    const again = await service.start(
+      {
+        vaultName: "revocable",
+        startedByUserId: ADMIN.actorId,
+        codexCommand: await fakeCodexFor("33333333-3333-3333-3333-cccccccccccc", "rev2"),
+        env,
+      },
+      ADMIN,
+    );
+    expect((await settle(again.sessionId)).state).toBe("success");
+    expect((await service.list(env))[0]).toMatchObject({ hasCredential: true });
+  });
+
+  it("signing one vault out leaves the other account untouched", async () => {
+    for (const [name, account, label] of [
+      ["keep_me", "44444444-4444-4444-4444-dddddddddddd", "keep"],
+      ["drop_me", "55555555-5555-5555-5555-eeeeeeeeeeee", "drop"],
+    ] as const) {
+      const started = await service.start(
+        { vaultName: name, startedByUserId: ADMIN.actorId, codexCommand: await fakeCodexFor(account, label), env },
+        ADMIN,
+      );
+      expect((await settle(started.sessionId)).state).toBe("success");
+    }
+
+    await service.removeCredential("drop_me", ADMIN, env);
+
+    const vaults = await service.list(env);
+    expect(vaults.find((vault) => vault.name === "keep_me")).toMatchObject({
+      hasCredential: true,
+      accountSuffix: "dddddddddddd",
+    });
+    expect(vaults.find((vault) => vault.name === "drop_me")).toMatchObject({ hasCredential: false });
+  });
+
+  it("deletes a vault outright and drops it from the listing", async () => {
+    const started = await service.start(
+      {
+        vaultName: "temporary",
+        startedByUserId: ADMIN.actorId,
+        codexCommand: await fakeCodexFor("66666666-6666-6666-6666-ffffffffffff", "tmp"),
+        env,
+      },
+      ADMIN,
+    );
+    expect((await settle(started.sessionId)).state).toBe("success");
+
+    await expect(service.remove("temporary", ADMIN, env)).resolves.toEqual({
+      name: "temporary",
+      deleted: true,
+    });
+    expect(await service.list(env)).toEqual([]);
+    await expect(fs.access(path.join(root, "temporary"))).rejects.toThrow();
+  });
+
+  it("reports deleted:false for a vault that was never provisioned", async () => {
+    await expect(service.remove("never_existed", ADMIN, env)).resolves.toEqual({
+      name: "never_existed",
+      deleted: false,
+    });
+  });
+
+  it("refuses both removals while a login for that vault is in flight", async () => {
+    // A sign-out or delete racing a device login would race the same credential
+    // file, exactly as a second concurrent login would.
+    const slowCodex = path.join(scratch, "codex-slow");
+    await fs.writeFile(
+      slowCodex,
+      `#!/bin/sh\ncat <<'PROMPT'\n${PROMPT_LINES}\nPROMPT\nsleep 5\n`,
+      { mode: 0o700 },
+    );
+    const started = await service.start(
+      { vaultName: "busy_vault", startedByUserId: ADMIN.actorId, codexCommand: slowCodex, env },
+      ADMIN,
+    );
+
+    await expect(service.removeCredential("busy_vault", ADMIN, env)).rejects.toBeInstanceOf(
+      VaultLoginConflictError,
+    );
+    await expect(service.remove("busy_vault", ADMIN, env)).rejects.toBeInstanceOf(
+      VaultLoginConflictError,
+    );
+
+    service.cancel(started.sessionId, ADMIN.actorId);
+    await settle(started.sessionId);
+    // Once the login is terminal the vault can be removed normally.
+    await expect(service.remove("busy_vault", ADMIN, env)).resolves.toMatchObject({ deleted: true });
+  });
+
+  it("signing out a vault that does not exist is a not-found, not a crash", async () => {
+    // Regression: the missing case reached the directory lock and threw ENOENT,
+    // which the route turned into a 500. "No such vault" is a 404; "vault with
+    // no credential" stays a success.
+    await expect(service.removeCredential("never_created", ADMIN, env)).rejects.toBeInstanceOf(
+      VaultNotFoundError,
+    );
+    await service.create("exists_but_empty", ADMIN, env);
+    await expect(service.removeCredential("exists_but_empty", ADMIN, env)).resolves.toMatchObject({
+      name: "exists_but_empty",
+      hasCredential: false,
+    });
+  });
+
+  it("rejects an invalid name on both removal paths", async () => {
+    await expect(service.removeCredential("../escape", ADMIN, env)).rejects.toBeInstanceOf(
+      VaultNameInvalidError,
+    );
+    await expect(service.remove("../escape", ADMIN, env)).rejects.toBeInstanceOf(
+      VaultNameInvalidError,
+    );
+  });
+
+  it("degrades the bound-agent warning to empty rather than failing when the db is unavailable", async () => {
+    // The service here holds a stub db with no query methods. agentsUsing must
+    // swallow that: the count is advisory, and an operator must still be able to
+    // delete a vault when the agents table cannot be read.
+    await service.create("unbound", ADMIN, env);
+    await expect(service.agentsUsing("unbound", env)).resolves.toEqual([]);
+    await expect(service.listWithUsage(env)).resolves.toMatchObject([{ boundAgentCount: 0 }]);
+    await expect(service.remove("unbound", ADMIN, env)).resolves.toMatchObject({ deleted: true });
   });
 });

@@ -1116,6 +1116,76 @@ forward-auth chain — unchanged since Session 2.
 
 ---
 
+### 2026-08-27 — Session 8: remove a Codex authorization (feature, not a re-apply)
+
+**Who:** Claude (Opus 5) with chris@anderson-family.com
+**Goal:** The Codex logins page could create and re-sign-in a vault but never undo
+either. Add a button to remove an authorization. Branch `W4-20260827b`.
+
+**What was built.** Two actions, because they are genuinely different and the
+difference is what a bound agent experiences:
+
+- **Sign out** — removes `auth.json`, keeps the directory, `config.toml`, and the
+  path. Reversible; an agent pointed at that `CODEX_HOME` keeps resolving. This
+  is the one most operators want, and the one that cannot lose a hand-tuned
+  provider config.
+- **Delete** — removes the directory outright. Irreversible; a bound agent stops
+  resolving entirely. Destructive styling, and the dialog says so.
+
+Full design, safety properties, and the file/test tables are in
+[`Codex device login web service.md` §11](CustomCodeDoc/Codex%20device%20login%20web%20service.md).
+
+**Files changed:** `codex-vault.ts` (+`removeVaultCredential`, +`deleteVault`),
+`codex-local/src/server/index.ts` (barrel), `codex-vault-login-service.ts`
+(+`removeCredential`, `remove`, `agentsUsing`, `listWithUsage`),
+`routes/codex-vaults.ts` (two `DELETE` routes), `ui/api/codexVaults.ts`,
+`ui/pages/InstanceCodexVaults.tsx`, plus the two test files and that doc.
+
+**Findings / decisions**
+
+1. **Nothing knew which agents used a vault.** An agent binds by putting an opaque
+   path in `env.CODEX_HOME`, so the vault itself cannot tell. The listing now
+   joins vault directories against `agents.adapter_config -> 'env' ->> 'CODEX_HOME'`
+   and returns `boundAgentCount`, which the delete dialog names. This half-retires
+   the "No agent-reference registry" scoping note in §10 of that doc — **only
+   half: re-login still does not warn**, which was the case the note was about.
+2. **The count is advisory and must stay that way.** It degrades to 0 when the
+   agents table cannot be read, and it does not block the delete. An instance
+   admin who wants a vault gone gets it, warned. Read a 0 as "no warning to
+   show", never as proof nothing is bound.
+3. **Removal is refused during an in-flight login** (`409`), for the same reason a
+   second concurrent login is: both race the same credential file. Both removal
+   paths take the same directory lock `promoteVaultCredential` takes.
+4. **`deleteVault` is the only call in that module that destroys data,** so it
+   re-asserts the containment invariant at the point of the recursive remove even
+   though `resolveVaultDir` already proved it. Tests assert a directory outside
+   the root survives a `../` attempt.
+5. **Sign-out is idempotent but still audited** with `removed: false`. "Tried to
+   sign out an already-empty vault" is a question an audit trail should answer.
+
+**Verification**
+
+- Vault battery — **52/52** (`codex-vault` 23, `host-login-pty` 13,
+  `codex-vault-login-service` 16; was 36 before this session)
+- `server` and `ui` typechecks — both clean
+
+**Note on the repo-wide suite.** A full `vitest run` on this checkout reports
+**93 failures across 32 files**, none in the vault or proxy suites. They were not
+investigated in depth here; the signatures are dominated by incomplete test
+mocks (`db.transaction is not a function`), missing host binaries, and port/
+connection contention (`could not bind allocated port 42000`), and that run
+overlapped two live servers and a set of scratch-database migration tests on the
+same box. **Treat the 93 as unattributed until re-run on a quiet box** — do not
+assume they are pre-existing, and do not assume they are ours.
+
+**Outcome:** Both buttons in place, covered, documented. Nothing pushed.
+
+**Next step:** (1) re-run the full suite on an idle box and attribute those 93;
+(2) warn on re-login using the same `boundAgentCount`, which would fully retire
+the §10 scoping note; (3) the page still has no UI test.
+
+---
+
 ### <date> — Session N: <title>
 
 **Who:**

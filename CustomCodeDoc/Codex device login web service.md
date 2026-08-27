@@ -134,13 +134,15 @@ host lane unchanged. No core login code was forked.
 
 ### Endpoints
 
-| Method | Path |
-|---|---|
-| `GET` | `/api/instance/codex-vaults` |
-| `POST` | `/api/instance/codex-vaults` |
-| `POST` | `/api/instance/codex-vaults/:name/login-sessions` |
-| `GET` | `/api/instance/codex-vaults/login-sessions/:sessionId` |
-| `POST` | `/api/instance/codex-vaults/login-sessions/:sessionId/cancel` |
+| Method | Path | |
+|---|---|---|
+| `GET` | `/api/instance/codex-vaults` | listing, now with `boundAgentCount` |
+| `POST` | `/api/instance/codex-vaults` | |
+| `POST` | `/api/instance/codex-vaults/:name/login-sessions` | |
+| `GET` | `/api/instance/codex-vaults/login-sessions/:sessionId` | |
+| `POST` | `/api/instance/codex-vaults/login-sessions/:sessionId/cancel` | |
+| `DELETE` | `/api/instance/codex-vaults/:name/credential` | sign out — see §11 |
+| `DELETE` | `/api/instance/codex-vaults/:name` | delete — see §11 |
 
 UI route: `/instance/settings/codex-logins`, aliased at
 `/company/settings/instance/codex-logins`.
@@ -182,10 +184,119 @@ below it are all production code. Notable cases:
   never touches the host; the host lane gives that up. `bwrap` is present at
   `/usr/bin/bwrap` and Paperclip already uses it for `filesystemScope`, so jailing
   the login PTY is the natural hardening step. Not done here.
-- **No agent-reference registry.** Nothing yet records which agents point at which
+- **No agent-reference registry.** ~~Nothing yet records which agents point at which
   vault, so nothing warns before a re-login changes the account under a running
-  agent.
+  agent.~~ **Partly addressed in §11** — the listing now reports a
+  `boundAgentCount` per vault, derived by matching each vault directory against
+  `adapterConfig.env.CODEX_HOME`, and the destructive confirmations name it.
+  Still outstanding: nothing warns before a **re-login**, which is the case this
+  note was originally about, and the count is advisory rather than a lock.
 - **No duplicate-account detection.** Two vaults can hold the same account. The
   masked suffix makes it visible in the list but nothing enforces it.
 - **The page has not been rendered.** No browser on this host — it typechecks and
   follows the design guide, but it has not been looked at.
+
+---
+
+## 11. Removing an authorization (2026-08-27)
+
+Provisioning and re-signing-in existed; there was no way to undo either. An
+operator could create a Codex login and sign it in again, but the credential and
+the directory were permanent — the only way to revoke an account was to reach
+onto the host and delete files by hand. This adds that as a button, in two
+strengths.
+
+### The two actions, and why both
+
+They are genuinely different operations, and the difference is what an agent
+bound to the vault experiences:
+
+| | Sign out | Delete |
+|---|---|---|
+| Removes | `auth.json` only | the whole directory |
+| Keeps | directory, `config.toml`, path, Codex session state | nothing |
+| Reversible | yes — sign in again and it is restored | no |
+| An agent whose `CODEX_HOME` is this path | still resolves; fails to authenticate until signed in again | **stops resolving entirely** |
+| Audit action | `codex.vault.credential.removed` | `codex.vault.deleted` |
+
+"Remove the authorization" is the first one. That is the action most operators
+actually want — revoke the account, keep the configured home — and it is the one
+that cannot lose a `config.toml` somebody hand-tuned with model providers. Delete
+is offered too, because a login created by mistake should not have to live
+forever, but it is the destructive-styled button and its dialog says so.
+
+### The blast radius, stated before the operator commits
+
+An agent uses a vault by naming its directory in `env.CODEX_HOME`, so nothing in
+the vault itself knows it is in use. The listing therefore joins each vault
+directory against `agents.adapter_config -> 'env' ->> 'CODEX_HOME'` and returns
+`boundAgentCount`; the row shows it as a badge and both confirmations spell out
+the consequence.
+
+One query for all vaults rather than one per vault, and a database error degrades
+every count to zero rather than failing the page — an operator who cannot list
+their logins because the agents table is unavailable is worse off than one who
+sees the logins without warnings. **The count is advisory: read a 0 as "no
+warning to show", not as proof nothing is bound.** It also does not block: an
+instance admin who wants the vault gone gets it, warned.
+
+This follows the existing house pattern — the environments settings page already
+names the agents that use an environment in its delete dialog.
+
+### Safety properties
+
+- **Path containment.** Both primitives resolve through `resolveVaultDir`, which
+  validates the name and re-checks the result is a direct child of the root.
+  `deleteVault` re-asserts it at the point of the recursive remove, because that
+  is the one call in the module that destroys data. Tests cover `../escape`,
+  `""`, `"."`, `".."` and `"/"`, and assert a sibling directory outside the root
+  survives the attempt.
+- **Locking.** Both take the same `withDirectoryMergeLock` that
+  `promoteVaultCredential` takes, so a removal can never interleave with a
+  promotion and leave a half state.
+- **Refused during a login.** A sign-out or delete while a device login is in
+  flight for that vault throws `VaultLoginConflictError` -> `409`, for the same
+  reason a second concurrent login is refused: both race the same credential
+  file. Once the session is terminal the removal proceeds normally.
+- **Sign-out is idempotent** — removing a credential from a vault that has none
+  is a `200`, because the caller's intent ("this vault must hold no credential")
+  is satisfied either way and a 404 would only be a race with another admin. It
+  is still audited, with `removed: false`; "tried to sign out an already-empty
+  vault" is a question an audit trail should be able to answer.
+- **Delete reports honestly** — a vault that never existed returns
+  `deleted: false` from the service and `404` from the route.
+- **`unlink`, not `rm`,** for the credential: it may be a symlink into a shared
+  home, and unlink removes the link without following it.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `codex-vault.ts` | **New** `removeVaultCredential` and `deleteVault`. |
+| `codex-local/src/server/index.ts` | Barrel re-exports for both. |
+| `codex-vault-login-service.ts` | `removeCredential`, `remove`, `agentsUsing`, `listWithUsage`. |
+| `routes/codex-vaults.ts` | Two `DELETE` routes; `GET` now returns usage counts. |
+| `ui/api/codexVaults.ts` | `signOut`, `remove`, `boundAgentCount` on the summary. |
+| `ui/pages/InstanceCodexVaults.tsx` | Sign out + delete buttons, bound-agent badge, shared confirmation dialog. |
+
+### Test results
+
+**52 passing** across the three vault suites (was 36):
+
+| File | Tests | Added |
+|---|---|---|
+| `codex-vault.test.ts` | 23 | +9 — removal, idempotency, sign-in-after-removal, sibling isolation, extra-state removal, and five containment cases |
+| `host-login-pty.test.ts` | 13 | — |
+| `codex-vault-login-service.test.ts` | 16 | +7 — sign-out/re-login cycle, cross-vault isolation, delete, unknown vault, the in-flight-login refusal on both paths, invalid names, db-unavailable degradation |
+
+### Still open
+
+- **Re-login still does not warn.** `boundAgentCount` is computed for the
+  destructive actions; the "Sign in again" button does not consult it, so
+  changing the account under a running agent is still silent. That was the
+  original point of the scoping note in §10 and it is only half retired.
+- **No UI test.** This page has never had one; the buttons are covered only by
+  the server-side suites and a typecheck.
+- **Nothing revokes the credential upstream.** Sign-out deletes the local
+  credential; it does not tell OpenAI to invalidate the token. An operator who
+  needs the account truly revoked must also do it in the provider's dashboard.

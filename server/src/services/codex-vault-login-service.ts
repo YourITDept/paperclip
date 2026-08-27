@@ -1,15 +1,20 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import type { Db } from "@paperclipai/db";
+import { sql } from "drizzle-orm";
+import { agents, type Db } from "@paperclipai/db";
 import {
   CODEX_VAULT_CREDENTIAL_REJECTED,
   createHostLoginDriver,
   createLoginStagingHome,
+  deleteVault,
   ensureVaultDir,
   isValidVaultName,
   listVaults,
   promoteVaultCredential,
   readVaultSummary,
+  removeVaultCredential,
+  resolveVaultDir,
+  vaultExists,
   removeLoginStagingHome,
   resolveCodexExecutable,
   CODEX_LOGIN_BIN_ENV_KEY,
@@ -103,6 +108,14 @@ export class VaultNameInvalidError extends Error {
   }
 }
 
+/** Thrown when an action names a vault that does not exist. */
+export class VaultNotFoundError extends Error {
+  constructor(public readonly vaultName: string) {
+    super(`Codex login "${vaultName}" was not found.`);
+    this.name = "VaultNotFoundError";
+  }
+}
+
 export interface StartVaultLoginInput {
   vaultName: string;
   startedByUserId: string;
@@ -143,6 +156,40 @@ export function codexVaultLoginService(db: Db) {
         }).catch(() => undefined),
       ),
     );
+  }
+
+  /**
+   * The agents bound to a vault, matched on the exact `CODEX_HOME` string in
+   * their persisted adapter config.
+   *
+   * This is the blast radius of removing a credential or deleting a vault, and
+   * it is why the delete confirmation can say something concrete. The match is
+   * exact rather than prefix-based because `CODEX_HOME` names the directory
+   * itself; an agent pointed at a subdirectory is not using this vault as its
+   * home.
+   *
+   * Never throws into a delete path — an unavailable database yields an empty
+   * list, which degrades the warning rather than blocking the operator.
+   */
+  async function agentsUsingVault(
+    vaultName: string,
+    env: NodeJS.ProcessEnv = process.env,
+  ): Promise<{ id: string; name: string; companyId: string }[]> {
+    if (!isValidVaultName(vaultName)) return [];
+    let dir: string;
+    try {
+      dir = resolveVaultDir(vaultName, env);
+    } catch {
+      return [];
+    }
+    try {
+      return await db
+        .select({ id: agents.id, name: agents.name, companyId: agents.companyId })
+        .from(agents)
+        .where(sql`${agents.adapterConfig} -> 'env' ->> 'CODEX_HOME' = ${dir}`);
+    } catch {
+      return [];
+    }
   }
 
   function sweep(): void {
@@ -189,6 +236,40 @@ export function codexVaultLoginService(db: Db) {
     },
 
     /**
+     * The listing plus each vault's bound-agent count.
+     *
+     * One query for every vault rather than one per vault: the directories are
+     * resolved up front and matched as a set, so adding vaults does not add
+     * round trips. A database error degrades every count to zero rather than
+     * failing the page — the counts are advisory, and an operator who cannot
+     * list their logins because the agents table is unavailable is worse off
+     * than one who sees the logins without warnings.
+     */
+    async listWithUsage(
+      env: NodeJS.ProcessEnv = process.env,
+    ): Promise<(CodexVaultSummary & { boundAgentCount: number })[]> {
+      const vaults = await listVaults(env);
+      if (vaults.length === 0) return [];
+      const byDir = new Map(vaults.map((vault) => [vault.dir, 0]));
+      try {
+        const rows = await db
+          .select({ home: sql<string>`${agents.adapterConfig} -> 'env' ->> 'CODEX_HOME'` })
+          .from(agents)
+          .where(
+            sql`${agents.adapterConfig} -> 'env' ->> 'CODEX_HOME' in ${[...byDir.keys()]}`,
+          );
+        for (const row of rows) {
+          if (row.home !== null && byDir.has(row.home)) {
+            byDir.set(row.home, (byDir.get(row.home) ?? 0) + 1);
+          }
+        }
+      } catch {
+        // counts stay zero
+      }
+      return vaults.map((vault) => ({ ...vault, boundAgentCount: byDir.get(vault.dir) ?? 0 }));
+    },
+
+    /**
      * Creates an empty vault directory with no credential. Useful for staging a
      * name before logging into it; the login also creates the directory.
      */
@@ -201,6 +282,64 @@ export function codexVaultLoginService(db: Db) {
       await ensureVaultDir(vaultName, env);
       await audit("codex.vault.created", vaultName, actor);
       return readVaultSummary(vaultName, env);
+    },
+
+    /** The agents bound to this vault. See {@link agentsUsingVault}. */
+    agentsUsing: agentsUsingVault,
+
+    /**
+     * Removes a vault's credential and leaves everything else in place.
+     *
+     * This is the reversible "remove the authorization" action: the directory,
+     * its `config.toml`, and its path all survive, so an agent pointed at it
+     * keeps resolving and a later sign-in restores it. Refused while a login for
+     * the same vault is in flight, for the same reason a second login is —
+     * both would race the same credential file.
+     */
+    async removeCredential(
+      vaultName: string,
+      actor: VaultLoginActor,
+      env: NodeJS.ProcessEnv = process.env,
+    ): Promise<CodexVaultSummary> {
+      if (!isValidVaultName(vaultName)) throw new VaultNameInvalidError();
+      if (activeByVault.has(vaultName)) throw new VaultLoginConflictError(vaultName);
+      // "No such vault" and "vault with no credential" are different answers.
+      // The first is a 404; the second is a success, because the caller's intent
+      // is already satisfied. Without this the missing case reached the
+      // directory lock, whose realpath throws ENOENT, and surfaced as a 500.
+      if (!(await vaultExists(vaultName, env))) throw new VaultNotFoundError(vaultName);
+      const removed = await removeVaultCredential(vaultName, env);
+      // Audited even when there was nothing to remove: the operator pressed the
+      // button, and "tried to sign out an already-empty vault" is the kind of
+      // thing an audit trail should be able to answer.
+      await audit("codex.vault.credential.removed", vaultName, actor, { removed });
+      return readVaultSummary(vaultName, env);
+    },
+
+    /**
+     * Deletes a vault directory outright.
+     *
+     * Irreversible, and it breaks every agent whose `CODEX_HOME` names this
+     * path — {@link agentsUsing} is what the caller should show before asking
+     * for confirmation. Refused while a login is in flight so a device login
+     * cannot promote a credential into a directory being removed.
+     */
+    async remove(
+      vaultName: string,
+      actor: VaultLoginActor,
+      env: NodeJS.ProcessEnv = process.env,
+    ): Promise<{ name: string; deleted: boolean }> {
+      if (!isValidVaultName(vaultName)) throw new VaultNameInvalidError();
+      if (activeByVault.has(vaultName)) throw new VaultLoginConflictError(vaultName);
+      const agentsBound = await agentsUsingVault(vaultName, env);
+      const deleted = await deleteVault(vaultName, env);
+      await audit("codex.vault.deleted", vaultName, actor, {
+        deleted,
+        // Recorded because it is the fact you want when an agent starts failing
+        // an hour later and nobody remembers the vault existed.
+        boundAgentCount: agentsBound.length,
+      });
+      return { name: vaultName, deleted };
     },
 
     /**
