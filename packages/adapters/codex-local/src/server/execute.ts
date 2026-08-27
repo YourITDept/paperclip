@@ -40,9 +40,9 @@ import {
   ensurePaperclipSkillSymlink,
   ensurePathInEnv,
   refreshPaperclipWorkspaceEnvForExecution,
+  isPaperclipSkillSourceMissing,
   readPaperclipRuntimeSkillEntries,
   readPaperclipIssueWorkModeFromContext,
-  resolvePaperclipDesiredSkillNames,
   renderTemplate,
   renderPaperclipWakePrompt,
   isPaperclipRecoveryWakePayload,
@@ -507,7 +507,10 @@ export async function ensureCodexSkillsInjected(
   onLog: AdapterExecutionContext["onLog"],
   options: EnsureCodexSkillsInjectedOptions = {},
 ) {
-  const allSkillsEntries = options.skillsEntries ?? await readPaperclipRuntimeSkillEntries({}, __moduleDir);
+  const allSkillsEntries = options.skillsEntries
+    ?? (await readPaperclipRuntimeSkillEntries({}, __moduleDir)).filter(
+      (entry) => !isPaperclipSkillSourceMissing(entry),
+    );
   const desiredSkillNames =
     options.desiredSkillNames ?? allSkillsEntries.map((entry) => entry.key);
   const desiredSet = new Set(desiredSkillNames);
@@ -646,7 +649,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // self-managed home. An explicit CODEX_HOME always wins: this is only
   // consulted when no CODEX_HOME is configured.
   const managedCodexHomeOverride = resolveManagedCodexHomeOverride(envConfig, process.env);
-  const codexSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
+  const codexSkillEntries = (await readPaperclipRuntimeSkillEntries(config, __moduleDir))
+    // A missing-source entry would become a dangling skill symlink; skip it.
+    .filter((entry) => !isPaperclipSkillSourceMissing(entry));
   const desiredSkillNames = resolveCodexDesiredSkillNames(config, codexSkillEntries);
   if (!executionTargetIsRemote) {
     await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
@@ -681,6 +686,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // freshest same-identity copy. The off-switch (default on) skips the vend.
   if (isCodexAuthCacheEnabled(process.env)) {
     const sharedHomeAuthPath = path.join(resolveSharedCodexHomeDir(process.env), "auth.json");
+    // This caller reads `process.env` directly and holds no separate `env`
+    // object, so `selectVendCredential` falls back to its own `process.env`
+    // default for the merge lock root.
     await selectVendCredential(
       sharedHomeAuthPath,
       (accountId) => resolveCodexAuthCacheEntryPath(process.env, accountId, agent.companyId),
