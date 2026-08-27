@@ -21,8 +21,53 @@ export {
   type CodexCredentialReadinessInput,
   type CodexCredentialAuthMode,
 } from "./codex-home.js";
+export {
+  CODEX_VAULT_CREDENTIAL_REJECTED,
+  CODEX_VAULT_NAME_INVALID,
+  CODEX_VAULT_ROOT_ENV_KEY,
+  DEFAULT_CODEX_VAULT_ROOT,
+  assertValidVaultName,
+  ensureVaultDir,
+  isValidVaultName,
+  listVaults,
+  promoteVaultCredential,
+  readVaultSummary,
+  resolveVaultAuthPath,
+  resolveVaultConfigPath,
+  resolveVaultDir,
+  resolveVaultRoot,
+  type CodexVaultSummary,
+} from "./codex-vault.js";
+export {
+  CODEX_LOGIN_BIN_ENV_KEY,
+  MAX_HOST_AUTH_BYTES,
+  resolveCodexExecutable,
+  HOST_LOGIN_AUTH_READ_ERROR,
+  createHostLoginDriver,
+  createLoginStagingHome,
+  removeLoginStagingHome,
+  type HostLoginDriverOptions,
+} from "./host-login-pty.js";
 export { listCodexSkills, syncCodexSkills } from "./skills.js";
 export { testEnvironment } from "./test.js";
+export {
+  runDeviceLogin,
+  CODEX_DEVICE_LOGIN_COMMAND,
+  type SandboxLoginDriver,
+  type DeviceLoginPromptSink,
+  type DeviceLoginOutcome,
+  type DeviceLoginResult,
+  type RunDeviceLoginOptions,
+} from "./device-login-runner.js";
+export { DEVICE_LOGIN_URL, parseDeviceLoginPrompt, type DeviceLoginPrompt } from "./device-login-parse.js";
+export {
+  promoteDeviceLoginCredential,
+  checkStagedCredentialReadiness,
+  DeviceLoginReadinessError,
+  type CredentialReadinessResult,
+  type PromoteDeviceLoginCredentialInput,
+  type PromoteDeviceLoginCredentialOutcome,
+} from "./adapter-auth-promotion.js";
 export { parseCodexJsonl, isCodexHarnessCrash, isCodexProviderQuotaError, isCodexTransientUpstreamError, isCodexUnknownSessionError } from "./parse.js";
 export {
   getQuotaWindows,

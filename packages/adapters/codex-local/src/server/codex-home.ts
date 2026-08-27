@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
+import { readSubscriptionAccountId } from "./codex-auth-cache.js";
 
 const TRUTHY_ENV_RE = /^(1|true|yes|on)$/i;
 const COPIED_SHARED_FILES = ["config.json", "config.toml", "instructions.md"] as const;
@@ -154,6 +155,94 @@ export async function codexHomeHasUsableAuth(home: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * The provider id Codex uses when `model_provider` is unset or points at the
+ * built-in OpenAI provider. Only that provider authenticates through
+ * `auth.json`/`OPENAI_API_KEY`; every other provider carries its own credential
+ * wiring in its `[model_providers.<id>]` table.
+ */
+const BUILTIN_OPENAI_PROVIDER_ID = "openai";
+
+function unquoteTomlKey(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2 && (trimmed.startsWith('"') || trimmed.startsWith("'"))) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+/**
+ * Minimal, dependency-free scan of a Codex `config.toml` for the selected
+ * custom model provider. Returns the provider id when the file both selects a
+ * root-level `model_provider` other than the built-in OpenAI one *and* defines
+ * the matching `[model_providers.<id>]` table; otherwise null.
+ *
+ * This is deliberately a scanner rather than a parser: the only two facts we
+ * need are a root-scope scalar and the set of table headers, and TOML requires
+ * root keys to precede the first table header, so a line walk is sufficient and
+ * cannot be confused by nested tables. A half-configured file (selector without
+ * a table, or a table without a selector) is treated as "no custom provider",
+ * which keeps the credential gate on the strict OpenAI path — the conservative
+ * direction, since Codex itself rejects that config at runtime.
+ */
+export async function readCodexHomeCustomModelProvider(home: string): Promise<string | null> {
+  const raw = await fs.readFile(path.join(home, "config.toml"), "utf8").catch(() => null);
+  if (raw === null) return null;
+
+  let selected: string | null = null;
+  let sawTableHeader = false;
+  const providerTables = new Set<string>();
+
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
+
+    const header = /^\[\[?([^\]]+)\]\]?/.exec(trimmed);
+    if (header) {
+      sawTableHeader = true;
+      // Split on dots outside quotes so `[model_providers."a.b"]` stays one key.
+      const parts = (header[1] ?? "").match(/"[^"]*"|'[^']*'|[^.]+/g) ?? [];
+      if (parts.length >= 2 && unquoteTomlKey(parts[0] ?? "") === "model_providers") {
+        providerTables.add(unquoteTomlKey(parts[1] ?? ""));
+      }
+      continue;
+    }
+
+    if (sawTableHeader) continue;
+    const rootKey = /^model_provider\s*=\s*(?:"([^"]*)"|'([^']*)')/.exec(trimmed);
+    if (rootKey) selected = (rootKey[1] ?? rootKey[2] ?? "").trim();
+  }
+
+  if (!selected || selected === BUILTIN_OPENAI_PROVIDER_ID) return null;
+  return providerTables.has(selected) ? selected : null;
+}
+
+/**
+ * Same question as {@link readCodexHomeCustomModelProvider}, asked of the
+ * `PAPERCLIP_CODEX_PROVIDERS` JSON the adapter merges into `config.toml` at
+ * execute time. The gate runs *before* that merge, so without this a run whose
+ * provider is supplied entirely through the env var would be blocked for
+ * missing OpenAI credentials it is never going to use.
+ */
+export function readConfiguredCustomModelProvider(providersJson: string | null | undefined): string | null {
+  const raw = nonEmpty(providersJson ?? undefined);
+  if (!raw) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  const selected = nonEmpty(typeof record.model_provider === "string" ? record.model_provider : undefined);
+  if (!selected || selected === BUILTIN_OPENAI_PROVIDER_ID) return null;
+  const providers = record.providers;
+  if (providers === null || typeof providers !== "object" || Array.isArray(providers)) return null;
+  const entry = (providers as Record<string, unknown>)[selected];
+  return entry !== null && typeof entry === "object" && !Array.isArray(entry) ? selected : null;
 }
 
 async function codexHomeHasMatchingApiKeyAuth(home: string, apiKey: string): Promise<boolean> {
@@ -572,8 +661,11 @@ export async function stageCodexHomeForSync(
  * `auth.json` from the shared source home (so ChatGPT-subscription credentials
  * stay live and single-use refresh tokens are not copied), copies the static
  * shared config files, and — when an API key is supplied — writes an API-key
- * `auth.json` instead. Used both for the default company home and for the
- * per-agent home set by the server isolation guard.
+ * `auth.json` instead. A promoted device-login credential — a regular-file
+ * `auth.json` holding a subscription identity the shared source does not hold —
+ * is kept authoritative: it is neither removed nor replaced by the shared
+ * symlink. Used both for the default company home and for the per-agent home
+ * set by the server isolation guard.
  */
 export async function seedManagedCodexHome(
   targetHome: string,
@@ -588,20 +680,81 @@ export async function seedManagedCodexHome(
 
   await fs.mkdir(targetHome, { recursive: true });
 
-  // If a previous run wrote an apikey-mode auth.json (regular file) and this
-  // run has no apiKey, remove it so the chatgpt-mode symlink can be restored.
-  // Without this cleanup, ensureSymlink bails on a non-symlink and Codex keeps
-  // authenticating with the stale key after it is removed from configuration.
+  // A regular-file auth.json in the target home is one of two very different
+  // things. The device-login promotion writes the company credential as a
+  // regular file, and that file is the durable outcome of an interactive login,
+  // so it must survive re-seeding. Everything else — an apikey-mode file left by
+  // a previous run, a stale pre-symlink copy of the shared credential (#5028),
+  // or an unreadable payload — is residue, and removing it lets the chatgpt-mode
+  // symlink be restored (ensureSymlink would otherwise replace it and Codex
+  // would keep authenticating with the stale key).
+  //
+  // The discriminator is identity-anchored, like the promotion and the cache
+  // vend: keep the file only when it holds a usable subscription identity that
+  // the shared source does not also hold. A same-identity regular file is the
+  // #5028 stale copy — the symlink serves the same account with live, rotating
+  // tokens, so it is strictly better. A different-identity (or source-less)
+  // subscription file is the promoted company credential; on a server with no
+  // shared login there is nothing to symlink at all, and deleting it would
+  // silently sign the company out right after a successful device login.
+  let keepPromotedAuth = false;
   if (!apiKey && seedFromShared) {
     const authPath = path.join(targetHome, "auth.json");
     const existing = await fs.lstat(authPath).catch(() => null);
     if (existing && !existing.isSymbolicLink()) {
-      await fs.rm(authPath, { force: true });
+      const targetBytes = await fs.readFile(authPath).catch(() => null);
+      const targetIdentity = targetBytes ? readSubscriptionAccountId(targetBytes) : null;
+      if (targetIdentity) {
+        // Any source read failure — absent or unreadable — keeps the usable
+        // target file. The alternative, removal plus the existence-only
+        // symlink pass below, links the home to a source this process just
+        // failed to read, and every downstream reader (the probe seeding, the
+        // sandbox stage sync, the CLI itself) runs with the same access, so
+        // that home is unusable in every scenario. Keeping the target is
+        // better or equal in each case: a promoted credential keeps working,
+        // and even a stale same-identity copy (#5028) can still work, while
+        // the unreadable symlink cannot. A transient read failure also
+        // self-corrects — the next seed with a readable source heals a
+        // same-identity copy into the symlink — whereas removing the promoted
+        // credential is irreversible. The #5028 heal therefore applies
+        // exactly when the source is readable and the identities match.
+        let sourceReadErrorCode: string | null = null;
+        const sourceBytes = await fs
+          .readFile(path.join(sourceHome, "auth.json"))
+          .catch((error: NodeJS.ErrnoException) => {
+            if (error.code !== "ENOENT" && error.code !== "ENOTDIR") {
+              sourceReadErrorCode = error.code ?? "unknown";
+            }
+            return null;
+          });
+        const sourceIdentity = sourceBytes ? readSubscriptionAccountId(sourceBytes) : null;
+        keepPromotedAuth = sourceIdentity !== targetIdentity;
+        if (keepPromotedAuth && sourceReadErrorCode) {
+          // Deferred heal, made visible: seeding runs before every probe and
+          // every execute, so the next call with a readable source applies
+          // the same-identity symlink heal this call could not decide.
+          await onLog(
+            "stdout",
+            `[paperclip] Keeping the existing subscription auth.json in Codex home "${targetHome}" (shared source read failed: ${sourceReadErrorCode}); the next seed with a readable source reconciles it.\n`,
+          );
+        }
+      }
+      if (keepPromotedAuth) {
+        await onLog(
+          "stdout",
+          `[paperclip] Keeping the promoted subscription auth.json in Codex home "${targetHome}".\n`,
+        );
+      } else {
+        await fs.rm(authPath, { force: true });
+      }
     }
   }
 
   if (seedFromShared) {
     for (const name of SYMLINKED_SHARED_FILES) {
+      // The kept promoted credential is authoritative for this home; the shared
+      // symlink would silently swap the account back to the host login.
+      if (name === "auth.json" && keepPromotedAuth) continue;
       const source = path.join(sourceHome, name);
       if (!(await pathExists(source))) continue;
       await ensureSymlink(path.join(targetHome, name), source);
@@ -722,15 +875,36 @@ export async function reconcileManagedCodexHome(
   return { status, home: resolved };
 }
 
-export type CodexCredentialAuthMode = "api" | "subscription";
+/**
+ * `api` and `subscription` are the two OpenAI-credential shapes Paperclip owns
+ * (`auth.json` / `OPENAI_API_KEY`). `provider` means the effective home routes
+ * to a non-OpenAI `model_provider`, which carries its own credential wiring
+ * (`env_key`, or an `[model_providers.<id>.auth]` command) — Paperclip has no
+ * credential to provision and must not gate the run on one.
+ */
+export type CodexCredentialAuthMode = "api" | "subscription" | "provider";
 
 export interface CodexCredentialReadinessInput {
   env?: NodeJS.ProcessEnv;
   companyId: string | undefined;
   /** `config.env.CODEX_HOME` for the run, if any. */
   configuredCodexHome: string | null | undefined;
+  /**
+   * `config.env.PAPERCLIP_CODEX_HOME` for the run, if any. Relocates the
+   * Paperclip-managed home without making it self-managed, so readiness must
+   * inspect the overridden path rather than the default managed one. Ignored
+   * when `configuredCodexHome` is set, matching the execute-time precedence.
+   */
+  managedCodexHomeOverride?: string | null | undefined;
   /** Resolved `config.env.OPENAI_API_KEY` value (after secret resolution). */
   configuredApiKey: string | null | undefined;
+  /**
+   * Raw `config.env.PAPERCLIP_CODEX_PROVIDERS` for the run, if any. A custom
+   * `model_provider` selected here is merged into the effective home's
+   * `config.toml` at execute time — after this gate runs — so readiness has to
+   * read it from the env value rather than from disk.
+   */
+  configuredProviders?: string | null | undefined;
 }
 
 export interface CodexCredentialReadiness {
@@ -742,6 +916,13 @@ export interface CodexCredentialReadiness {
   effectiveHome: string;
   /** The shared source home subscription auth is symlinked from (managed homes only). */
   sharedSourceHome: string;
+  /**
+   * The non-OpenAI `model_provider` the run will use, when readiness was
+   * satisfied by provider-owned auth (`authMode: "provider"`). Null otherwise.
+   * Present so callers can name the provider in logs and Test-panel output
+   * instead of reporting a credential state that does not apply.
+   */
+  modelProvider?: string | null;
 }
 
 /**
@@ -771,7 +952,12 @@ export async function evaluateCodexCredentialReadiness(
   const configuredHomeIsManaged =
     configuredCodexHome != null && isManagedCodexHomePath(env, input.companyId, configuredCodexHome);
   const effectiveHomeIsManaged = configuredCodexHome == null || configuredHomeIsManaged;
-  const effectiveHome = configuredCodexHome ?? resolveManagedCodexHomeDir(env, input.companyId);
+  const managedOverrideRaw = nonEmpty(input.managedCodexHomeOverride ?? undefined);
+  const managedCodexHomeOverride = managedOverrideRaw ? path.resolve(managedOverrideRaw) : null;
+  const effectiveHome =
+    configuredCodexHome ??
+    managedCodexHomeOverride ??
+    resolveManagedCodexHomeDir(env, input.companyId);
 
   if (!effectiveHomeIsManaged) {
     // Genuine external override: Paperclip never seeds or inspects it.
@@ -781,15 +967,38 @@ export async function evaluateCodexCredentialReadiness(
       ready: true,
       effectiveHome,
       sharedSourceHome,
+      modelProvider: null,
     };
   }
 
   if (configuredApiKey) {
-    return { managed: true, authMode: "api", ready: true, effectiveHome, sharedSourceHome };
+    return { managed: true, authMode: "api", ready: true, effectiveHome, sharedSourceHome, modelProvider: null };
+  }
+
+  // A managed home routed at a non-OpenAI provider (OpenRouter, a gateway, any
+  // OpenAI-compatible endpoint) authenticates through that provider's own
+  // config — `env_key`, or an `[model_providers.<id>.auth]` command reading a
+  // key from the run environment. There is no `auth.json` to seed and
+  // `OPENAI_API_KEY` is irrelevant, so requiring either one blocks a
+  // fully-credentialed run before it ever launches. Defer to the provider: if
+  // its key really is missing, Codex fails at its first request with the
+  // provider's own error, which names the actual problem.
+  const customProvider =
+    readConfiguredCustomModelProvider(input.configuredProviders) ??
+    (await readCodexHomeCustomModelProvider(effectiveHome));
+  if (customProvider) {
+    return {
+      managed: true,
+      authMode: "provider",
+      ready: true,
+      effectiveHome,
+      sharedSourceHome,
+      modelProvider: customProvider,
+    };
   }
 
   const ready =
     (await codexHomeHasUsableAuth(effectiveHome)) ||
     (await codexHomeHasUsableAuth(sharedSourceHome));
-  return { managed: true, authMode: "subscription", ready, effectiveHome, sharedSourceHome };
+  return { managed: true, authMode: "subscription", ready, effectiveHome, sharedSourceHome, modelProvider: null };
 }

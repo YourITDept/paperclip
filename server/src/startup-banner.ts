@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { resolveManagedCodexHomeOverride } from "@paperclipai/adapter-utils/server-utils";
 import { resolvePaperclipConfigPath, resolvePaperclipEnvPath } from "./paths.js";
 import type { BindMode, DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
 
@@ -93,8 +94,50 @@ function resolveAgentJwtSecretStatus(
 
   return {
     status: "warn",
-    message: "missing (run `pnpm paperclipai onboard`)",
+    message: "missing (run `npx paperclipai onboard`)",
   };
+}
+
+/**
+ * Head and tail of a provider API key, matching how the OpenRouter dashboard
+ * renders its own key rows (`sk-or-v1-797...c02`) so a banner line can be
+ * compared against the dashboard without revealing usable key material. Keys too
+ * short for the window to stay a small fraction of the whole are reported as
+ * present with none of their characters shown.
+ */
+const API_KEY_HEAD_CHARS = 12;
+const API_KEY_TAIL_CHARS = 3;
+const API_KEY_MIN_MASKABLE_CHARS = 32;
+
+export function maskApiKey(raw: string): string {
+  const key = raw.trim();
+  if (key.length < API_KEY_MIN_MASKABLE_CHARS) return "set";
+  return `${key.slice(0, API_KEY_HEAD_CHARS)}...${key.slice(-API_KEY_TAIL_CHARS)}`;
+}
+
+/**
+ * `PAPERCLIP_CODEX_HOME` set in the server's own environment is the
+ * instance-wide default Codex home every `codex_local` agent inherits, so
+ * whether it took is a startup fact worth stating rather than something to infer
+ * from a failed run. A configured-but-absent path is called out: the directory
+ * gets created and seeded on first use, which means a typo silently yields an
+ * empty home with no provider config instead of the prepared one.
+ */
+export function resolveCodexHomeBannerValue(): string {
+  const override = resolveManagedCodexHomeOverride(undefined, process.env);
+  if (!override) {
+    return `${color("not set", "yellow")} ${color("(agents use the per-company managed home)", "dim")}`;
+  }
+  if (!existsSync(override)) {
+    return `${override} ${color("(missing — created and seeded on first run)", "yellow")}`;
+  }
+  return color(override, "green");
+}
+
+export function resolveOpenRouterKeyBannerValue(): string {
+  const key = process.env.OPENROUTER_API_KEY?.trim();
+  if (!key) return color("not set", "yellow");
+  return color(maskApiKey(key), "green");
 }
 
 export function printStartupBanner(opts: StartupBannerOptions): void {
@@ -162,6 +205,8 @@ export function printStartupBanner(opts: StartupBannerOptions): void {
         ? color(agentJwtSecret.message, "green")
         : color(agentJwtSecret.message, "yellow"),
     ),
+    row("Codex Home", resolveCodexHomeBannerValue()),
+    row("OpenRouter", resolveOpenRouterKeyBannerValue()),
     row("Heartbeat", heartbeat),
     row("DB Backup", dbBackup),
     row("Backup Dir", opts.databaseBackupDir),

@@ -7,6 +7,11 @@ import type { Db } from "@paperclipai/db";
 import { agentApiKeys, companyMemberships, instanceUserRoles } from "@paperclipai/db";
 import type { DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
+import {
+  extractProxyHeaderEmail,
+  resolveProxyHeaderAuthConfig,
+  resolveProxyHeaderUser,
+} from "../auth/proxy-header-auth.js";
 import { logger } from "../middleware/logger.js";
 import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 
@@ -44,6 +49,13 @@ interface UpgradeContext {
   companyId: string;
   actorType: "board" | "agent";
   actorId: string;
+}
+
+/** Cloud-proxied browser identity resolved from trusted x-paperclip-cloud-* headers. */
+export interface CloudUpgradeActor {
+  userId: string;
+  /** Companies this actor may subscribe to (primary stack company + real memberships). */
+  companyIds: string[];
 }
 
 interface IncomingMessageWithContext extends IncomingMessage {
@@ -114,6 +126,29 @@ function headersFromIncomingMessage(req: IncomingMessage): Headers {
   return headers;
 }
 
+/**
+ * Read the trusted reverse-proxy identity header off a WebSocket upgrade
+ * request. Synchronous by design: when proxy auth is disabled (the default)
+ * this must not introduce an await ahead of the session lookup below.
+ * Returns null when proxy auth is off or the header is absent/malformed.
+ */
+function readProxyHeaderEmail(req: IncomingMessage): string | null {
+  const config = resolveProxyHeaderAuthConfig();
+  if (!config.enabled) return null;
+  return extractProxyHeaderEmail(req.headers[config.headerName], config);
+}
+
+/** Map a proxy-asserted email to a Paperclip user id, or null if unknown. */
+async function resolveProxyHeaderUserId(db: Db, email: string): Promise<string | null> {
+  try {
+    const user = await resolveProxyHeaderUser(db, email, resolveProxyHeaderAuthConfig());
+    return user?.id ?? null;
+  } catch (err) {
+    logger.error({ err }, "Failed to resolve trusted proxy header user for websocket upgrade");
+    return null;
+  }
+}
+
 async function authorizeUpgrade(
   db: Db,
   req: IncomingMessage,
@@ -122,6 +157,7 @@ async function authorizeUpgrade(
   opts: {
     deploymentMode: DeploymentMode;
     resolveSessionFromHeaders?: (headers: Headers) => Promise<BetterAuthSessionResult | null>;
+    resolveCloudActor?: (req: IncomingMessage) => Promise<CloudUpgradeActor | null>;
   },
 ): Promise<UpgradeContext | null> {
   const queryToken = url.searchParams.get("token")?.trim() ?? "";
@@ -138,12 +174,42 @@ async function authorizeUpgrade(
       };
     }
 
-    if (opts.deploymentMode !== "authenticated" || !opts.resolveSessionFromHeaders) {
+    // Cloud-managed deployments authenticate proxied browsers with trusted
+    // x-paperclip-cloud-* headers, never a local Better Auth session — the
+    // session fallback below can only 403 them, which left the live-events
+    // socket permanently unreachable behind the Cloud front door. A resolved
+    // cloud actor is authoritative: authorize against its membership scope.
+    // Absent/invalid cloud headers fall through to the session path, so
+    // self-hosted behavior is unchanged.
+    if (opts.resolveCloudActor) {
+      const cloudActor = await opts.resolveCloudActor(req);
+      if (cloudActor) {
+        if (!cloudActor.companyIds.includes(companyId)) return null;
+        return {
+          companyId,
+          actorType: "board",
+          actorId: cloudActor.userId,
+        };
+      }
+    }
+
+    // The session resolver is no longer required to get past this point: a
+    // proxy-authenticated browser has no Better Auth session to resolve.
+    if (opts.deploymentMode !== "authenticated") {
       return null;
     }
 
-    const session = await opts.resolveSessionFromHeaders(headersFromIncomingMessage(req));
-    const userId = session?.user?.id;
+    // A browser authenticated by a trusted reverse proxy carries no Better
+    // Auth session cookie, so the proxy identity header has to be resolved
+    // here too — otherwise the page loads but live events never connect.
+    // Same precedence as actorMiddleware: proxy header first, then session.
+    // The header read is synchronous so that with proxy auth disabled the
+    // session lookup is still reached in this same tick.
+    const proxyEmail = readProxyHeaderEmail(req);
+    let userId = proxyEmail ? (await resolveProxyHeaderUserId(db, proxyEmail)) ?? undefined : undefined;
+    if (!userId && opts.resolveSessionFromHeaders) {
+      userId = (await opts.resolveSessionFromHeaders(headersFromIncomingMessage(req)))?.user?.id;
+    }
     if (!userId) return null;
 
     const [roleRow, memberships] = await Promise.all([
@@ -203,6 +269,12 @@ export function setupLiveEventsWebSocketServer(
   opts: {
     deploymentMode: DeploymentMode;
     resolveSessionFromHeaders?: (headers: Headers) => Promise<BetterAuthSessionResult | null>;
+    /**
+     * Resolves a Cloud-proxied browser's identity from the trusted
+     * x-paperclip-cloud-* headers on the upgrade request. Wired by managed
+     * deployments; self-hosted instances leave it unset.
+     */
+    resolveCloudActor?: (req: IncomingMessage) => Promise<CloudUpgradeActor | null>;
   },
 ) {
   const wss = new WebSocketServer({ noServer: true });
@@ -286,6 +358,7 @@ export function setupLiveEventsWebSocketServer(
     void authorizeUpgrade(db, req, companyId, url, {
       deploymentMode: opts.deploymentMode,
       resolveSessionFromHeaders: opts.resolveSessionFromHeaders,
+      resolveCloudActor: opts.resolveCloudActor,
     })
       .then((context) => {
         if (!context) {

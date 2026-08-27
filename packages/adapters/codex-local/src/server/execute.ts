@@ -21,6 +21,8 @@ import {
   ensureAdapterExecutionTargetCommandResolvable,
   ensureAdapterExecutionTargetRuntimeCommandInstalled,
   prepareAdapterExecutionTargetRuntime,
+  adapterExecutionTargetDuplexObservabilityRecorder,
+  adapterExecutionTargetEnablesSandboxDuplexBridge,
   readAdapterExecutionTarget,
   resolveAdapterExecutionTargetTimeoutSec,
   resolveAdapterExecutionTargetCommandForLogs,
@@ -38,15 +40,16 @@ import {
   ensurePaperclipSkillSymlink,
   ensurePathInEnv,
   refreshPaperclipWorkspaceEnvForExecution,
+  isPaperclipSkillSourceMissing,
   readPaperclipRuntimeSkillEntries,
   readPaperclipIssueWorkModeFromContext,
-  resolvePaperclipDesiredSkillNames,
   renderTemplate,
   renderPaperclipWakePrompt,
   isPaperclipRecoveryWakePayload,
   stringifyPaperclipWakePayload,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   joinPromptSections,
+  resolveManagedCodexHomeOverride,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   parseLocalProcessFilesystemScope,
@@ -132,6 +135,29 @@ function firstNonEmptyLine(text: string): string {
       .map((line) => line.trim())
       .find(Boolean) ?? ""
   );
+}
+
+// Benign stderr lines that never explain a nonzero exit and must not be
+// surfaced as the run error: Codex always prints the YOLO approvals warning
+// because this adapter passes the approvals-bypass flag itself, and
+// "[paperclip] ..." lines are diagnostics the adapter injected (e.g. ACP
+// fallback notes). Keep this list conservative so real errors are never
+// skipped.
+const BENIGN_CODEX_STDERR_LINE_RES: readonly RegExp[] = [
+  /^YOLO mode is enabled\b/i,
+  /^\[paperclip\]/,
+];
+
+function isBenignCodexStderrLine(line: string): boolean {
+  return BENIGN_CODEX_STDERR_LINE_RES.some((re) => re.test(line));
+}
+
+export function firstMeaningfulStderrLine(text: string): string {
+  const meaningful = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !isBenignCodexStderrLine(line));
+  return meaningful ?? firstNonEmptyLine(text);
 }
 
 function signalCodexChild(
@@ -355,7 +381,9 @@ export async function assertCodexCredentialsLaunchable(input: {
   runId: string;
   companyId: string;
   configuredCodexHome: string | null;
+  managedCodexHomeOverride?: string | null;
   configuredApiKey: string | null;
+  configuredProviders?: string | null;
   effectiveCodexHome: string;
   target: MaybeResolvedExecutionTarget;
   cwd: string;
@@ -366,7 +394,9 @@ export async function assertCodexCredentialsLaunchable(input: {
     env: input.env ?? process.env,
     companyId: input.companyId,
     configuredCodexHome: input.configuredCodexHome,
+    managedCodexHomeOverride: input.managedCodexHomeOverride ?? null,
     configuredApiKey: input.configuredApiKey,
+    configuredProviders: input.configuredProviders ?? null,
   });
   if (!credentialReadiness.managed || credentialReadiness.ready) return;
 
@@ -477,7 +507,10 @@ export async function ensureCodexSkillsInjected(
   onLog: AdapterExecutionContext["onLog"],
   options: EnsureCodexSkillsInjectedOptions = {},
 ) {
-  const allSkillsEntries = options.skillsEntries ?? await readPaperclipRuntimeSkillEntries({}, __moduleDir);
+  const allSkillsEntries = options.skillsEntries
+    ?? (await readPaperclipRuntimeSkillEntries({}, __moduleDir)).filter(
+      (entry) => !isPaperclipSkillSourceMissing(entry),
+    );
   const desiredSkillNames =
     options.desiredSkillNames ?? allSkillsEntries.map((entry) => entry.key);
   const desiredSet = new Set(desiredSkillNames);
@@ -608,7 +641,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     typeof envConfig.CODEX_HOME === "string" && envConfig.CODEX_HOME.trim().length > 0
       ? path.resolve(envConfig.CODEX_HOME.trim())
       : null;
-  const codexSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
+  // PAPERCLIP_CODEX_HOME relocates the Paperclip-MANAGED home; it does not opt
+  // out of management the way CODEX_HOME does. The override still gets auth
+  // seeding, skill injection, and the PAPERCLIP_CODEX_PROVIDERS merge, so it can
+  // be set once — on a Paperclip Environment, or in the server's own process env
+  // — as an instance-wide default without turning every agent into a
+  // self-managed home. An explicit CODEX_HOME always wins: this is only
+  // consulted when no CODEX_HOME is configured.
+  const managedCodexHomeOverride = resolveManagedCodexHomeOverride(envConfig, process.env);
+  const codexSkillEntries = (await readPaperclipRuntimeSkillEntries(config, __moduleDir))
+    // A missing-source entry would become a dangling skill symlink; skip it.
+    .filter((entry) => !isPaperclipSkillSourceMissing(entry));
   const desiredSkillNames = resolveCodexDesiredSkillNames(config, codexSkillEntries);
   if (!executionTargetIsRemote) {
     await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
@@ -617,6 +660,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     typeof envConfig.OPENAI_API_KEY === "string" && envConfig.OPENAI_API_KEY.trim().length > 0
       ? envConfig.OPENAI_API_KEY.trim()
       : null;
+  // Read for the credential gate below, which runs before prepareCodexRuntimeConfig()
+  // merges these providers into the home's config.toml. Falls back to the host
+  // value the merge itself falls back to (runtime-config.ts), so the gate and the
+  // merge agree on which provider the run will use.
+  const configuredCodexProviders =
+    typeof envConfig.PAPERCLIP_CODEX_PROVIDERS === "string" &&
+    envConfig.PAPERCLIP_CODEX_PROVIDERS.trim().length > 0
+      ? envConfig.PAPERCLIP_CODEX_PROVIDERS.trim()
+      : process.env.PAPERCLIP_CODEX_PROVIDERS ?? null;
   // A configured CODEX_HOME that lives under the Paperclip-managed company tree
   // (the per-agent home set by the server isolation guard) still needs auth
   // seeded — it ships with no credentials and OPENAI_API_KEY="" by default.
@@ -634,6 +686,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // freshest same-identity copy. The off-switch (default on) skips the vend.
   if (isCodexAuthCacheEnabled(process.env)) {
     const sharedHomeAuthPath = path.join(resolveSharedCodexHomeDir(process.env), "auth.json");
+    // This caller reads `process.env` directly and holds no separate `env`
+    // object, so `selectVendCredential` falls back to its own `process.env`
+    // default for the merge lock root.
     await selectVendCredential(
       sharedHomeAuthPath,
       (accountId) => resolveCodexAuthCacheEntryPath(process.env, accountId, agent.companyId),
@@ -649,17 +704,41 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     });
   }
   if (configuredCodexHome == null) {
-    await prepareManagedCodexHome(process.env, onLog, agent.companyId, {
-      apiKey: configuredOpenAiApiKey,
-    });
+    // prepareManagedCodexHome() derives the target from resolveManagedCodexHomeDir();
+    // with an override in play, seed the overridden path directly instead.
+    if (managedCodexHomeOverride) {
+      await seedManagedCodexHome(managedCodexHomeOverride, process.env, onLog, {
+        apiKey: configuredOpenAiApiKey,
+      });
+    } else {
+      await prepareManagedCodexHome(process.env, onLog, agent.companyId, {
+        apiKey: configuredOpenAiApiKey,
+      });
+    }
   } else if (configuredHomeIsManaged) {
     await seedManagedCodexHome(configuredCodexHome, process.env, onLog, {
       apiKey: configuredOpenAiApiKey,
     });
   }
-  const defaultCodexHome = resolveManagedCodexHomeDir(process.env, agent.companyId);
+  const defaultCodexHome =
+    managedCodexHomeOverride ?? resolveManagedCodexHomeDir(process.env, agent.companyId);
   const effectiveCodexHome = configuredCodexHome ?? defaultCodexHome;
   await fs.mkdir(effectiveCodexHome, { recursive: true });
+  // Name the effective home and where it came from on every run. Without this
+  // an ignored PAPERCLIP_CODEX_HOME (an explicit CODEX_HOME outranks it, and
+  // the per-agent key-isolation guard sets one implicitly) is silent, and the
+  // only way to tell which home a run used is to infer it from the seeding log
+  // line, which fires only on the seed path.
+  await onLog(
+    "stdout",
+    `[paperclip] Codex home "${effectiveCodexHome}" (from ${
+      configuredCodexHome
+        ? `CODEX_HOME${managedCodexHomeOverride ? "; PAPERCLIP_CODEX_HOME is set but outranked" : ""}`
+        : managedCodexHomeOverride
+        ? "PAPERCLIP_CODEX_HOME"
+        : "the default managed path"
+    }).\n`,
+  );
 
   // Never launch a managed CODEX_HOME with no credentials. Without auth.json
   // and with OPENAI_API_KEY="" the provider rejects every request with
@@ -675,7 +754,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     runId,
     companyId: agent.companyId,
     configuredCodexHome,
+    managedCodexHomeOverride,
     configuredApiKey: configuredOpenAiApiKey,
+    configuredProviders: configuredCodexProviders,
     effectiveCodexHome,
     target: executionTarget,
     cwd,
@@ -928,6 +1009,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
         runId,
         target: runtimeExecutionTarget,
+        enableSandboxDuplexBridge: adapterExecutionTargetEnablesSandboxDuplexBridge(runtimeExecutionTarget),
+        duplexObservabilityRecorder: adapterExecutionTargetDuplexObservabilityRecorder(runtimeExecutionTarget),
         runtimeRootDir: preparedExecutionTargetRuntime?.runtimeRootDir,
         adapterKey: "codex",
         timeoutSec,
@@ -1284,6 +1367,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             await onLog(stream, cleaned);
           },
           runLogTail: paperclipBridge?.runLogTail,
+          settleRunDisposition: paperclipBridge?.settleRunDisposition,
           localProcessSandbox,
         });
         const cleanedStderr = stripCodexRolloutNoise(proc.stderr);
@@ -1319,7 +1403,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     const toResult = (
       attempt: {
-        proc: { exitCode: number | null; signal: string | null; timedOut: boolean; stdout: string; stderr: string };
+        proc: { exitCode: number | null; signal: string | null; timedOut: boolean; stdout: string; stderr: string; errorCode?: string | null };
         rawStderr: string;
         parsed: ReturnType<typeof parseCodexJsonl>;
         monitor?:
@@ -1391,7 +1475,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         } as Record<string, unknown>)
         : null;
       const parsedError = typeof attempt.parsed.errorMessage === "string" ? attempt.parsed.errorMessage.trim() : "";
-      const stderrLine = firstNonEmptyLine(attempt.proc.stderr);
+      const stderrLine = firstMeaningfulStderrLine(attempt.proc.stderr);
       const fallbackErrorMessage =
         parsedError ||
         stderrLine ||
@@ -1451,7 +1535,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             ? null
             : fallbackErrorMessage,
         errorCode:
-          authRefreshFailure
+          // Forward the transport-level error code from the run-disposition
+          // seam first. A lost duplex control channel surfaces the typed
+          // `duplex_channel_lost` code before any provider classification.
+          attempt.proc.errorCode
+            ? attempt.proc.errorCode
+            : authRefreshFailure
             ? authRefreshFailure
             : providerQuota
             ? "provider_quota"
