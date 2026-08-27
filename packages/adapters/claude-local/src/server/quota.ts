@@ -137,13 +137,25 @@ function describeClaudeSubscriptionAuth(status: ClaudeAuthStatus | null): string
     : "Claude is logged in via claude.ai";
 }
 
-export async function readClaudeToken(): Promise<string | null> {
-  const configDir = claudeConfigDir();
+/**
+ * Reads the Claude access token out of an explicit config directory.
+ *
+ * Split out of {@link readClaudeToken} so callers that manage their own named
+ * config directories — the Claude vault store — ask this module what a Claude
+ * credential looks like instead of re-deriving it. One definition of the file
+ * names and the `claudeAiOauth.accessToken` field keeps a vault that reports a
+ * usable credential and a run that finds one from ever disagreeing.
+ */
+export async function readClaudeTokenFromDir(configDir: string): Promise<string | null> {
   for (const filename of [".credentials.json", "credentials.json"]) {
     const token = await readClaudeTokenFromFile(path.join(configDir, filename));
     if (token) return token;
   }
   return null;
+}
+
+export async function readClaudeToken(): Promise<string | null> {
+  return readClaudeTokenFromDir(claudeConfigDir());
 }
 
 interface AnthropicUsageWindow {

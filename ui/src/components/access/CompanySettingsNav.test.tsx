@@ -132,6 +132,7 @@ describe("CompanySettingsNav", () => {
           { value: "instance-plugins", label: "Plugins" },
           { value: "instance-adapters", label: "Adapters" },
           { value: "instance-codex-logins", label: "Codex logins" },
+          { value: "instance-claude-logins", label: "Claude logins" },
         ],
       }),
     );
@@ -173,6 +174,7 @@ describe("CompanySettingsNav", () => {
       "instance-experimental",
       "instance-adapters",
       "instance-codex-logins",
+      "instance-claude-logins",
     ]);
 
     await act(async () => {

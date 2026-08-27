@@ -18,6 +18,7 @@ const items = [
   { value: "instance-plugins", label: "Plugins", href: `${INSTANCE_SETTINGS_PATH_PREFIX}/plugins` },
   { value: "instance-adapters", label: "Adapters", href: `${INSTANCE_SETTINGS_PATH_PREFIX}/adapters` },
   { value: "instance-codex-logins", label: "Codex logins", href: `${INSTANCE_SETTINGS_PATH_PREFIX}/codex-logins` },
+  { value: "instance-claude-logins", label: "Claude logins", href: `${INSTANCE_SETTINGS_PATH_PREFIX}/claude-logins` },
 ] as const;
 
 type CompanySettingsTab = (typeof items)[number]["value"];
@@ -35,6 +36,7 @@ const hiddenSettingKeyByTab: Partial<Record<CompanySettingsTab, string>> = {
   "instance-plugins": "instance.plugins",
   "instance-adapters": "instance.adapters",
   "instance-codex-logins": "instance.adapters",
+  "instance-claude-logins": "instance.adapters",
 };
 
 export function getCompanySettingsTab(pathname: string): CompanySettingsTab {
@@ -60,6 +62,9 @@ export function getCompanySettingsTab(pathname: string): CompanySettingsTab {
 
   // Checked before `/adapters` only in the sense that it is a distinct path;
   // both live under the same visibility key.
+  if (pathname.includes(`${INSTANCE_SETTINGS_PATH_PREFIX}/claude-logins`)) {
+    return "instance-claude-logins";
+  }
   if (pathname.includes(`${INSTANCE_SETTINGS_PATH_PREFIX}/codex-logins`)) {
     return "instance-codex-logins";
   }

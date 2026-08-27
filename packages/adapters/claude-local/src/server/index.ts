@@ -20,6 +20,7 @@ export {
   getQuotaWindows,
   readClaudeAuthStatus,
   readClaudeToken,
+  readClaudeTokenFromDir,
   fetchClaudeQuota,
   fetchClaudeCliQuota,
   captureClaudeCliUsageText,
@@ -53,6 +54,41 @@ export {
   CODE_SUBMISSION_TERMINATOR,
   CLAUDE_SETUP_TOKEN_MAX_BUFFER_CHARS,
 } from "./setup-token-runner.js";
+// The named Claude config store ("Claude logins"). Each entry is one directory
+// holding one Claude account's credential; an agent uses it by setting
+// CLAUDE_CONFIG_DIR to the directory's full path.
+export {
+  CLAUDE_VAULT_CREDENTIAL_REJECTED,
+  CLAUDE_VAULT_NAME_INVALID,
+  CLAUDE_VAULT_ROOT_ENV_KEY,
+  DEFAULT_CLAUDE_VAULT_ROOT,
+  MAX_VAULT_CREDENTIAL_BYTES,
+  SETUP_TOKEN_LIFETIME_MS,
+  assertValidVaultName,
+  buildSetupTokenCredential,
+  deleteVault,
+  ensureVaultDir,
+  isValidVaultName,
+  listVaults,
+  promoteVaultCredential,
+  readVaultSummary,
+  removeVaultCredential,
+  resolveVaultCredentialPath,
+  resolveVaultDir,
+  resolveVaultRoot,
+  resolveVaultSettingsPath,
+  vaultExists,
+  type ClaudeVaultSummary,
+} from "./claude-vault.js";
+// The host lane for the setup-token login. The runner and the PTY transport are
+// reused unchanged; this only opens the session on the host instead of a sandbox.
+export {
+  createClaudeHostSetupTokenTransport,
+  createClaudeLoginStagingDir,
+  openClaudeHostLoginPtySession,
+  removeClaudeLoginStagingDir,
+  type ClaudeHostLoginPtyOptions,
+} from "./claude-host-login-pty.js";
 export type {
   SetupTokenPtyDriver,
   SetupTokenPromptSink,

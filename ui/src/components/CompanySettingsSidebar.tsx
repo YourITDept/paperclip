@@ -201,6 +201,13 @@ export function CompanySettingsSidebar() {
               icon={KeyRound}
             />
           )}
+          {showPage("instance.adapters") && (
+            <SidebarNavItem
+              to={`${INSTANCE_SETTINGS_PATH_PREFIX}/claude-logins`}
+              label="Claude logins"
+              icon={KeyRound}
+            />
+          )}
         </div>
       </nav>
     </aside>

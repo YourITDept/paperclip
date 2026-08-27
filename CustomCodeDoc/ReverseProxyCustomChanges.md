@@ -1186,6 +1186,63 @@ the §10 scoping note; (3) the page still has no UI test.
 
 ---
 
+### 2026-08-27 — Session 9: Claude logins (feature, not a re-apply)
+
+**Who:** Claude (Opus 5) with chris@anderson-family.com
+**Goal:** The Codex logins page provisions named credential directories. Do the
+same for Claude. Branch `W4-20260827c`.
+
+**Outcome:** `/instance/settings/claude-logins`, backed by
+`/sysops/llm/claude/<name>` and `CLAUDE_CONFIG_DIR`, with sign in, sign out, and
+delete. Full design in
+[`Claude device login web service.md`](CustomCodeDoc/Claude%20device%20login%20web%20service.md).
+
+**The two findings that shaped it**
+
+1. **The login is a round trip.** `claude setup-token` shows a URL, the operator
+   signs in and is handed a code, and that code has to come *back* and be written
+   to the waiting process. So the session has a `waiting_for_code` state and an
+   extra route the Codex flow has no need for, and the page has a code field.
+2. **`setup-token` persists nothing.** Codex device login writes an `auth.json`
+   Paperclip copies; Claude writes no credential at all — the captured fixture is
+   explicit. Paperclip captures the token off the stream and writes the credential
+   file itself.
+
+**That second point meant knowing exactly what Claude reads, so it was tested
+rather than assumed** against the real CLI (2.1.231) with synthetic tokens: a
+`.credentials.json` carrying only `accessToken` + `expiresAt`, and the same token
+via `CLAUDE_CODE_OAUTH_TOKEN`, produce the *identical* error path. Claude sends it
+as a bearer either way, which is what makes full parity possible — an agent sets
+only `CLAUDE_CONFIG_DIR`. A credential carrying a `refreshToken` takes a different,
+worse path, so none is written; a test pins its absence.
+
+**Reuse.** Per explicit direction, this builds on `packages/adapters/claude-local`
+rather than porting the Codex vault. `runSetupTokenLogin`, both setup-token
+parsers, and the shared `createLoginPtyTransport` are used unchanged; the only
+missing piece was a host-backed PTY session, which is all
+`claude-host-login-pty.ts` adds. `readClaudeTokenFromDir` was extracted from
+`quota.ts` so the vault asks claude-local what a credential is instead of
+re-deriving it. The Codex host driver was not reusable — it hardcodes `CODEX_HOME`
+and sets stdin to `ignore`, and a driver that cannot write cannot finish this
+login.
+
+**Files changed:** two new modules in `claude-local` plus `quota.ts` and the
+barrel; new `claude-vault-login-service.ts` and `routes/claude-vaults.ts`;
+`app.ts` and `routes/index.ts`; new `ui/api/claudeVaults.ts` and
+`ui/pages/InstanceClaudeVaults.tsx`; `App.tsx`, `queryKeys.ts`,
+`CompanySettingsSidebar.tsx`, `CompanySettingsNav.tsx` (+ its test, which asserts
+the exact tab list); two new test files; the new doc.
+
+**Verification:** 41/41 across the two new suites; 47/47 across the Codex vault
+suites and the nav test, unchanged; `claude-local`, `server`, and `ui` typechecks
+all clean.
+
+**Not verified:** no real Anthropic account has been signed in through this page.
+Every layer is exercised and the credential shape is verified with synthetic
+tokens, but the end-to-end login is untested — that is the next step.
+
+---
+
 ### <date> — Session N: <title>
 
 **Who:**

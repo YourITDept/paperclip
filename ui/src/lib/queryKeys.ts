@@ -390,6 +390,9 @@ export const queryKeys = {
     codexVaults: ["instance", "codex-vaults"] as const,
     codexVaultSession: (sessionId: string) =>
       ["instance", "codex-vault-session", sessionId] as const,
+    claudeVaults: ["instance", "claude-vaults"] as const,
+    claudeVaultSession: (sessionId: string) =>
+      ["instance", "claude-vault-session", sessionId] as const,
   },
   health: ["health"] as const,
   cloud: {
