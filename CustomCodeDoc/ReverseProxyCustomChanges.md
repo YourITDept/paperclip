@@ -233,6 +233,13 @@ Unchanged since Session 2; re-applying does not address any of it:
 4. No end-to-end run through a real Traefik + forward-auth chain has ever been
    done. Note the dev container has no `docker`, `go`, or `psql`, so it cannot be
    done from there.
+5. **Worktree seeding needs a credential-backed admin** (found Session 10).
+   `paperclipai worktree` in `authenticated` mode requires an instance admin
+   holding a Better Auth `account` row
+   ([`cli/src/commands/worktree.ts:1459`](cli/src/commands/worktree.ts#L1459)).
+   A proxy-provisioned user has no such row by design, so an instance whose only
+   admin arrived through the proxy cannot seed a worktree. Keeping one
+   password-backed admin also covers the break-glass gap in item 2.
 
 Operator-facing configuration lives in
 [`doc/REVERSE-PROXY-AUTH.md`](doc/REVERSE-PROXY-AUTH.md), which ships with the
@@ -1240,6 +1247,100 @@ all clean.
 **Not verified:** no real Anthropic account has been signed in through this page.
 Every layer is exercised and the credential shape is verified with synthetic
 tokens, but the end-to-end login is untested — that is the next step.
+
+---
+
+### 2026-08-28 — Session 10: validate the fork against the Better Auth `issuer` change
+
+**Who:** Claude (Opus 5) with chris@anderson-family.com
+**Goal:** Upstream merge `7898e4392` (PR #28) landed on `W4-20260828a`, carrying
+`8316ceb0b` — "Add the Better Auth issuer column so signup and sign-in work"
+(#12396). Validate that it did not break the add-on, with attention on the
+identity path. **No re-apply was needed** (`ddcd436f5` is an ancestor); this was a
+validation pass, not a port.
+
+**Outcome: the add-on is unaffected, and now has a test that proves it.** Seven
+commits came in; only one touches auth, and its whole footprint is
+`packages/db/src/schema/auth.ts`, one migration, and test fixtures.
+
+**The finding that settles it.** Migration `0230` adds a NOT NULL `issuer` column
+to Better Auth's `account` table plus a unique index on `(issuer, account_id)`.
+**The add-on never writes an `account` row.** `resolveProxyHeaderUser` inserts into
+`authUsers` and nothing else — the upstream IdP holds the credential, so Paperclip
+has no password to store — and it matches users on `lower(authUsers.email)`, never
+on `account`. The new column is unreachable from this path. `authAccounts` has
+exactly two writers in the repo, Better Auth itself and two test fixtures; neither
+is ours.
+
+**What was actually verified, not assumed.** The two existing proxy suites drive a
+*fake* Drizzle `Db`, so they could not have noticed a database constraint either
+way. New suite `server/src/__tests__/proxy-header-auth.integration.test.ts` runs
+the real path against a migrated embedded Postgres and pins four things: a
+password-backed user and the proxy header resolve to the **same** user id (the two
+identity sources do not fork into two accounts); auto-provisioning writes a `user`
+row and **no** `account` row; the case-insensitive match still does not duplicate;
+and the flag still gates it. The second assertion is the load-bearing one — it
+makes a future change that starts writing `account` rows fail loudly here instead
+of discovering the NOT NULL column in production.
+
+**Two consequences worth recording. Neither is a regression; both are sharpened by
+this change.**
+
+1. **Every proxy-provisioned user is exactly the "orphaned user" shape #12396
+   declines to repair** — a `user` row with no `account` row. By design, but it
+   means there is no password fallback for those users if the proxy is ever down.
+   This is the same gap as open item 2 (admin bootstrap), seen from the other end.
+2. **`paperclipai worktree` seeding requires a credential-backed instance admin in
+   `authenticated` mode** — `requiresWorktreeSeedCredentialAccount`
+   ([`cli/src/commands/worktree.ts:1459`](cli/src/commands/worktree.ts#L1459)),
+   enforced by a query demanding non-empty `account.provider_id` and
+   `account.account_id`. An instance whose only admin is proxy-provisioned fails
+   with "No auth user has a non-empty credential account…". This predates the
+   merge (`bd059a073`, #11740); Session 10 is just the first time it was connected
+   to the add-on. Recorded as open item 5.
+
+**Files changed:** one new test file
+(`server/src/__tests__/proxy-header-auth.integration.test.ts`) and this doc. **No
+production code was changed** — nothing needed changing. The new suite is
+auto-discovered by `scripts/run-vitest-stable.mjs` into the general-server lane,
+alongside upstream's own `better-auth-credential-signup.integration.test.ts`; no
+runner manifest edit is required.
+
+**Verification** (§0's command set, plus the database-backed suites the `issuer`
+change introduced):
+
+| Check | Result | Session 5 baseline |
+| --- | --- | --- |
+| `ddcd436f5` ancestor | carried | — |
+| Precedence bearer → cloud → proxy → session | intact | — |
+| `proxy_header` union sites | 6 carry it; the two documented exclusions (`authz.ts:213`, `tool-access.ts:4798`) still correctly lack it | — |
+| §0.1 #1 invite guard | present, `InviteLanding.tsx:315` | — |
+| `PAPERCLIP_CODEX_HOME` read sites | all present | — |
+| server typecheck | clean | clean |
+| feature suites, host env set **and** stripped | 24/24 both ways | 24/24 |
+| auth regression sweep | 113/113 | 110/110 |
+| extended sweep | 72/72 | 62/62 |
+| `db check:migrations` | pass | — |
+| `0230` migration test (real DB) | 2/2 | new |
+| credential sign-up integration (real DB) | 1/1 | new |
+| **new** proxy-header integration (real DB) | 4/4 | new |
+| InviteLanding | 18/18 | 18/18 |
+| vault suites (adapter + server) | 48/48, 35/35 | — |
+
+The sweeps are *above* baseline because upstream added tests, not because
+anything changed shape.
+
+**One failure, and it is the environment.** `cli/src/__tests__/worktree.test.ts`
+is 62/63; "reseed preserves the current worktree ports, instance id, and
+branding" fails with `psql error: spawn psql ENOENT`. `psql`, `pg_restore`, and
+`docker` are all absent from this dev container — the condition open item 4
+already records. The merge's entire footprint in `cli/` is a two-line test fixture
+(`issuer: "local:credential"`); `git diff … -- cli/src/commands/` is empty, so the
+restore path that fails is byte-identical to pre-merge. Not a regression; it
+cannot be cleared from here.
+
+**Next step:** nothing blocking. The two consequences above are operator
+decisions, not code work. Uncommitted at time of writing.
 
 ---
 
