@@ -30,6 +30,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { CreateAgentFromLoginButton } from "@/components/CreateAgentFromLoginButton";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { cn } from "../lib/utils";
@@ -47,6 +48,9 @@ import { cn } from "../lib/utils";
 
 /** Mirrors the server-side name rule, so the field can validate before submit. */
 const VAULT_NAME_RE = /^[a-z0-9][a-z0-9_-]{1,39}$/;
+/** What an agent has to be to use one of these logins: this runtime, this variable. */
+const CLAUDE_ADAPTER_TYPE = "claude_local";
+const CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR";
 /** Shown as shadow text in the name field to suggest the expected shape. */
 const VAULT_NAME_PLACEHOLDER = "claude_device";
 const NAME_HINT =
@@ -86,6 +90,7 @@ function CopyButton({ value, label = "Copy" }: { value: string; label?: string }
 /** The live setup-token login panel for one vault. */
 function LoginPanel({
   session,
+  vaultDir,
   code,
   setCode,
   submitting,
@@ -94,6 +99,8 @@ function LoginPanel({
   onDone,
 }: {
   session: ClaudeVaultLoginSession;
+  /** The signed-in directory, once the list carries it. Null until then. */
+  vaultDir: string | null;
   code: string;
   setCode: (value: string) => void;
   submitting: boolean;
@@ -129,11 +136,26 @@ function LoginPanel({
       <div className="space-y-2 py-2">
         <div className="flex items-center gap-2 text-sm text-green-400">
           <Check className="size-4" />
-          Signed in. Copy this directory&rsquo;s path into an agent&rsquo;s CLAUDE_CONFIG_DIR.
+          Signed in. Create an agent on this login, or copy the directory&rsquo;s path into an
+          existing agent&rsquo;s CLAUDE_CONFIG_DIR.
         </div>
-        <Button variant="outline" size="sm" onClick={onDone}>
-          Done
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* The vault row carries the directory; the session does not. It is
+              absent only in the moment between the login landing and the list
+              refetch, and the row button below stays available either way. */}
+          {vaultDir ? (
+            <CreateAgentFromLoginButton
+              adapterType={CLAUDE_ADAPTER_TYPE}
+              envName={CLAUDE_CONFIG_DIR_ENV}
+              envValue={vaultDir}
+              vaultName={session.vaultName}
+              label="Create an agent with this login"
+            />
+          ) : null}
+          <Button variant="outline" size="sm" onClick={onDone}>
+            Done
+          </Button>
+        </div>
       </div>
     );
   }
@@ -381,6 +403,7 @@ export function InstanceClaudeVaults() {
           </div>
           <LoginPanel
             session={session}
+            vaultDir={vaults.find((vault) => vault.name === session.vaultName)?.dir ?? null}
             code={loginCode}
             setCode={setLoginCode}
             submitting={submitCode.isPending}
@@ -462,6 +485,16 @@ export function InstanceClaudeVaults() {
                     <KeyRound className="size-3.5" />
                     {vault.hasCredential ? "Sign in again" : "Sign in"}
                   </Button>
+                  {/* Offered whether or not the credential is in place: wiring an
+                      agent to a directory that is about to be signed in is a
+                      normal order of work, and the agent only needs the path. */}
+                  <CreateAgentFromLoginButton
+                    adapterType={CLAUDE_ADAPTER_TYPE}
+                    envName={CLAUDE_CONFIG_DIR_ENV}
+                    envValue={vault.dir}
+                    vaultName={vault.name}
+                    disabled={destructivePending}
+                  />
                   {/* Sign out is offered only when there is a credential to
                       remove, so the row never presents a no-op action. */}
                   {vault.hasCredential ? (

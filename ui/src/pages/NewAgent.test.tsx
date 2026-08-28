@@ -46,10 +46,13 @@ const mockProjectsApi = vi.hoisted(() => ({ list: vi.fn() }));
 const mockAssetsApi = vi.hoisted(() => ({ uploadImage: vi.fn() }));
 const mockClipboard = vi.hoisted(() => ({ copyTextToClipboard: vi.fn() }));
 const navigateMock = vi.hoisted(() => vi.fn());
+// The page reads its preset out of the query string. Held in a ref so a test can
+// render the page as the Claude/Codex login settings page navigates to it.
+const routerSearch = vi.hoisted(() => ({ current: "" }));
 
 vi.mock("@/lib/router", () => ({
   useNavigate: () => navigateMock,
-  useSearchParams: () => [new URLSearchParams(), vi.fn()],
+  useSearchParams: () => [new URLSearchParams(routerSearch.current), vi.fn()],
 }));
 
 vi.mock("../context/CompanyContext", () => ({
@@ -231,10 +234,9 @@ async function completeClaudeLogin(container: HTMLElement) {
   await flushUntil(() => (container.textContent ?? "").includes("Authenticated"));
 }
 
-describe("NewAgent Claude subscription login", () => {
-  let roots: Root[] = [];
-
-  beforeEach(() => {
+// Every API the page touches on mount, primed for a plain render. Shared by the
+// login tests and the preset test so both start from the same page.
+function primeApiMocks() {
     mockAgentsApi.adapterModelProfiles.mockResolvedValue([]);
     mockAgentsApi.adapterModels.mockResolvedValue([]);
     mockAgentsApi.detectModel.mockResolvedValue(null);
@@ -301,6 +303,14 @@ describe("NewAgent Claude subscription login", () => {
     mockProjectsApi.list.mockResolvedValue([]);
     mockAssetsApi.uploadImage.mockResolvedValue({ contentPath: "/asset" });
     mockClipboard.copyTextToClipboard.mockResolvedValue(undefined);
+}
+
+describe("NewAgent Claude subscription login", () => {
+  let roots: Root[] = [];
+
+  beforeEach(() => {
+    routerSearch.current = "";
+    primeApiMocks();
   });
 
   afterEach(async () => {
@@ -403,5 +413,62 @@ describe("NewAgent Claude subscription login", () => {
         expectedLatestVersion: 3,
       },
     });
+  });
+});
+
+// The Claude and Codex login settings pages hand this page a preset in the query
+// string. These tests run the real adapter registry, so they prove the preset
+// survives all the way into the adapter `env` map the create request carries —
+// not merely that it landed in component state.
+describe("NewAgent login-vault preset", () => {
+  let roots: Root[] = [];
+
+  beforeEach(() => {
+    routerSearch.current = "";
+    primeApiMocks();
+  });
+
+  afterEach(async () => {
+    for (const root of roots) {
+      await act(async () => {
+        root.unmount();
+      });
+    }
+    roots = [];
+    document.body.innerHTML = "";
+    vi.clearAllMocks();
+  });
+
+  it("preselects the runtime and prefills the vault directory into the create request", async () => {
+    const dir = "/sysops/llm/codex/codex_device";
+    routerSearch.current = `adapterType=codex_local&env=CODEX_HOME%3D${encodeURIComponent(dir)}`;
+
+    const result = await renderNewAgent();
+    roots.push(result.root);
+
+    // The prefilled variable is on screen and editable before anything is
+    // created — the preset is a draft, not a silent write.
+    const values = Array.from(result.container.querySelectorAll("input")).map((i) => i.value);
+    expect(values).toContain("CODEX_HOME");
+    expect(values).toContain(dir);
+
+    await clickByText(result.container, "Create agent");
+    await flushUntil(() => mockAgentsApi.hire.mock.calls.length > 0);
+
+    const [, payload] = mockAgentsApi.hire.mock.calls[0] as [string, Record<string, unknown>];
+    expect(payload.adapterType).toBe("codex_local");
+    const env = (payload.adapterConfig as Record<string, unknown>).env as Record<string, unknown>;
+    expect(env.CODEX_HOME).toEqual({ type: "plain", value: dir });
+  });
+
+  it("ignores a preset variable a crafted link should not be able to set", async () => {
+    routerSearch.current =
+      "adapterType=claude_local&env=PAPERCLIP_API_URL%3Dhttp%3A%2F%2Fevil.test";
+
+    const result = await renderNewAgent();
+    roots.push(result.root);
+
+    const values = Array.from(result.container.querySelectorAll("input")).map((i) => i.value);
+    expect(values).not.toContain("PAPERCLIP_API_URL");
   });
 });

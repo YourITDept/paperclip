@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "@/lib/router";
 import { useCompany } from "../context/CompanyContext";
@@ -35,6 +35,7 @@ import { useDisabledAdaptersSync } from "../adapters/use-disabled-adapters";
 import { isValidAdapterType } from "../adapters/metadata";
 import { ReportsToPicker } from "../components/ReportsToPicker";
 import { buildNewAgentHirePayload } from "../lib/new-agent-hire-payload";
+import { parseNewAgentEnvPreset } from "../lib/new-agent-preset";
 import { TrustPresetSection } from "../components/TrustPresetSection";
 import { buildPermissionsForTrustPreset, getTrustPreset } from "../lib/trust-policy-ui";
 import { DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX } from "@paperclipai/adapter-codex-local";
@@ -63,6 +64,31 @@ function createValuesForAdapterType(
   return nextValues;
 }
 
+/**
+ * Apply a `?adapterType=…&env=NAME%3Dvalue` preset to a fresh set of create
+ * values. Callers hand the form a half-filled draft this way — today the Claude
+ * and Codex login settings pages, which know the vault directory and the
+ * variable the matching runtime reads.
+ *
+ * The adapter's own defaults are applied first, so a preset never has to restate
+ * them; the prefilled variables are merged on top and stay visible and editable
+ * in the Environment variables field before anything is created.
+ */
+function applyNewAgentPreset(
+  requestedAdapterType: string | null,
+  envPreset: Record<string, EnvBinding>,
+): CreateConfigValues {
+  const base =
+    requestedAdapterType && isValidAdapterType(requestedAdapterType)
+      ? createValuesForAdapterType(requestedAdapterType as CreateConfigValues["adapterType"])
+      : defaultCreateValues;
+  if (Object.keys(envPreset).length === 0) return base;
+  return {
+    ...base,
+    envBindings: { ...((base.envBindings ?? {}) as Record<string, EnvBinding>), ...envPreset },
+  };
+}
+
 export function NewAgent() {
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
@@ -70,12 +96,21 @@ export function NewAgent() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const presetAdapterType = searchParams.get("adapterType");
+  // Keyed on the serialized query so the memo survives a router re-render that
+  // hands back a fresh URLSearchParams for the same location.
+  const searchKey = searchParams.toString();
+  const presetEnvBindings = useMemo(
+    () => parseNewAgentEnvPreset(new URLSearchParams(searchKey)),
+    [searchKey],
+  );
 
   const [name, setName] = useState("");
   const [title, setTitle] = useState("");
   const [role, setRole] = useState("general");
   const [reportsTo, setReportsTo] = useState<string | null>(null);
-  const [configValues, setConfigValues] = useState<CreateConfigValues>(defaultCreateValues);
+  const [configValues, setConfigValues] = useState<CreateConfigValues>(() =>
+    applyNewAgentPreset(presetAdapterType, presetEnvBindings),
+  );
   const [permissions, setPermissions] = useState<Partial<AgentPermissions>>(
     buildPermissionsForTrustPreset(null, "standard"),
   );
@@ -145,9 +180,9 @@ export function NewAgent() {
     if (!isValidAdapterType(requested)) return;
     setConfigValues((prev) => {
       if (prev.adapterType === requested) return prev;
-      return createValuesForAdapterType(requested as CreateConfigValues["adapterType"]);
+      return applyNewAgentPreset(requested, presetEnvBindings);
     });
-  }, [presetAdapterType]);
+  }, [presetAdapterType, presetEnvBindings]);
 
   const createAgent = useMutation({
     mutationFn: (data: Record<string, unknown>) =>
