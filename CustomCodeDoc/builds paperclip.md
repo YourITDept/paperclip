@@ -1,6 +1,6 @@
 # Building Paperclip — the container toolchain
 
-**Status:** Current as of `W4-20260828a` (2026-08-28).
+**Status:** Current as of `W4-20260828b` (2026-08-28).
 **Owner:** cwa@youritdept.com
 **Companion to:** [`ReverseProxyCustomChanges.md`](CustomCodeDoc/ReverseProxyCustomChanges.md) —
 that file records *what the fork carries*; this one records *what builds and
@@ -257,29 +257,52 @@ on a locally built image. That is expected, not a defect.
 
 The toolchain above is the standard. It is not what the assistant sessions
 recorded in `ReverseProxyCustomChanges.md` have been executing on. Those ran on
-the **host**, not in the container:
+the **host**, not in the container. The host has also **changed underneath us**
+between sessions, so both readings are kept rather than the older one replaced:
 
-| | Session environment (2026-08-28) | Canonical |
-| --- | --- | --- |
-| Node | **v26.7.0** | 24 (≥ 24.11.0) |
-| npm | 11.19.0 | not used by the build |
-| pnpm launcher | 11.24.0 (Homebrew) | — |
-| pnpm effective | **9.15.4** | 9.15.4 ✓ |
-| OS | Ubuntu 24.04.4 LTS, x86_64 | Debian trixie (container) |
+| | Session 10 (`W4-20260828a`) | Session 11 (`W4-20260828b`) | Canonical |
+| --- | --- | --- | --- |
+| Node | **v26.7.0** | **v24.20.0** ✓ | 24 (≥ 24.11.0) |
+| npm | 11.19.0 | 11.19.0 | not used by the build |
+| pnpm launcher | 11.24.0 (Homebrew) | **9.15.9** (Homebrew `pnpm@9`, keg-only) | — |
+| pnpm effective | **9.15.4** ✓ | **9.15.9** ✗ | 9.15.4 |
+| corepack | — | 0.35.0 → provisions 9.15.4 ✓ | bundled with Node 24 |
+| OS | Ubuntu 24.04.4 LTS, x86_64 | Ubuntu 24.04.4 LTS, x86_64 | Debian trixie (container) |
 
-The pnpm half matches exactly: the Homebrew pnpm 11 reads `packageManager` and
-delegates to 9.15.4, which is what actually runs (`pnpm -v` prints `9.15.4`
-inside the repo and `11.24.0` outside it; the delegated copy is cached under
-`/Projects/.pnpm-store/v11/links/@/pnpm/9.15.4`). Patches were confirmed applied.
+**The Node half now matches, and that retires a standing caveat.** Session 10 ran
+on Node 26 — one major ahead. The version guards are floors, not ceilings, so
+everything ran and passed, but a Node-24-only failure could not have surfaced,
+and this section previously said the Session 10 results had to be read with that
+caveat and could not be re-run on that host. That is no longer true: the host now
+carries **Node v24.20.0**, inside the canonical major and above the `24.11.0`
+floor, and Session 11 re-ran the §0 verification suites there. The caveat is
+discharged — the results hold on Node 24.
 
-**The Node half does not match — it is one major ahead.** The version guards are
-floors, so everything ran and passed, but a Node-24-only failure could not have
-surfaced. The Session 10 validation results should be read with that caveat.
-There is no Node 24 and no version manager on that host, so it could not be
-re-run there.
+**The pnpm half has drifted the other way, and the claim this section used to
+make is now false.** It previously stated that the Homebrew pnpm 11 launcher
+reads `packageManager` and delegates to 9.15.4, so "any pnpm on PATH already
+delegates to the pinned version". That launcher is gone. What is on PATH now is
+`/home/linuxbrew/.linuxbrew/opt/pnpm@9/bin/pnpm`, which **is** 9.15.9 and does
+**not** delegate — `pnpm -v` prints `9.15.9` both inside and outside the repo.
+This is precisely the build Trap #4 warns about, now actually installed.
 
-**To settle it, run the same commands through §5 or let CI do it** — CI is
-pinned at `node-version: 24` and is the authoritative environment.
+The impact is small, but it is not nothing:
+
+- **Patches and overrides still apply.** 9.15.9 and the pinned 9.15.4 are both
+  pnpm **9**, so `overrides` and `patchedDependencies` still live in
+  `package.json` where pnpm 9 reads them. Verified this session:
+  `node_modules/.pnpm/` carries
+  `embedded-postgres@18.1.0-beta.16_patch_hash=55uhvnotpqyiy37rn3pqpukhei`, and
+  both patched packages plus all three overrides are still declared. The §4.1
+  trap is about a bump **past 9**; this is not one.
+- **It is still a silent deviation from the pin.** `corepack pnpm …` gives the
+  exact pinned 9.15.4 — the cached copy is still at
+  `/Projects/.pnpm-store/v11/links/@/pnpm/9.15.4`. **Prefer `corepack pnpm` on
+  this host** whenever a result needs to be attributable to the pin, and do not
+  quote a bare `pnpm -v` as evidence that the pin was honoured.
+
+**To settle either half, run the same commands through §5 or let CI do it** — CI
+is pinned at `node-version: 24` and is the authoritative environment.
 
 ---
 
@@ -297,8 +320,14 @@ pinned at `node-version: 24` and is the authoritative environment.
    one becomes a fork-carried change to re-apply on every upstream sync. Let
    upstream drive the bump.
 4. **`brew install pnpm@9` gives 9.15.9, not 9.15.4** — and it is keg-only and
-   deprecated (disabled 2027-02-06). Any pnpm on PATH already delegates to the
-   pinned version; there is nothing to install.
+   deprecated (disabled 2027-02-06). **This has now actually happened on the
+   deployment host**, so read it as a live condition rather than a warning:
+   `/home/linuxbrew/.linuxbrew/opt/pnpm@9/bin/pnpm` is first on PATH, it *is*
+   9.15.9, and unlike the pnpm 11 launcher it replaced it does **not** delegate
+   to the pinned 9.15.4 (§7). Both are pnpm 9, so the §4.1 patches and overrides
+   still apply and nothing is broken — but a bare `pnpm -v` is no longer evidence
+   that the pin was honoured. Use `corepack pnpm` when it needs to be, and do not
+   install a third copy to "fix" it.
 5. **The lockfile has 35 importers; the Dockerfile `deps` stage copies 30
    manifests.** The five uncopied ones (`create-paperclip-plugin` and four
    `plugin-*-example` packages) are **benign** — pnpm skips lockfile importers

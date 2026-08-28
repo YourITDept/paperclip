@@ -5,8 +5,9 @@ re-applied to each new working branch — see §0.
 **Owner:** cwa@youritdept.com
 **Repo:** `YourITDept/paperclip` (fork of `paperclipai/paperclip`)
 **Created:** 2026-08-01 · **Last re-applied:** 2026-08-12 (Session 5)
-**Last synced:** 2026-08-27 (Session 7 — upstream merge, no re-apply needed; see
-[`SYNC-2026-08-27.md`](CustomCodeDoc/SYNC-2026-08-27.md))
+**Last synced:** 2026-08-28 (Session 11 — verified on `W4-20260828b` after
+upstream merge `eb5d0a395` / PR #29; no re-apply needed. Prior sync 2026-08-27,
+Session 7 — see [`SYNC-2026-08-27.md`](CustomCodeDoc/SYNC-2026-08-27.md))
 **Scope:** primarily the forward-auth add-on, plus any other change the fork must
 re-apply after taking a fresh upstream branch — see §0.1.
 
@@ -240,6 +241,14 @@ Unchanged since Session 2; re-applying does not address any of it:
    A proxy-provisioned user has no such row by design, so an instance whose only
    admin arrived through the proxy cannot seed a worktree. Keeping one
    password-backed admin also covers the break-glass gap in item 2.
+
+   *Session 11 amendment.* This now has a visible test signature on this host:
+   `server/src/__tests__/workspace-runtime.test.ts` fails **19 of 154**, all in
+   `realizeExecutionWorkspace`, all on `paperclipai worktree init failed (exit 1)`
+   via `scripts/provision-worktree.sh`. It is **not** a fork or merge regression —
+   `W4-20260828a` reproduces it identically, and stripping every `PAPERCLIP_*` var
+   does not change it. Treat those 19 as the known state of this item until it is
+   settled, and do not read them as add-on breakage.
 
 Operator-facing configuration lives in
 [`doc/REVERSE-PROXY-AUTH.md`](doc/REVERSE-PROXY-AUTH.md), which ships with the
@@ -1341,6 +1350,95 @@ cannot be cleared from here.
 
 **Next step:** nothing blocking. The two consequences above are operator
 decisions, not code work. Uncommitted at time of writing.
+
+---
+
+### 2026-08-28 — Session 11: verify the fork on `W4-20260828b` (upstream merge #29)
+
+**Who:** Claude (Opus 5) with chris@anderson-family.com
+**Goal:** `W4-20260828b` was branched above `W4-20260828a` and took upstream merge
+`eb5d0a395` (PR #29). Verify the fork-carried work survived it. **No re-apply was
+needed** — `git merge-base --is-ancestor ddcd436f5 HEAD` passes, so this is the
+Session 7 "merge upstream into a long-lived branch" case, not a re-branch. Nothing
+was cherry-picked.
+
+**Outcome: everything the fork carries is intact and green.** Every §0 verification
+command was run, plus the areas the merge actually touched.
+
+| Check | Baseline | This session |
+| --- | --- | --- |
+| `server typecheck` | clean | clean (exit 0) |
+| `proxy-header-auth` + `proxy-header-actor` | 24/24 | 24/24 |
+| …same, with the trap-#1 vars stripped | — | 24/24 |
+| auth regression sweep (6 files) | 110/110 | 113/113 |
+| `auth-routes`, `agent-auth-*`, `better-auth`, … | 62/62 | 73/73 |
+| §0.1 #1 `InviteLanding` | 18/18 | 18/18 |
+
+The counts above baseline are upstream adding tests, not drift.
+
+**Structural invariants confirmed by reading, not just by green tests.** The
+precedence order `bearer → cloud tenant → proxy header → Better Auth` still holds
+in both files that have historically conflicted:
+[`middleware/auth.ts:238-260`](server/src/middleware/auth.ts#L238-L260) and
+[`realtime/live-events-ws.ts:184-208`](server/src/realtime/live-events-ws.ts#L184-L208),
+where master's `resolveCloudActor` branch and our proxy path both sit correctly —
+the Session 4 and Session 5 conflict resolutions survived. Trap #2 also holds:
+seven non-test files carry `proxy_header`, and *both* deliberate exclusions
+([`routes/authz.ts:213`](server/src/routes/authz.ts#L213),
+[`services/tool-access.ts:4798`](server/src/services/tool-access.ts#L4798)) are
+still correctly without it. The `embedded-postgres` patch is applied
+(`_patch_hash=55uhvnotpqyiy37rn3pqpukhei`).
+
+**Trap #1 is still live on this box** — `PAPERCLIP_PROXY_AUTH_ENABLED`,
+`..._AUTO_PROVISION` and `..._USER_HEADER` are all exported. The feature suites
+were run both as-is and with all three stripped; identical 24/24 both ways. The
+`beforeEach` pinning in `proxy-header-actor.test.ts` is doing its job — keep it.
+
+**One failing suite, and it is not ours.**
+`server/src/__tests__/workspace-runtime.test.ts` fails **19 of 154**, all in
+`realizeExecutionWorkspace`, all dying on
+`paperclipai worktree init failed (exit 1)` behind
+`scripts/provision-worktree.sh`. **It is pre-existing, not a merge regression** —
+`W4-20260828a` was checked out and produces the identical 19 failures. The merge
+touched this file only to relax an assertion in a *different* test (the startup
+reconciliation one), and neither `provision-worktree.sh` nor
+`cli/src/commands/worktree.ts` changed at all. It is also not env leakage:
+stripping every `PAPERCLIP_*` var reproduces it. This is the same ground as §0
+open item 5 (worktree seeding needs a credential-backed admin) — see the
+amendment there.
+
+**Merge-touched areas otherwise pass:** `OnboardingWizard` (3 suites) 66/66,
+`adapter-auth-signal-routes` 14/14, `company-skills-routes` 53/53,
+`issue-agent-mutation-ownership-routes` 87/87.
+
+**Environment drift found, and corrected in the companion doc.** Two items, both
+now fixed in [`builds paperclip.md`](CustomCodeDoc/builds%20paperclip.md) §7 and
+Trap #4:
+
+1. **Node is now v24.20.0 on this host, and that retires a caveat.** Session 10
+   ran on Node v26.7.0 — one major ahead — so §7 warned its results could not
+   have surfaced a Node-24-only failure and could not be re-run there. The host
+   has since moved to Node 24, above the `24.11.0` floor, and this session re-ran
+   the suites on it. The caveat is discharged.
+2. **`pnpm` on PATH no longer delegates to the pin.** §7 used to claim the
+   Homebrew pnpm 11 launcher reads `packageManager` and delegates to 9.15.4. That
+   launcher is gone; PATH now hits the keg-only `pnpm@9` at **9.15.9**, which
+   prints 9.15.9 both inside and outside the repo — exactly the build Trap #4
+   warned about, now actually installed. Impact is small: both are pnpm 9, so
+   `overrides` and `patchedDependencies` still resolve from `package.json` and
+   still apply (verified). But a bare `pnpm -v` is no longer evidence the pin was
+   honoured — `corepack pnpm` gives the exact 9.15.4.
+
+**Files changed:** documentation only —
+[`builds paperclip.md`](CustomCodeDoc/builds%20paperclip.md) (§7 rewritten to keep
+both the Session 10 and Session 11 host readings; Trap #4 restated as a live
+condition; status re-stamped) and this file (header re-stamp, §0 open item 5
+amendment, this entry). **No source files were touched.**
+
+**Next step:** nothing blocking on the add-on. Two carried items: the
+`workspace-runtime` provisioning failure is worth settling against §0 open item 5,
+and §0.1 #1 remains an upstream-PR candidate rather than a permanent fork patch.
+Uncommitted at time of writing.
 
 ---
 
