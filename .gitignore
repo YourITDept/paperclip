@@ -70,4 +70,8 @@ tests/storybook-visual/playwright-report/
 .superpowers/
 .claude/worktrees/
 .herenow
+# Fork-carried: local release bundles produced by scripts/pack-local.sh
 releases/local/
+.vercel/
+.env.local
+test-results/
