@@ -215,6 +215,41 @@ Session 5 baseline: typecheck clean, 24/24 feature tests, 110/110 sweep, plus
    has a `beforeEach` pinning all four vars to defaults — **keep it**, and if you
    add a test, prove it passes both with the vars set and with them stripped
    (`env -u PAPERCLIP_PROXY_AUTH_ENABLED -u PAPERCLIP_PROXY_AUTH_AUTO_PROVISION …`).
+
+   **`PAPERCLIP_CODEX_HOME` is a fifth leaking variable, and nothing guards it**
+   (found 2026-08-29 on `W4-20260828c`). This box exports
+   `PAPERCLIP_CODEX_HOME=/sysops/llm/openrouter/default`, which breaks
+   [`packages/adapter-utils/src/acpx-engine/execute.test.ts`](packages/adapter-utils/src/acpx-engine/execute.test.ts).
+   The test *"replaces stale managed Codex auth files with source symlinks"*
+   fails at `expect(authStat.isSymbolicLink()).toBe(true)`
+   ([`execute.test.ts:1284`](packages/adapter-utils/src/acpx-engine/execute.test.ts#L1284)) —
+   the managed auth path is not the symlink the test expects — and in a
+   whole-package run it cascades into three more failures in the ACPX
+   handshake-fence tests.
+
+   ```bash
+   # as the host is configured: 4 failed | 1004 passed | 4 skipped
+   npx vitest run packages/adapter-utils/src/
+
+   # with the variable stripped: 1008 passed | 4 skipped | 0 failed
+   env -u PAPERCLIP_CODEX_HOME npx vitest run packages/adapter-utils/src/
+   ```
+
+   Run on its own the file is 152/153; run with the package it is 149/153.
+   **Strip the variable and it is 153/153.**
+
+   Three things make it worth spelling out rather than folding into the sentence
+   above. **It is in a different package.** This trap had been a `server/` concern
+   only, so a clean server run no longer means the host environment is clean —
+   `packages/` has to be checked too. **No `beforeEach` defends it.** The four
+   proxy vars are pinned inside `proxy-header-actor.test.ts`; this one is pinned
+   nowhere, so it fails silently on any host that sets it. **It is not the fork's
+   variable.** That suite arrived with upstream merge #29 and the add-on has
+   nothing to do with Codex auth, so it will resurface on upstream's schedule
+   rather than ours. Before reporting any `acpx-engine` failure, re-run it with
+   `env -u PAPERCLIP_CODEX_HOME` — and prefer that form for the whole
+   `adapter-utils` package.
+
 2. **The `source` union is duplicated in six places** and `proxy_header` must be
    added to all of them. Two *other* union sites — [`routes/authz.ts:213`](server/src/routes/authz.ts#L213)
    and [`services/tool-access.ts:4798`](server/src/services/tool-access.ts#L4798) —
