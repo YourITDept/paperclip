@@ -239,9 +239,105 @@ are almost always kept:
 
 ---
 
-## 5. The review procedure
+## 5. Taking the upstream merge
 
-### 5.1 Establish what came in
+**This section exists because the GitHub PR route stops working.** The fork's
+normal sync is a GitHub pull request from `paperclipai/paperclip` into the fork
+(`Merge pull request #NN from paperclipai/master`, PRs #24–#31). When that route
+stalls, the merge has to be done locally, and the questions below get asked every
+time. **The answers are recorded here so they are not re-litigated.**
+
+### 5.1 The decided path — use this unless told otherwise
+
+> **Decided 2026-08-29 (session 2).** Both questions came up during a stuck
+> merge; these are the operator's answers, to be treated as the default from now
+> on.
+
+| Question | **The answer** | Why |
+| --- | --- | --- |
+| Which master gets merged? | **Upstream `paperclipai/master`** | "The master from the fork" means *the project we forked from*, not `origin/master`. `origin/master` is the fork's own master and normally lags the working branch. |
+| How is upstream reached? | **One-shot fetch, no remote added** | Keeps `.git/config` untouched. A persistent `upstream` remote was explicitly declined. |
+
+**Do not add an `upstream` remote.** `SYNC-2026-08-27.md` §2 records one being
+added in an earlier session; that is not the current preference. Fetch by URL.
+
+> **`origin` is confusing — read this before assuming.** The fork's `origin`
+> mirrors *upstream's* branch names too (hundreds of `PAP-*`, `PAPA-*`,
+> `codex/*`, `release/*` refs). It is easy to conclude upstream is already
+> available locally. It is not: **`origin/master` is the fork's master**, and
+> there is no local ref for upstream's master at all. That is exactly why the
+> fetch is needed.
+
+### 5.2 The commands
+
+```bash
+# 0. Confirm a clean tree and the right branch. Never merge onto a dirty tree.
+git status --short
+git branch --show-current
+
+# 1. A rollback point. Cheap, local, and the only thing that makes step 3 safe.
+git tag -f pre-merge-backup-$(git branch --show-current) HEAD
+
+# 2. One-shot fetch. No remote is added; the result lands in FETCH_HEAD.
+git fetch https://github.com/paperclipai/paperclip.git master
+git log -1 --format='%h %ad %s' --date=short FETCH_HEAD
+
+# 3. See what is coming, and confirm the merge base is the tip taken last time.
+git merge-base HEAD FETCH_HEAD          # expect the previous merge's upstream tip
+git log --oneline --no-merges HEAD..FETCH_HEAD
+git diff --stat HEAD FETCH_HEAD | tail -3
+
+# 4. Preview conflicts WITHOUT touching the working tree.
+git merge-tree --write-tree --name-only HEAD FETCH_HEAD
+#   exit 0 = clean, exit 1 = conflicts, and the output names every file.
+
+# 5. Merge, holding the commit so the result can be reviewed first.
+git merge --no-ff --no-commit FETCH_HEAD
+git status --short | grep -E '^(UU|AA|DU|UD|DD|AU|UA)'
+```
+
+**Step 4 is the one worth keeping.** `git merge-tree` answers "where can this not
+be merged?" before anything is modified, which is usually the question actually
+being asked. It needs no cleanup and cannot fail halfway.
+
+**Rollback, if it goes wrong:**
+
+```bash
+git merge --abort                                    # mid-merge
+git reset --hard pre-merge-backup-<branch>           # after the merge commit
+```
+
+### 5.3 Resolving conflicts — the standing rule
+
+**Keep both sides.** Every conflict this fork has hit across four sessions has
+been *adjacency*, not semantics: the fork's lines and upstream's lines landing at
+the same place in a file neither side restructured. None has yet required
+choosing one side over the other.
+
+Label the fork's half when resolving, so the next merge can tell what is carried:
+
+```gitignore
+.herenow
+# Fork-carried: local release bundles produced by scripts/pack-local.sh
+releases/local/
+.vercel/
+```
+
+If a conflict ever *is* semantic — both sides changing the same logic — stop and
+raise it. Do not pick a side unilaterally.
+
+### 5.4 Do not commit the merge without being asked
+
+The merge is left staged and uncommitted for review. The operator commits.
+The tree is fully usable in this state: typecheck and the test suite both run
+normally against a staged merge.
+
+---
+
+## 6. Reviewing what came in
+
+
+### 6.1 Establish what came in
 
 When `HEAD` is the merge commit, its second parent is the upstream tip:
 
@@ -257,7 +353,7 @@ git log --oneline --no-merges "$PREV_MERGE".."$UPSTREAM_TIP"
 git show --stat --format= --find-renames <sha>
 ```
 
-### 5.2 Establish what the fork still carries
+### 6.2 Establish what the fork still carries
 
 ```bash
 git diff --stat "$UPSTREAM_TIP" HEAD
@@ -267,7 +363,7 @@ Everything in that list is fork-carried. Cross-check it against §4: every chang
 set should be represented. A change set that has *vanished* from this list is the
 alarm — it was lost in the merge.
 
-### 5.3 Decide whether anything must be re-applied
+### 6.3 Decide whether anything must be re-applied
 
 ```bash
 git merge-base --is-ancestor ddcd436f5 HEAD && echo "add-on already carried — do NOT cherry-pick"
@@ -277,7 +373,7 @@ In the merge-into-a-working-branch workflow this always passes and **nothing is
 re-applied**. Only a fresh re-branch from upstream needs
 `ReverseProxyCustomChanges.md` §0.
 
-### 5.4 Read the upstream changes against §4
+### 6.4 Read the upstream changes against §4
 
 For each incoming commit, ask the three questions in order:
 
@@ -295,7 +391,7 @@ For each incoming commit, ask the three questions in order:
    is not a break, but it is a convergence opportunity worth recording in §7 —
    the fork patch may eventually be retired in favour of upstream's.
 
-### 5.5 Verify the merge kept both sides in the §4.1 collision files
+### 6.5 Verify the merge kept both sides in the §4.1 collision files
 
 ```bash
 grep -n "managedCodexHomeOverride\|PAPERCLIP_CODEX_HOME" packages/adapter-utils/src/acpx-engine/execute.ts
@@ -304,13 +400,54 @@ grep -n "codexVault\|claudeVault" server/src/app.ts server/src/routes/index.ts
 
 ---
 
-## 6. The test procedure
+## 7. The test procedure
 
-### 6.1 Run the full suite
+### 7.1 Run the full suite — one group per process
+
+> **Do not use `pnpm run test:run` on this host.** It aborts after the first
+> failing group and the remaining three never execute. See the box below.
 
 ```bash
-corepack pnpm run test:run 2>&1 | tee /tmp/full-test-run.log
+SC=/tmp/paperclip-tests; mkdir -p $SC
+CLEAN="env -u PAPERCLIP_CODEX_HOME -u PAPERCLIP_PUBLIC_URL"      # see 7.5 #2
+
+corepack pnpm --filter @paperclipai/plugin-sdk ensure-build-deps  # see 7.5 #1
+
+$CLEAN node scripts/run-vitest-stable.mjs --mode general --group general-server      > $SC/g1.log 2>&1
+$CLEAN node scripts/run-vitest-stable.mjs --mode general --group general-workspaces-a > $SC/g2.log 2>&1
+$CLEAN node scripts/run-vitest-stable.mjs --mode general --group general-workspaces-b > $SC/g3.log 2>&1
+$CLEAN node scripts/run-vitest-stable.mjs --mode serialized                           > $SC/g4.log 2>&1
+
+grep -hE "Test Files|Tests  " $SC/g*.log
 ```
+
+Four separate processes, so one group's failures cannot suppress the others.
+Budget ~30 min for `general-server` alone.
+
+> ### The trap: `test:run` stops at the first failing group
+>
+> [`run-vitest-stable.mjs:298-300`](scripts/run-vitest-stable.mjs#L298-L300) is a
+> hard exit inside the per-invocation helper:
+>
+> ```js
+> if (result.status !== 0) {
+>   process.exit(result.status ?? 1);
+> }
+> ```
+>
+> [`runGeneralSuites`](scripts/run-vitest-stable.mjs#L304) loops the groups
+> calling it, so **the first failing group terminates the whole run** and groups
+> 2-4 never start.
+>
+> On this host `general-server` *always* fails — the environmental failures in
+> 7.5 #3 and #4 guarantee it. So `pnpm run test:run` can never reach
+> `@paperclipai/ui`, the CLI, or the ~140 serialized suites. **Five of the eight
+> change sets in §4 have their tests in `general-workspaces-a`**, which means the
+> default command has never once exercised most of the fork's own code.
+>
+> The tell is the log: one `[test:run]` banner line means one group ran. Four
+> banner lines means the suite actually completed.
+
 
 `scripts/run-vitest-stable.mjs` splits the work rather than running one flat
 vitest. Its modes:
@@ -325,13 +462,13 @@ vitest. Its modes:
 `general --group general-server` and `general --group general-workspaces-a`;
 shard durations come from `scripts/general-server-shard-durations.json` and
 `scripts/serialized-shard-durations.json`. Use sharding to re-run a slice
-quickly; use the plain command above for the result that gets recorded.
+quickly; use the four-process form above for the result that gets recorded.
 
 The suite is long-running and vitest buffers heavily when stdout is not a TTY —
 a log that has not grown for several minutes is normal, not a hang. Confirm with
 `ps aux | grep [v]itest`.
 
-### 6.2 Targeted suites — run these when §4 is in question
+### 7.2 Targeted suites — run these when §4 is in question
 
 ```bash
 # fork change set 1 — reverse proxy / forward auth
@@ -356,7 +493,7 @@ corepack pnpm exec vitest run ui/src/lib/new-agent-preset.test.ts ui/src/pages/N
 corepack pnpm exec vitest run ui/src/pages/InviteLanding.test.tsx
 ```
 
-### 6.3 Typecheck
+### 7.3 Typecheck
 
 ```bash
 corepack pnpm run typecheck
@@ -365,7 +502,7 @@ corepack pnpm run typecheck
 A rename upstream made that the fork did not follow shows up here rather than in
 the tests.
 
-### 6.4 Known-failure register
+### 7.4 Known-failure register
 
 **A failure is not automatically the fork's fault.** Classify every one before
 recording it:
@@ -383,5 +520,150 @@ is recognised as standing rather than re-investigated from scratch.
 
 ---
 
-## 7. Session log — append only
+### 7.5 Prerequisites and traps — read before believing a failure
+
+Four things have produced confusing failures that were **not** real defects.
+Check each before investigating a red suite.
+
+#### 1. Build the plugin SDK first, or 12 suites collect nothing
+
+```bash
+corepack pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+```
+
+`packages/plugins/sdk/dist/` does not exist after a fresh install. Without it,
+twelve server suites fail at *import* time with:
+
+```
+Error: Failed to resolve entry for package "@paperclipai/plugin-sdk".
+Error: Cannot find package '@paperclipai/plugin-sdk/testing'
+```
+
+They report **`(0 test)`**, not assertion failures — that is the signature.
+`test:run:general` and `test:run:serialized` run `ensure-build-deps` themselves;
+**plain `test:run` does not.** Affected: `plugin-worker-manager`,
+`plugin-worker-manager-duplex`, `plugin-database`, `plugin-install-autobuild`,
+`plugin-install-guard`, `plugin-loader-error-retry`, `plugin-lifecycle-restart`,
+`plugin-sdk-testing`, `plugin-environment-driver-ready-recovery`,
+`environment-test-harness`, `app-hmr-port`, `app-private-hostname-gate`,
+`app-vite-dev-routing`, `feedback-flush-controller`.
+
+#### 2. The deployment's own `PAPERCLIP_*` env leaks into the tests
+
+```bash
+env -u PAPERCLIP_CODEX_HOME corepack pnpm run test:run
+```
+
+**This is the most important line in this document.** The container exports
+`PAPERCLIP_CODEX_HOME=/sysops/llm/openrouter/default` for the running
+deployment. `server/src/__tests__/codex-local-execute.test.ts` builds a hermetic
+sandbox — it redirects `HOME`, `PAPERCLIP_HOME`, `CODEX_HOME`, and deletes
+`PAPERCLIP_INSTANCE_ID` and `PAPERCLIP_IN_WORKTREE` — but it **never touches
+`PAPERCLIP_CODEX_HOME`**, because that variable does not exist upstream. It is
+ours.
+
+So the fork's override does its job and redirects the "managed home" *out of the
+sandbox and onto the real vault*. What then happens to `/sysops/llm/openrouter/default`:
+
+| Artifact | Where it comes from |
+| --- | --- |
+| `auth.json` → a vitest temp dir | `ensureSymlink` from the test's throwaway `CODEX_HOME`; **dangles** once vitest cleans up |
+| `skills/paperclip` → the source checkout | the skill injection |
+| `config.toml` re-staged, mode `0644` → `0600` | `ensureCopiedFile` |
+| A `# BEGIN PAPERCLIP MANAGED MCP` block with a fake `pcgw_*` bearer | written by the MCP test, removed by a later test in the same file |
+
+The visible symptom is three `codex-local-execute` assertion failures reading
+`expected '/sysops/llm/openrouter/default' to be '/tmp/…'`. That message *is* the
+tell.
+
+**Production never does this**, because [`codex-home.ts:759`](packages/adapters/codex-local/src/server/codex-home.ts#L759)
+is `if (!(await pathExists(source))) continue;` and the real source home has no
+`auth.json` — the vault authenticates through `OPENROUTER_API_KEY` in its
+`config.toml`. Only a test that plants an `auth.json` triggers the symlink.
+
+**Forensic tell, if it happens again:** the vitest temp root is named by
+[`run-vitest-stable.mjs:278`](scripts/run-vitest-stable.mjs#L278) as
+`pcvt-<pid>-<invocation>-<rand>` (**p**aper**c**lip **v**i**t**est). A symlink
+pointing into a `pcvt-*` path was made by a test run, never by the image or the
+deployed server. A `skills/` entry pointing at `/Projects/paperclip/...` rather
+than `/install/paperclip-release/...` says the same thing.
+
+##### 2b. `PAPERCLIP_PUBLIC_URL` — two OAuth origin tests
+
+Same class, found the same session. `server/src/__tests__/tool-access-service.test.ts`
+stubs `PAPERCLIP_PUBLIC_URL` for most of its OAuth cases, but **two rely on it
+being absent** and stub only the Slack client id/secret:
+
+- `normalizes a direct numeric loopback origin for OAuth when no public URL is configured`
+- `does not derive an OAuth callback origin from a non-loopback request host`
+
+The container exports `PAPERCLIP_PUBLIC_URL=https://dev01.vps06.bringyouraito.life`,
+so the code takes the configured-public-URL branch: the first test gets that host
+instead of `http://localhost:3200/...`, and the second gets a `201` where it
+expects `422 oauth_redirect_origin_unsupported`. The test names are the tell —
+both say *"no public URL is configured"*.
+
+Verified: with the variable cleared, all 30 OAuth cases in that file pass.
+
+##### 2c. Treat this as a class, not two bugs
+
+The container exports ~24 `PAPERCLIP_*` variables for the live deployment and the
+suite assumes a clean environment. Two have bitten so far; `PAPERCLIP_DEPLOYMENT_MODE=authenticated`,
+`PAPERCLIP_PROXY_AUTH_ENABLED=true`, `PAPERCLIP_ALLOWED_HOSTNAMES` and
+`PAPERCLIP_CONFIG` are plausible next candidates.
+
+Upstream already knows the class exists — [`run-vitest-stable.mjs:287`](scripts/run-vitest-stable.mjs#L287)
+explicitly overrides `PAPERCLIP_HOME` and `TMPDIR` to sandbox paths before
+spawning vitest. It just does not clear the rest.
+
+**When a new failure's assertion mentions a host, URL, path, or mode that matches
+something in `env | grep PAPERCLIP_`, suspect this first.** Confirm by re-running
+that one file with the variable cleared before investigating anything else.
+
+> **Upstream candidate.** Adding `delete process.env.PAPERCLIP_CODEX_HOME` to
+> that suite's setup would make it honest, but it becomes another fork-carried
+> patch to re-apply. `env -u` costs nothing and is the current answer.
+
+#### 3. Upstream ships stale lockfiles — regenerate, do not fight it
+
+```
+ERR_PNPM_OUTDATED_LOCKFILE
+specifiers in the lockfile don't match specs in package.json
+```
+
+Upstream lands `package.json` dependency changes without regenerating
+`pnpm-lock.yaml`, usually from stacked PRs. It has happened repeatedly — #12318,
+#12461, #12464, #12484 are all lockfile repairs, and it recurred immediately
+after in #12339 (`agentmail`).
+
+**The answer (decided 2026-08-29):**
+
+```bash
+corepack pnpm install --no-frozen-lockfile
+```
+
+This is exactly what upstream's own `chore(lockfile): refresh pnpm-lock.yaml`
+commits do. It leaves a fork-carried delta in a **generated** file, which
+upstream's next refresh overwrites — low friction, and not a change set worth
+adding to §4. Do **not** hand-edit `package.json` to remove the dependency; that
+is a real fork-carried change with no upside.
+
+Afterwards, re-confirm the patches survived:
+
+```bash
+ls node_modules/.pnpm | grep -E 'embedded-postgres@|acpx@'
+```
+
+#### 4. Some failures are the machine, not the merge
+
+`workspace-runtime*` and `local-service-supervisor` bind real ports, spawn
+process trees and negotiate HTTPS exposure. `workspace-runtime.test.ts` alone has
+a 123 s baseline in `general-server-shard-durations.json`; under load it takes
+~220 s and sheds tests. `cursor-local-*` fails with exit **127** because
+`cursor-agent` is not installed in the image. None of these are fork-touched
+files. Re-run a suspect suite alone before classifying it.
+
+---
+
+## 8. Session log — append only
 
