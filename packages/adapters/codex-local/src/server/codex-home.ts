@@ -157,94 +157,6 @@ export async function codexHomeHasUsableAuth(home: string): Promise<boolean> {
   }
 }
 
-/**
- * The provider id Codex uses when `model_provider` is unset or points at the
- * built-in OpenAI provider. Only that provider authenticates through
- * `auth.json`/`OPENAI_API_KEY`; every other provider carries its own credential
- * wiring in its `[model_providers.<id>]` table.
- */
-const BUILTIN_OPENAI_PROVIDER_ID = "openai";
-
-function unquoteTomlKey(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.length >= 2 && (trimmed.startsWith('"') || trimmed.startsWith("'"))) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-
-/**
- * Minimal, dependency-free scan of a Codex `config.toml` for the selected
- * custom model provider. Returns the provider id when the file both selects a
- * root-level `model_provider` other than the built-in OpenAI one *and* defines
- * the matching `[model_providers.<id>]` table; otherwise null.
- *
- * This is deliberately a scanner rather than a parser: the only two facts we
- * need are a root-scope scalar and the set of table headers, and TOML requires
- * root keys to precede the first table header, so a line walk is sufficient and
- * cannot be confused by nested tables. A half-configured file (selector without
- * a table, or a table without a selector) is treated as "no custom provider",
- * which keeps the credential gate on the strict OpenAI path — the conservative
- * direction, since Codex itself rejects that config at runtime.
- */
-export async function readCodexHomeCustomModelProvider(home: string): Promise<string | null> {
-  const raw = await fs.readFile(path.join(home, "config.toml"), "utf8").catch(() => null);
-  if (raw === null) return null;
-
-  let selected: string | null = null;
-  let sawTableHeader = false;
-  const providerTables = new Set<string>();
-
-  for (const line of raw.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
-
-    const header = /^\[\[?([^\]]+)\]\]?/.exec(trimmed);
-    if (header) {
-      sawTableHeader = true;
-      // Split on dots outside quotes so `[model_providers."a.b"]` stays one key.
-      const parts = (header[1] ?? "").match(/"[^"]*"|'[^']*'|[^.]+/g) ?? [];
-      if (parts.length >= 2 && unquoteTomlKey(parts[0] ?? "") === "model_providers") {
-        providerTables.add(unquoteTomlKey(parts[1] ?? ""));
-      }
-      continue;
-    }
-
-    if (sawTableHeader) continue;
-    const rootKey = /^model_provider\s*=\s*(?:"([^"]*)"|'([^']*)')/.exec(trimmed);
-    if (rootKey) selected = (rootKey[1] ?? rootKey[2] ?? "").trim();
-  }
-
-  if (!selected || selected === BUILTIN_OPENAI_PROVIDER_ID) return null;
-  return providerTables.has(selected) ? selected : null;
-}
-
-/**
- * Same question as {@link readCodexHomeCustomModelProvider}, asked of the
- * `PAPERCLIP_CODEX_PROVIDERS` JSON the adapter merges into `config.toml` at
- * execute time. The gate runs *before* that merge, so without this a run whose
- * provider is supplied entirely through the env var would be blocked for
- * missing OpenAI credentials it is never going to use.
- */
-export function readConfiguredCustomModelProvider(providersJson: string | null | undefined): string | null {
-  const raw = nonEmpty(providersJson ?? undefined);
-  if (!raw) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  const record = parsed as Record<string, unknown>;
-  const selected = nonEmpty(typeof record.model_provider === "string" ? record.model_provider : undefined);
-  if (!selected || selected === BUILTIN_OPENAI_PROVIDER_ID) return null;
-  const providers = record.providers;
-  if (providers === null || typeof providers !== "object" || Array.isArray(providers)) return null;
-  const entry = (providers as Record<string, unknown>)[selected];
-  return entry !== null && typeof entry === "object" && !Array.isArray(entry) ? selected : null;
-}
-
 async function codexHomeHasMatchingApiKeyAuth(home: string, apiKey: string): Promise<boolean> {
   const authPath = path.join(home, "auth.json");
   const existing = await fs.lstat(authPath).catch(() => null);
@@ -875,36 +787,15 @@ export async function reconcileManagedCodexHome(
   return { status, home: resolved };
 }
 
-/**
- * `api` and `subscription` are the two OpenAI-credential shapes Paperclip owns
- * (`auth.json` / `OPENAI_API_KEY`). `provider` means the effective home routes
- * to a non-OpenAI `model_provider`, which carries its own credential wiring
- * (`env_key`, or an `[model_providers.<id>.auth]` command) — Paperclip has no
- * credential to provision and must not gate the run on one.
- */
-export type CodexCredentialAuthMode = "api" | "subscription" | "provider";
+export type CodexCredentialAuthMode = "api" | "subscription";
 
 export interface CodexCredentialReadinessInput {
   env?: NodeJS.ProcessEnv;
   companyId: string | undefined;
   /** `config.env.CODEX_HOME` for the run, if any. */
   configuredCodexHome: string | null | undefined;
-  /**
-   * `config.env.PAPERCLIP_CODEX_HOME` for the run, if any. Relocates the
-   * Paperclip-managed home without making it self-managed, so readiness must
-   * inspect the overridden path rather than the default managed one. Ignored
-   * when `configuredCodexHome` is set, matching the execute-time precedence.
-   */
-  managedCodexHomeOverride?: string | null | undefined;
   /** Resolved `config.env.OPENAI_API_KEY` value (after secret resolution). */
   configuredApiKey: string | null | undefined;
-  /**
-   * Raw `config.env.PAPERCLIP_CODEX_PROVIDERS` for the run, if any. A custom
-   * `model_provider` selected here is merged into the effective home's
-   * `config.toml` at execute time — after this gate runs — so readiness has to
-   * read it from the env value rather than from disk.
-   */
-  configuredProviders?: string | null | undefined;
 }
 
 export interface CodexCredentialReadiness {
@@ -916,13 +807,6 @@ export interface CodexCredentialReadiness {
   effectiveHome: string;
   /** The shared source home subscription auth is symlinked from (managed homes only). */
   sharedSourceHome: string;
-  /**
-   * The non-OpenAI `model_provider` the run will use, when readiness was
-   * satisfied by provider-owned auth (`authMode: "provider"`). Null otherwise.
-   * Present so callers can name the provider in logs and Test-panel output
-   * instead of reporting a credential state that does not apply.
-   */
-  modelProvider?: string | null;
 }
 
 /**
@@ -952,12 +836,7 @@ export async function evaluateCodexCredentialReadiness(
   const configuredHomeIsManaged =
     configuredCodexHome != null && isManagedCodexHomePath(env, input.companyId, configuredCodexHome);
   const effectiveHomeIsManaged = configuredCodexHome == null || configuredHomeIsManaged;
-  const managedOverrideRaw = nonEmpty(input.managedCodexHomeOverride ?? undefined);
-  const managedCodexHomeOverride = managedOverrideRaw ? path.resolve(managedOverrideRaw) : null;
-  const effectiveHome =
-    configuredCodexHome ??
-    managedCodexHomeOverride ??
-    resolveManagedCodexHomeDir(env, input.companyId);
+  const effectiveHome = configuredCodexHome ?? resolveManagedCodexHomeDir(env, input.companyId);
 
   if (!effectiveHomeIsManaged) {
     // Genuine external override: Paperclip never seeds or inspects it.
@@ -967,38 +846,15 @@ export async function evaluateCodexCredentialReadiness(
       ready: true,
       effectiveHome,
       sharedSourceHome,
-      modelProvider: null,
     };
   }
 
   if (configuredApiKey) {
-    return { managed: true, authMode: "api", ready: true, effectiveHome, sharedSourceHome, modelProvider: null };
-  }
-
-  // A managed home routed at a non-OpenAI provider (OpenRouter, a gateway, any
-  // OpenAI-compatible endpoint) authenticates through that provider's own
-  // config — `env_key`, or an `[model_providers.<id>.auth]` command reading a
-  // key from the run environment. There is no `auth.json` to seed and
-  // `OPENAI_API_KEY` is irrelevant, so requiring either one blocks a
-  // fully-credentialed run before it ever launches. Defer to the provider: if
-  // its key really is missing, Codex fails at its first request with the
-  // provider's own error, which names the actual problem.
-  const customProvider =
-    readConfiguredCustomModelProvider(input.configuredProviders) ??
-    (await readCodexHomeCustomModelProvider(effectiveHome));
-  if (customProvider) {
-    return {
-      managed: true,
-      authMode: "provider",
-      ready: true,
-      effectiveHome,
-      sharedSourceHome,
-      modelProvider: customProvider,
-    };
+    return { managed: true, authMode: "api", ready: true, effectiveHome, sharedSourceHome };
   }
 
   const ready =
     (await codexHomeHasUsableAuth(effectiveHome)) ||
     (await codexHomeHasUsableAuth(sharedSourceHome));
-  return { managed: true, authMode: "subscription", ready, effectiveHome, sharedSourceHome, modelProvider: null };
+  return { managed: true, authMode: "subscription", ready, effectiveHome, sharedSourceHome };
 }

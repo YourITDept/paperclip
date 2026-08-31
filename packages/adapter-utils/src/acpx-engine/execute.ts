@@ -88,7 +88,6 @@ import {
   type AcpRuntimeUsageBreakdown,
   type AcpRuntimeUsageCost,
 } from "acpx/runtime";
-import { resolveManagedCodexHomeOverride } from "../server-utils.js";
 import {
   ACPX_HANDSHAKE_TIMEOUT_MS,
   ACPX_HANDSHAKE_TRANSPORT_POLL_MS,
@@ -548,16 +547,6 @@ const ACPX_INHERITED_PROVIDER_ENV_KEYS: Readonly<Record<string, ReadonlySet<stri
   codex: new Set([
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
-    // Fork-carried: a Codex home may point at an OpenRouter credential vault
-    // (PAPERCLIP_CODEX_HOME / CODEX_HOME -> /sysops/llm/openrouter/<name>),
-    // whose config.toml authenticates with
-    //   [model_providers.openrouter.auth]
-    //   command = "sh"; args = ["-c", 'printf %s "$OPENROUTER_API_KEY"']
-    // That command runs inside the spawned child, so without this key the
-    // token resolves empty and OpenRouter answers 401. Upstream lists the
-    // same key under `pi` but not `codex`, because upstream's Codex lane
-    // never targets a custom model_provider. Ours does.
-    "OPENROUTER_API_KEY",
   ]),
   claude: new Set([
     "ANTHROPIC_API_KEY",
@@ -1220,16 +1209,11 @@ async function prepareCodexSkillRuntime(input: {
     typeof envConfig.CODEX_HOME === "string" && envConfig.CODEX_HOME.trim().length > 0
       ? path.resolve(envConfig.CODEX_HOME.trim())
       : null;
-  // PAPERCLIP_CODEX_HOME relocates the Paperclip-MANAGED home without opting out
-  // of management (CODEX_HOME above is the self-managed escape hatch). Mirrors
-  // the Codex CLI lane in adapters/codex-local/src/server/execute.ts so both
-  // engines resolve the same home from the same adapter-config env.
-  const managedCodexHomeOverride = resolveManagedCodexHomeOverride(envConfig, process.env);
   const sourceCodexHome =
     typeof process.env.CODEX_HOME === "string" && process.env.CODEX_HOME.trim().length > 0
       ? path.resolve(process.env.CODEX_HOME.trim())
       : path.join(os.homedir(), ".codex");
-  const managedCodexHome = managedCodexHomeOverride ?? resolveManagedCodexHomeDir(input.companyId);
+  const managedCodexHome = resolveManagedCodexHomeDir(input.companyId);
   const effectiveCodexHome = configuredCodexHome ??
     await prepareManagedCodexHome({
       companyId: input.companyId,
@@ -1281,19 +1265,6 @@ async function prepareCodexSkillRuntime(input: {
   await writeManagedCodexSkillsManifest(skillsHome, selectedSkills.map((entry) => entry.runtimeName));
 
   input.env.CODEX_HOME = effectiveCodexHome;
-  // Provenance, not just the path: an explicit CODEX_HOME silently outranks
-  // PAPERCLIP_CODEX_HOME, so a run using the "wrong" home is otherwise
-  // indistinguishable from one using the right one.
-  await input.onLog(
-    "stdout",
-    `[paperclip] ACPX Codex home "${effectiveCodexHome}" (from ${
-      configuredCodexHome
-        ? `CODEX_HOME${managedCodexHomeOverride ? "; PAPERCLIP_CODEX_HOME is set but outranked" : ""}`
-        : managedCodexHomeOverride
-        ? "PAPERCLIP_CODEX_HOME"
-        : "the default managed path"
-    }).\n`,
-  );
 
   return {
     identity: {

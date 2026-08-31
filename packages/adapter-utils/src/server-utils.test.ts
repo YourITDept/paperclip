@@ -11,7 +11,6 @@ import {
   buildPersistentSkillSnapshot,
   buildRuntimeMountedSkillSnapshot,
   buildInvocationEnvForLogs,
-  resolveManagedCodexHomeOverride,
   buildPaperclipEnv,
   buildRuntimeToolsEnv,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
@@ -3188,56 +3187,5 @@ describe("buildPaperclipEnv", () => {
         expect(env.PAPERCLIP_API_URL).toBe("http://localhost:3200");
       },
     );
-  });
-});
-
-describe("resolveManagedCodexHomeOverride", () => {
-  it("prefers the adapter-config value", () => {
-    expect(
-      resolveManagedCodexHomeOverride(
-        { PAPERCLIP_CODEX_HOME: "/from/config" },
-        { PAPERCLIP_CODEX_HOME: "/from/host" },
-      ),
-    ).toBe("/from/config");
-  });
-
-  // The whole point of the fallback: set it once where the engine starts and
-  // every codex_local agent picks it up, with no per-Environment binding.
-  it("falls back to the server process env", () => {
-    expect(resolveManagedCodexHomeOverride({}, { PAPERCLIP_CODEX_HOME: "/from/host" })).toBe(
-      "/from/host",
-    );
-    expect(resolveManagedCodexHomeOverride(undefined, { PAPERCLIP_CODEX_HOME: "/from/host" })).toBe(
-      "/from/host",
-    );
-  });
-
-  it("treats a blank config value as unset and falls through to the host", () => {
-    expect(
-      resolveManagedCodexHomeOverride(
-        { PAPERCLIP_CODEX_HOME: "   " },
-        { PAPERCLIP_CODEX_HOME: "/from/host" },
-      ),
-    ).toBe("/from/host");
-  });
-
-  it("returns null when neither layer sets it", () => {
-    expect(resolveManagedCodexHomeOverride({}, {})).toBeNull();
-    expect(resolveManagedCodexHomeOverride({ PAPERCLIP_CODEX_HOME: "  " }, { PAPERCLIP_CODEX_HOME: "" })).toBeNull();
-  });
-
-  it("resolves relative values to absolute paths", () => {
-    expect(resolveManagedCodexHomeOverride({ PAPERCLIP_CODEX_HOME: "rel/home" }, {})).toBe(
-      path.resolve("rel/home"),
-    );
-  });
-
-  it("ignores non-string config values", () => {
-    expect(
-      resolveManagedCodexHomeOverride(
-        { PAPERCLIP_CODEX_HOME: 42 } as unknown as Record<string, unknown>,
-        { PAPERCLIP_CODEX_HOME: "/from/host" },
-      ),
-    ).toBe("/from/host");
   });
 });

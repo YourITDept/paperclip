@@ -3624,39 +3624,3 @@ export async function runChildProcess(
       .catch(reject);
   });
 }
-
-/**
- * Resolves the Paperclip-managed Codex home override (`PAPERCLIP_CODEX_HOME`).
- *
- * Unlike `CODEX_HOME` — the self-managed escape hatch Paperclip never touches —
- * this relocates the home Paperclip still owns and seeds. It is read from two
- * places, in order:
- *
- *   1. the run's adapter-config env (per-agent / per-project / per-environment)
- *   2. the server's own process env
- *
- * The process-env fallback is what makes this settable **once, where the engine
- * starts**, as an instance-wide default for every `codex_local` agent — which is
- * the deployment shape the override exists for. Without it the variable has to be
- * bound on every Paperclip Environment by hand, and exporting it in the shell that
- * launches the server looks like it should work while doing nothing at all.
- * `PAPERCLIP_CODEX_PROVIDERS` already falls back the same way (see the codex-local
- * adapter's `runtime-config.ts`), so this keeps the two Codex knobs consistent.
- *
- * An explicit `CODEX_HOME` still outranks whatever this returns; that precedence
- * lives at the call sites, which is also where a blank value falls through to the
- * derived managed path.
- */
-export function resolveManagedCodexHomeOverride(
-  envConfig: Record<string, unknown> | NodeJS.ProcessEnv | undefined,
-  processEnv: NodeJS.ProcessEnv = process.env,
-): string | null {
-  const fromConfig = envConfig?.PAPERCLIP_CODEX_HOME;
-  const configured =
-    typeof fromConfig === "string" && fromConfig.trim().length > 0 ? fromConfig.trim() : null;
-  if (configured) return path.resolve(configured);
-  const fromProcess = processEnv.PAPERCLIP_CODEX_HOME;
-  const hostValue =
-    typeof fromProcess === "string" && fromProcess.trim().length > 0 ? fromProcess.trim() : null;
-  return hostValue ? path.resolve(hostValue) : null;
-}

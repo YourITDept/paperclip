@@ -7,7 +7,6 @@ import {
   asString,
   parseObject,
   ensurePathInEnv,
-  resolveManagedCodexHomeOverride,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   ensureAdapterExecutionTargetCommandResolvable,
@@ -23,13 +22,9 @@ import path from "node:path";
 import os from "node:os";
 import { parseCodexJsonl } from "./parse.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
-import { readCodexAuthInfo } from "./quota.js";
+import { codexHomeDir, readCodexAuthInfo } from "./quota.js";
 import { buildCodexExecArgs } from "./codex-args.js";
-import {
-  prepareManagedCodexHome,
-  readCodexHomeCustomModelProvider,
-  resolveManagedCodexHomeDir,
-} from "./codex-home.js";
+import { prepareManagedCodexHome } from "./codex-home.js";
 import { resolveCodexExecutionEngineForRun, testCodexAcpEnvironment } from "./acp.js";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "./auth-check.js";
 
@@ -302,37 +297,14 @@ export async function testEnvironment(
   } else if (!targetIsRemote) {
     // Local-only auth file check. On remote targets, the probe will surface
     // any missing-auth errors directly from the remote `codex` invocation.
-    //
-    // The home inspected here must be the one the RUN will use, or this row
-    // reports on a home the run never touches: with only PAPERCLIP_CODEX_HOME
-    // set, reading `env.CODEX_HOME` alone falls back to the host `~/.codex` and
-    // the answer is unrelated to the configured override. Mirrors the
-    // execute-time precedence in execute.ts (CODEX_HOME > PAPERCLIP_CODEX_HOME >
-    // derived managed home).
-    const codexHome = isNonEmpty(env.CODEX_HOME)
-      ? env.CODEX_HOME
-      : resolveManagedCodexHomeOverride(env, process.env) ??
-        resolveManagedCodexHomeDir(process.env, ctx.companyId);
-    // A home routed at a non-OpenAI provider authenticates through that
-    // provider's own config, not auth.json — checking for OpenAI credentials
-    // there would warn about a credential the run never reads.
-    const customProvider = await readCodexHomeCustomModelProvider(codexHome).catch(() => null);
-    const codexAuth = customProvider ? null : await readCodexAuthInfo(codexHome).catch(() => null);
-    if (customProvider) {
-      checks.push({
-        code: "codex_model_provider_auth",
-        level: "info",
-        message: `Codex will authenticate through the "${customProvider}" model provider.`,
-        detail:
-          `Configured in ${path.join(codexHome, "config.toml")}. The provider supplies its own ` +
-          `credential (env_key or auth command), so no auth.json or OPENAI_API_KEY is required.`,
-      });
-    } else if (codexAuth) {
+    const codexHome = isNonEmpty(env.CODEX_HOME) ? env.CODEX_HOME : undefined;
+    const codexAuth = await readCodexAuthInfo(codexHome).catch(() => null);
+    if (codexAuth) {
       checks.push({
         code: "codex_native_auth_present",
         level: "info",
         message: "Codex is authenticated via its own auth configuration.",
-        detail: codexAuth.email ? `Logged in as ${codexAuth.email}.` : `Credentials found in ${path.join(codexHome, "auth.json")}.`,
+        detail: codexAuth.email ? `Logged in as ${codexAuth.email}.` : `Credentials found in ${path.join(codexHome ?? codexHomeDir(), "auth.json")}.`,
       });
     } else {
       checks.push({

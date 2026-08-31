@@ -60,6 +60,38 @@
 #                          browser can open (e.g. https://dev07.example.com).
 #                          Default PAPERCLIP_PUBLIC_URL.
 #   --agent-name <name>    agent to create (default "Codex Worker")
+#   --model <id>           Codex model id for the agent, e.g.
+#                          openai/gpt-5.6-luna. Becomes adapterConfig.model,
+#                          which the adapter passes as `codex --model <id>`.
+#                          It selects the model WITHIN the provider the Codex
+#                          home's config.toml already chose, so it works
+#                          alongside a user-managed CODEX_HOME. Omit to let the
+#                          vault's own `model = ...` stand.
+#   --codex-home <path>    CODEX_HOME for this agent, overriding the host's
+#                          PAPERCLIP_CODEX_HOME. Point one agent at a second
+#                          OpenRouter vault to test it side by side.
+#                          NOTE: an explicit CODEX_HOME is a hand-off - Codex
+#                          treats that home as user-managed, so Paperclip will
+#                          not seed auth into it, merge PAPERCLIP_CODEX_PROVIDERS
+#                          into it, or rewrite its config.toml. The vault must
+#                          therefore carry its own working config.toml, and
+#                          agents sharing a path share its session and lock state.
+#   --openrouter-api-key <key>   the OpenRouter key to store as the managed
+#                          secret. Creates it on first run; ROTATES it if the
+#                          secret already exists, because passing a key by hand
+#                          is an instruction, not a default. SECURITY: a flag
+#                          value is visible in `ps` to every process on the host
+#                          for the life of the run — prefer the -file form.
+#   --openrouter-api-key-file <path>  same, read from a file. Nothing else on
+#                          the box can see it. A trailing newline is stripped.
+#                          Wins over --openrouter-api-key.
+#                          With neither, $OPENROUTER_API_KEY is used as before,
+#                          and an existing secret is reused rather than rotated.
+#   --can-create-agents    let this agent hire other agents
+#                          (permissions.canCreateAgents, server default FALSE).
+#                          Distinct from the human `admin` invite's agents:create
+#                          grant: that is a person's permission, this is the
+#                          agent's own.
 #   --task-title <text>    create a task and assign it to that agent
 #   --task-prompt <text>   the task body — the agent's prompt. Required with
 #                          --task-title.
@@ -68,6 +100,11 @@
 #                          Valid: owner | admin | operator | viewer.
 #   --only <phases>        comma list: company,secrets,agent,invite,task
 #   --mint-key             print a board API key and exit
+#   --pnpm                 run the CLI from this checkout (pnpm paperclipai,
+#                          via tsx over cli/src) instead of the installed
+#                          release, so a version you are editing in the IDE is
+#                          what these scripts drive. Outranks PAPERCLIP_CLI and
+#                          is passed through to onboard-paperclip-1.sh.
 #   --dry-run      print what a run would do, change nothing. Tolerates a
 #                  stopped engine so a plan can still be previewed.
 #   --verify       report whether ownership, the company, the secret and the
@@ -114,6 +151,9 @@
 #   ONBOARD_COMPANY_NAME   default "YourITDept"
 #   ONBOARD_OWNER_EMAIL    instance owner; invited as `owner` when set
 #   ONBOARD_AGENT_NAME     default "Codex Worker"
+#   ONBOARD_MODEL          Codex model id (see --model)
+#   ONBOARD_CODEX_HOME     CODEX_HOME override (see --codex-home)
+#   ONBOARD_CAN_CREATE_AGENTS  "true" to set permissions.canCreateAgents
 #   ONBOARD_ADAPTER_TYPE   default "codex_local"
 #   ONBOARD_SECRET_NAME    default "OpenRouter"
 #   ONBOARD_SECRET_KEY     default "openrouter_api_key"
@@ -149,6 +189,12 @@ VERIFY_FAILED=false
 ARG_AGENT_NAME=""
 ARG_TASK_TITLE=""
 ARG_TASK_PROMPT=""
+ARG_MODEL=""
+ARG_CODEX_HOME=""
+CAN_CREATE_AGENTS=false
+USE_PNPM="${ONBOARD_USE_PNPM:-false}"
+ARG_OR_KEY=""
+ARG_OR_KEY_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run)      DRY_RUN=true; shift ;;
@@ -163,6 +209,14 @@ while [ $# -gt 0 ]; do
     --agent-name)   ARG_AGENT_NAME="${2:?--agent-name needs a value}"; shift 2 ;;
     --task-title)   ARG_TASK_TITLE="${2:?--task-title needs a value}"; shift 2 ;;
     --task-prompt)  ARG_TASK_PROMPT="${2:?--task-prompt needs a value}"; shift 2 ;;
+    --model)        ARG_MODEL="${2:?--model needs a value}"; shift 2 ;;
+    --codex-home)   ARG_CODEX_HOME="${2:?--codex-home needs a value}"; shift 2 ;;
+    --can-create-agents) CAN_CREATE_AGENTS=true; shift ;;
+    --pnpm)         USE_PNPM=true; shift ;;
+    # Prefer --openrouter-api-key-file: a flag value is visible in `ps` to
+    # every process on this box for as long as the script runs.
+    --openrouter-api-key)      ARG_OR_KEY="${2:?--openrouter-api-key needs a value}"; shift 2 ;;
+    --openrouter-api-key-file) ARG_OR_KEY_FILE="${2:?--openrouter-api-key-file needs a path}"; shift 2 ;;
     # Accepts a key on the command line for convenience. Prefer the environment:
     # an argument is visible in `ps` to every process on the box.
     --api-key)      ARG_API_KEY="${2:?--api-key needs a value}"; shift 2 ;;
@@ -223,12 +277,42 @@ want() { [ -z "$ONLY" ] || [[ ",$ONLY," == *",$1,"* ]]; }
 # ------------------------------------------------------------------- cli ----
 # Same resolution order as onboard-paperclip.sh, so both scripts agree on which
 # binary they are driving.
-if [ -n "${PAPERCLIP_CLI:-}" ]; then
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# The workspace checkout, found by walking up for pnpm-workspace.yaml.
+find_repo_root() {
+  local d="${PAPERCLIP_REPO_ROOT:-$SCRIPT_DIR}"
+  while [ "$d" != "/" ]; do
+    [ -f "$d/pnpm-workspace.yaml" ] && { printf '%s' "$d"; return 0; }
+    d="$(dirname "$d")"
+  done
+  return 1
+}
+
+# --pnpm drives the CLI from the working tree instead of the installed release.
+#
+# --silent is load-bearing: pnpm writes its "> paperclip@ paperclipai ..."
+# banner to STDOUT, and nearly every call in this script is
+# `... --json | jq -r '.id'`. Without it the first capture returns pnpm chatter
+# and the run dies on "company create returned no id" - a message pointing at
+# the API when the real fault is the runner.
+#
+# It outranks PAPERCLIP_CLI on purpose: the container exports that pointing at
+# the release binary, so checking it first would make --pnpm a no-op here.
+if [ "$USE_PNPM" = true ]; then
+  command -v pnpm > /dev/null 2>&1 || die "--pnpm needs pnpm on PATH"
+  REPO_ROOT="$(find_repo_root)" \
+    || die "--pnpm: no pnpm-workspace.yaml above $SCRIPT_DIR.
+         Set PAPERCLIP_REPO_ROOT to the checkout root."
+  PC=(pnpm --silent --dir "$REPO_ROOT" paperclipai)
+elif [ -n "${PAPERCLIP_CLI:-}" ]; then
   read -r -a PC <<< "$PAPERCLIP_CLI"
 elif command -v paperclipai > /dev/null 2>&1; then
   PC=(paperclipai)
+elif command -v pnpm > /dev/null 2>&1 && REPO_ROOT="$(find_repo_root)"; then
+  PC=(pnpm --silent --dir "$REPO_ROOT" paperclipai)
 else
-  die "no Paperclip CLI found — set PAPERCLIP_CLI or put paperclipai on PATH"
+  die "no Paperclip CLI found — set PAPERCLIP_CLI, put paperclipai on PATH, or use --pnpm"
 fi
 command -v jq > /dev/null 2>&1 || die "jq is required"
 
@@ -390,7 +474,29 @@ ADAPTER_TYPE="${ONBOARD_ADAPTER_TYPE:-codex_local}"
 SECRET_NAME="${ONBOARD_SECRET_NAME:-OpenRouter}"
 SECRET_KEY="${ONBOARD_SECRET_KEY:-openrouter_api_key}"
 INVITE_ROLES="${ARG_INVITE_ROLES:-${ONBOARD_INVITE_ROLES:-owner,admin,operator}}"
-CODEX_HOME_VALUE="${PAPERCLIP_CODEX_HOME:-}"
+# --codex-home overrides the host's PAPERCLIP_CODEX_HOME for THIS agent only,
+# which is what makes a second vault testable without touching the container
+# environment: point one agent at a different OpenRouter home and compare.
+#
+# The value is bound as CODEX_HOME, and that is a deliberate hand-off - Codex
+# treats an explicit CODEX_HOME as a user-managed home, so Paperclip does not
+# seed auth into it, merge PAPERCLIP_CODEX_PROVIDERS, or rewrite its
+# config.toml. The vault's own config.toml is therefore authoritative for the
+# provider, and --model layers on top of it as a CLI flag.
+CODEX_HOME_VALUE="${ARG_CODEX_HOME:-${ONBOARD_CODEX_HOME:-${PAPERCLIP_CODEX_HOME:-}}}"
+
+# Codex model id, e.g. openai/gpt-5.6-luna. Passed as adapterConfig.model, which
+# the adapter turns into `codex --model <id>` (codex-args.ts). That flag picks
+# the model WITHIN the provider the home's config.toml already selects, so it
+# works with a user-managed CODEX_HOME even though the config.toml does not.
+# Empty means "say nothing", and the vault's own `model = ...` applies.
+MODEL="${ARG_MODEL:-${ONBOARD_MODEL:-}}"
+
+# permissions.canCreateAgents defaults to FALSE server-side (agent.ts), so an
+# agent cannot hire other agents unless this is set. Distinct from the human
+# `admin` invite's agents:create grant - that is a person's permission, this is
+# the agent's own.
+[ "${ONBOARD_CAN_CREATE_AGENTS:-}" = "true" ] && CAN_CREATE_AGENTS=true
 BASE_URL="${PUBLIC_URL:-${PAPERCLIP_API_URL%/api}}"
 INVITE_OUT="${ONBOARD_INVITE_OUT:-./paperclip-invites-$(printf '%s' "$COMPANY_NAME" | tr -c '[:alnum:]' '-' | sed 's/-\{2,\}/-/g; s/^-//; s/-$//')-$(date -u +%Y%m%dT%H%M%SZ).txt}"
 
@@ -432,7 +538,12 @@ elif [ -n "$OWNER_EMAIL" ]; then
       info "would lock instance ownership to $OWNER_EMAIL and revoke bootstrap invites"
     else
       info "locking instance ownership to $OWNER_EMAIL ..."
-      "$OWNER_TOOL" --set-owner --owner-email "$OWNER_EMAIL" \
+      # Hand --pnpm on, so both halves drive the same CLI. Ownership itself is
+      # psql and curl, but a split runner is the kind of thing that is invisible
+      # until the two disagree about which build is installed.
+      OWNER_ARGS=(--set-owner --owner-email "$OWNER_EMAIL")
+      [ "$USE_PNPM" = true ] && OWNER_ARGS+=(--pnpm)
+      "$OWNER_TOOL" "${OWNER_ARGS[@]}" \
         | sed 's/^/  /' || die "could not set the instance owner — see above"
     fi
   elif [ "$BOOTSTRAP" = "bootstrap_pending" ]; then
@@ -465,10 +576,57 @@ if [ -z "$PUBLIC_URL" ]; then
   info "      normal browser. Pass --public-url https://<fqdn> to fix it."
 fi
 
+# --------------------------------------------------- the OpenRouter key -----
+# Three ways in, and the difference between them is who else can read the key.
+#
+#   --openrouter-api-key-file  a file. Nothing else on the box can see it, and
+#                              it is what to use from a script or a vault.
+#   --openrouter-api-key       the value on the command line. Convenient, and
+#                              visible in `ps` to every process on this host for
+#                              as long as this script runs. Warned about below.
+#   $OPENROUTER_API_KEY        the ambient environment, as before.
+#
+# Whichever way it arrives, it is re-exported and handed to the CLI as
+# --value-env. The value therefore never appears in `paperclipai`'s own argv,
+# which is the process that would otherwise sit in `ps` for the length of an
+# HTTP round trip.
+#
+# KEY_SOURCE drives one behaviour further down: an EXPLICIT key (flag or file)
+# rotates an existing secret, an ambient one does not. Re-running onboarding
+# with the environment already set must stay a no-op; passing a key by hand is
+# an instruction, and silently ignoring it because the secret already existed is
+# the kind of no-op that gets discovered days later, after a rotation "did not
+# take".
+KEY_SOURCE="none"
+if [ -n "$ARG_OR_KEY_FILE" ]; then
+  [ -f "$ARG_OR_KEY_FILE" ] || die "--openrouter-api-key-file: no such file: $ARG_OR_KEY_FILE"
+  # Strip a trailing newline, which every editor adds and which would otherwise
+  # be sent as part of the credential and rejected by the provider.
+  OPENROUTER_API_KEY="$(tr -d '\r\n' < "$ARG_OR_KEY_FILE")"
+  [ -n "$OPENROUTER_API_KEY" ] || die "--openrouter-api-key-file: $ARG_OR_KEY_FILE is empty"
+  KEY_SOURCE="file"
+elif [ -n "$ARG_OR_KEY" ]; then
+  OPENROUTER_API_KEY="$ARG_OR_KEY"
+  KEY_SOURCE="flag"
+elif [ -n "${OPENROUTER_API_KEY:-}" ]; then
+  KEY_SOURCE="env"
+fi
+export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}"
+
+if [ "$KEY_SOURCE" = "flag" ] && [ "$DRY_RUN" = false ]; then
+  info "WARNING: --openrouter-api-key puts the key in this script's argv, where"
+  info "         any process on this host can read it from \`ps\` until the run"
+  info "         ends. --openrouter-api-key-file avoids that."
+fi
+
 if [ "$VERIFY_ONLY" = false ] && [ -z "${OPENROUTER_API_KEY:-}" ] && want secrets; then
-  die "OPENROUTER_API_KEY is not set. Refusing to create an empty secret —
-         an empty credential fails at first agent run, not here, which is the
-         expensive place to find out. Export it, or --only company,agent."
+  die "no OpenRouter key supplied. Refusing to create an empty secret — an empty
+         credential fails at first agent run, not here, which is the expensive
+         place to find out. Supply one of:
+           export OPENROUTER_API_KEY=sk-or-...
+           --openrouter-api-key-file /path/to/key
+           --openrouter-api-key sk-or-...        (visible in ps)
+         or skip the secret with --only company,agent."
 fi
 
 # ----------------------------------------------------------------- company --
@@ -517,12 +675,33 @@ if want secrets; then
     | jq -r --arg k "$SECRET_KEY" 'if type=="array" then . else (.items // .invites // .companies // .agents // .secrets // []) end
         | map(select(.key == $k)) | .[0].id // empty' || true)"
   if [ -n "$SECRET_ID" ]; then
-    info "exists: $SECRET_ID  (rotate with: paperclipai secrets rotate)"
+    # An explicitly-supplied key means "use this one". The secret already
+    # existing must not turn that into a no-op, so rotate it in place: every
+    # agent bound to it picks the new value up on its next run, and no agent is
+    # edited. An ambient $OPENROUTER_API_KEY is left alone - a re-run of
+    # onboarding on a configured host should not rotate anything.
+    case "$KEY_SOURCE" in
+      flag|file)
+        if [ "$DRY_RUN" = true ]; then
+          info "exists: $SECRET_ID — would rotate it to the key from --openrouter-api-key${KEY_SOURCE:+-$KEY_SOURCE}"
+        elif [ "$VERIFY_ONLY" = true ]; then
+          info "exists: $SECRET_ID  (--verify changes nothing, so it was not rotated)"
+        else
+          "${PC[@]}" secrets rotate "$SECRET_ID" --value-env OPENROUTER_API_KEY > /dev/null \
+            || die "could not rotate secret $SECRET_ID — the old value is still in place"
+          info "exists: $SECRET_ID — rotated to the supplied key"
+          info "        every agent bound to it uses the new value on its next run"
+        fi
+        ;;
+      *)
+        info "exists: $SECRET_ID  (rotate with: paperclipai secrets rotate)"
+        ;;
+    esac
   elif [ "$VERIFY_ONLY" = true ]; then
     info "MISSING: no secret with key '$SECRET_KEY'"
     VERIFY_FAILED=true
   elif [ "$DRY_RUN" = true ]; then
-    info "would create secret '$SECRET_NAME' from \$OPENROUTER_API_KEY"; SECRET_ID="<new>"
+    info "would create secret '$SECRET_NAME' from the key supplied via $KEY_SOURCE"; SECRET_ID="<new>"
   else
     # --value-env, never --value: the value must not appear in argv, where any
     # process on the box could read it out of `ps`.
@@ -541,6 +720,25 @@ fi
 AGENT_ID=""
 if want agent; then
   step 3/6 "Agent '$AGENT_NAME'"
+  # Adding an agent to an existing company is the main reason to run with
+  # --only, and `--only agent` skipped the secret phase above and so left
+  # SECRET_ID empty - which silently produced an agent with CODEX_HOME bound
+  # but NO OPENROUTER_API_KEY. That agent looks perfectly configured and 401s
+  # on its first real run, which is the expensive place to find out.
+  #
+  # So resolve the secret here when the phase did not: a lookup, never a
+  # create, so it stays correct under --verify and --dry-run too.
+  if [ -z "$SECRET_ID" ] && [ "$DRY_RUN" = false ]; then
+    SECRET_ID="$("${PC[@]}" secrets list -C "$COMPANY_ID" --json 2>/dev/null \
+      | jq -r --arg k "$SECRET_KEY" 'if type=="array" then . else (.items // .secrets // []) end
+          | map(select(.key == $k)) | .[0].id // empty' || true)"
+    [ -n "$SECRET_ID" ] && info "secret:  reusing $SECRET_ID (key $SECRET_KEY)"
+  fi
+  if [ -z "$SECRET_ID" ] && [ "$DRY_RUN" = false ] && [ "$VERIFY_ONLY" = false ]; then
+    die "no secret with key '$SECRET_KEY' exists in this company, so the agent
+         would be created with no provider credential and 401 on its first run.
+         Create it first: drop --only, or use --only secrets,agent."
+  fi
   AGENT_ID="$("${PC[@]}" agent list -C "$COMPANY_ID" --json 2>/dev/null \
     | jq -r --arg n "$AGENT_NAME" 'if type=="array" then . else (.items // .invites // .companies // .agents // .secrets // []) end
         | map(select(.name == $n)) | .[0].id // empty' || true)"
@@ -550,7 +748,11 @@ if want agent; then
     info "MISSING: no agent named '$AGENT_NAME'"
     VERIFY_FAILED=true
   elif [ "$DRY_RUN" = true ]; then
-    info "would create agent '$AGENT_NAME' ($ADAPTER_TYPE)"; AGENT_ID="<new>"
+    info "would create agent '$AGENT_NAME' ($ADAPTER_TYPE)"
+    info "  model:            ${MODEL:-<the vault config.toml default>}"
+    info "  codexHome:        ${CODEX_HOME_VALUE:-<the Paperclip-managed home>}"
+    info "  canCreateAgents:  $CAN_CREATE_AGENTS"
+    AGENT_ID="<new>"
   else
     # The credential is bound as a secret_ref rather than left to the host
     # environment. Resolved adapter env is merged AFTER the ACPX host-env
@@ -560,12 +762,21 @@ if want agent; then
       ({}
        | if $home == "" then . else .CODEX_HOME = {type:"plain", value:$home} end
        | if $sid  == "" then . else .OPENROUTER_API_KEY = {type:"secret_ref", secretId:$sid} end)')"
+    # Both optional fields are OMITTED when empty rather than sent as "" or
+    # false: adapterConfig.model="" would suppress the --model flag the vault
+    # relies on, and an explicit permissions object is worth sending only when
+    # it actually changes a default.
     AGENT_ID="$("${PC[@]}" agent create --json -C "$COMPANY_ID" --payload-json \
       "$(jq -nc --arg n "$AGENT_NAME" --arg t "$ADAPTER_TYPE" --argjson env "$ENV_JSON" \
-         '{name:$n, adapterType:$t, adapterConfig:{env:$env}}')" | jq -r '.id')"
+         --arg model "$MODEL" --argjson cca "$CAN_CREATE_AGENTS" '
+         {name:$n, adapterType:$t, adapterConfig:{env:$env}}
+         | if $model == "" then . else .adapterConfig.model = $model end
+         | if $cca then .permissions = {canCreateAgents:true} else . end')" | jq -r '.id')"
     [ -n "$AGENT_ID" ] && [ "$AGENT_ID" != "null" ] || die "agent create returned no id"
     info "created: $AGENT_ID"
-    info "bound:   CODEX_HOME=$CODEX_HOME_VALUE, OPENROUTER_API_KEY=secret_ref"
+    info "bound:   CODEX_HOME=${CODEX_HOME_VALUE:-<managed>}, OPENROUTER_API_KEY=secret_ref"
+    info "model:   ${MODEL:-<unset - the vault config.toml applies>}"
+    info "canCreateAgents: $CAN_CREATE_AGENTS"
   fi
 fi
 

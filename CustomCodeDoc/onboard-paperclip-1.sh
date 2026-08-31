@@ -15,6 +15,8 @@
 #   ./onboard-paperclip-1.sh --lock-signup      # close signup once the CEO has claimed
 #
 # Flags: --owner-email <email>   --timeout <seconds>   --wait   --force
+#        --pnpm   run the CLI from this checkout (pnpm paperclipai, via tsx)
+#                 instead of the installed release. Outranks PAPERCLIP_CLI.
 #
 # THE ENGINE IS LEFT STOPPED when onboarding finishes. This script starts one
 # only long enough to write the config and run migrations, then stops it again;
@@ -53,12 +55,14 @@ FORCE_LOCK=false
 WAIT_FOR_READY=false
 CLAIM_EMAIL="${ONBOARD_OWNER_EMAIL:-}"
 WAIT_TIMEOUT="${ONBOARD_WAIT_TIMEOUT:-120}"
+USE_PNPM="${ONBOARD_USE_PNPM:-false}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --lock-signup) MODE="lock-signup"; shift ;;
     --apply-config) MODE="apply-config"; shift ;;
     --force) FORCE_LOCK=true; shift ;;
     --wait) WAIT_FOR_READY=true; shift ;;
+    --pnpm) USE_PNPM=true; shift ;;
     --status) MODE="status"; shift ;;
     --check-engine) MODE="check-engine"; shift ;;
     --release) MODE="release"; shift ;;
@@ -78,13 +82,47 @@ done
 # arguments, e.g. PAPERCLIP_CLI="node /srv/paperclip-bundle/cli.js" or a path to
 # a bundle's binary that is not on PATH.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -n "${PAPERCLIP_CLI:-}" ]; then
+
+# The workspace checkout, found by walking up for pnpm-workspace.yaml rather
+# than assuming a depth. This script lives in CustomCodeDoc/, one level below
+# the root, and the old check looked for the marker in SCRIPT_DIR itself - which
+# is CustomCodeDoc/, where it has never existed - so the pnpm branch below could
+# never be taken. PAPERCLIP_REPO_ROOT overrides for a checkout somewhere else.
+find_repo_root() {
+  local d="${PAPERCLIP_REPO_ROOT:-$SCRIPT_DIR}"
+  while [ "$d" != "/" ]; do
+    [ -f "$d/pnpm-workspace.yaml" ] && { printf '%s' "$d"; return 0; }
+    d="$(dirname "$d")"
+  done
+  return 1
+}
+
+# --pnpm runs the CLI from the working tree (`pnpm paperclipai` -> tsx over
+# cli/src/index.ts) instead of the installed release, so a version being edited
+# in the IDE is the one these scripts drive.
+#
+# --silent is NOT optional. pnpm prints its "> paperclip@ paperclipai ..."
+# banner on STDOUT, and every JSON capture in these scripts pipes stdout
+# straight into jq - so without it the first `--json` call yields a parse error
+# on a line of pnpm chatter rather than an id.
+#
+# It also deliberately outranks PAPERCLIP_CLI: the container exports that
+# pointing at the release binary, so honouring it first would make --pnpm a
+# silent no-op on exactly the host where it is most wanted.
+if [ "$USE_PNPM" = true ]; then
+  command -v pnpm > /dev/null 2>&1 || { echo "--pnpm needs pnpm on PATH." >&2; exit 1; }
+  REPO_ROOT="$(find_repo_root)" || {
+    echo "--pnpm: no pnpm-workspace.yaml above $SCRIPT_DIR." >&2
+    echo "  Set PAPERCLIP_REPO_ROOT to the checkout root." >&2
+    exit 1
+  }
+  PAPERCLIP_CMD=(pnpm --silent --dir "$REPO_ROOT" paperclipai)
+elif [ -n "${PAPERCLIP_CLI:-}" ]; then
   read -r -a PAPERCLIP_CMD <<< "$PAPERCLIP_CLI"
 elif command -v paperclipai > /dev/null 2>&1; then
   PAPERCLIP_CMD=(paperclipai)
-elif command -v pnpm > /dev/null 2>&1 && [ -f "$SCRIPT_DIR/pnpm-workspace.yaml" ]; then
-  # --dir keeps this working when invoked from outside the checkout.
-  PAPERCLIP_CMD=(pnpm --dir "$SCRIPT_DIR" paperclipai)
+elif command -v pnpm > /dev/null 2>&1 && REPO_ROOT="$(find_repo_root)"; then
+  PAPERCLIP_CMD=(pnpm --silent --dir "$REPO_ROOT" paperclipai)
 elif [ "$MODE" = "onboard" ]; then
   echo "No Paperclip CLI found." >&2
   echo "  Install the bundle so 'paperclipai' is on PATH, or set PAPERCLIP_CLI." >&2
