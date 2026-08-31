@@ -1,24 +1,51 @@
 #!/usr/bin/env bash
-# Prompt-free Paperclip onboarding.
+# Paperclip onboarding, step 1 of 2 — install the instance and settle ownership.
 #
 # onboard has no per-value flags: --yes selects quickstart (no prompts) and every
 # value comes from the environment (ONBOARD_ENV_KEYS in cli/src/commands/onboard.ts).
 #
 # Usage:
-#   ./onboard-paperclip.sh                 # onboard this host
-#   ./onboard-paperclip.sh --apply-config  # re-apply config patches to an existing install
-#   ./onboard-paperclip.sh --lock-signup   # close signup once the CEO has claimed
+#   ./onboard-paperclip-1.sh                    # onboard this host
+#   ./onboard-paperclip-1.sh --check-engine     # is the engine running? (add --wait to poll)
+#   ./onboard-paperclip-1.sh --status           # engine + release + claim state
+#   ./onboard-paperclip-1.sh --release          # which release is linked, and running
+#   ./onboard-paperclip-1.sh --claim-admin --owner-email <email>
+#   ./onboard-paperclip-1.sh --set-owner   --owner-email <email>
+#   ./onboard-paperclip-1.sh --apply-config     # re-apply config patches to an install
+#   ./onboard-paperclip-1.sh --lock-signup      # close signup once the CEO has claimed
 #
-# Two-phase on purpose. In authenticated/private mode the server exposes
-# POST /api/bootstrap/claim (server/src/routes/access.ts), which makes ANY
-# signed-in browser user the first instance admin - no invite token needed,
-# first come first served. With signup open, whoever reaches the port first can
-# take the instance. But signup cannot simply be disabled up front either: there
-# is no CLI command that creates a user, so the intended admin would have no way
-# to sign up and claim. So: onboard with signup open, claim immediately, then
-# run --lock-signup to shut the door. Claiming is what permanently closes the
-# claim route (later attempts get already_claimed); --lock-signup stops further
-# account creation.
+# Flags: --owner-email <email>   --timeout <seconds>   --wait   --force
+#
+# THE ENGINE IS LEFT STOPPED when onboarding finishes. This script starts one
+# only long enough to write the config and run migrations, then stops it again;
+# starting the real one belongs to whatever supervises this host. Step 2 cannot
+# do anything without a running engine, so start it and confirm with
+# --check-engine before running onboard-paperclip-2.sh.
+#
+# Getting the first instance admin, and why it looks like this. In
+# authenticated/private mode the server exposes POST /api/bootstrap/claim
+# (server/src/routes/access.ts), which makes ANY signed-in browser user the
+# first instance admin - no invite token needed, first come first served. That
+# route requires a real browser session, so it cannot be scripted at all.
+#
+# Two headless paths exist instead, and they are NOT the same thing:
+#
+#   --claim-admin  first-come-first-served, like the browser route. Grants
+#                  instance_admin only while nobody holds it, and refuses to
+#                  reassign. The right call for a first claim.
+#   --set-owner    authoritative. Makes one email the SOLE instance_admin,
+#                  removes any other holder, and revokes every live bootstrap
+#                  invite so the ownership link cannot be redeemed afterwards.
+#                  Idempotent. Step 2 calls this on every run.
+#
+# Both need proxy auth on (PAPERCLIP_PROXY_AUTH_ENABLED=true) to provision the
+# account, and psql to reach the database. Both write instance_user_roles
+# directly, which is safe because claimFirstInstanceAdmin does exactly that and
+# nothing else - there are no memberships or grants to keep in step.
+#
+# A bootstrap_ceo invite link is still minted and saved as a browser fallback
+# for when proxy auth is off. Treat it as a credential: anyone holding it can
+# claim ownership until it is used, expires, or --set-owner revokes it.
 set -euo pipefail
 
 MODE="onboard"
@@ -33,12 +60,13 @@ while [ $# -gt 0 ]; do
     --force) FORCE_LOCK=true; shift ;;
     --wait) WAIT_FOR_READY=true; shift ;;
     --status) MODE="status"; shift ;;
+    --check-engine) MODE="check-engine"; shift ;;
     --release) MODE="release"; shift ;;
     --claim-admin) MODE="claim-admin"; shift ;;
     --set-owner) MODE="set-owner"; shift ;;
     --owner-email) CLAIM_EMAIL="${2:?--owner-email needs a value}"; shift 2 ;;
     --timeout) WAIT_TIMEOUT="${2:?--timeout needs a value}"; shift 2 ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -74,7 +102,7 @@ INSTANCE_ROOT="$PAPERCLIP_HOME/instances/$PAPERCLIP_INSTANCE_ID"
 #CONFIG_PATH="$INSTANCE_ROOT/config.json"
 # PAPERCLIP_CONFIG wins when set, so a caller can point this at another instance
 # without editing the script; otherwise the host default applies.
-CONFIG_PATH="${PAPERCLIP_CONFIG:-/install/config/paperclip/config.json}"
+CONFIG_PATH="${PAPERCLIP_CONFIG:-/sysops/config/paperclip/config.json}"
 #ENV_PATH="$INSTANCE_ROOT/.env"
 # The CLI resolves the env file as dirname(configPath)/.env, so it must stay a
 # sibling of the config - derive it rather than repeating the path.
@@ -103,7 +131,11 @@ export PAPERCLIP_DB_BACKUP_DIR="/sysops/db_backups/paperclip"
 # --------------------------------------------------------------- server -----
 # --bind lan forces deploymentMode=authenticated, exposure=private, host=0.0.0.0.
 # These three still come from the environment:
-export PORT=3100
+# PAPERCLIP_PORT is what the container exports and what paperclip-run.sh
+# starts the engine on, so derive PORT from it rather than repeating the
+# number here - a hardcoded 3100 silently probes the wrong port the moment
+# the deployment moves, and every health check then reports NOT RUNNING.
+export PORT="${PAPERCLIP_PORT:-3100}"
 
 # No browser, ever. This script runs at container start where there is no
 # display and nothing to open a browser with. Two CLI paths would otherwise try:
@@ -311,6 +343,67 @@ wait_for_server() {
   return 1
 }
 
+# --------------------------------------------------------- engine check -----
+# "Is the engine actually running?" - one probe that answers it properly, used
+# both as a report (--status, --check-engine) and as a gate.
+#
+# /api/health is the right source, and its `status` field says more than a TCP
+# connect ever could: the route answers status:"unhealthy" with
+# error:"database_unreachable" when the process is up but Postgres is not
+# (server/src/routes/health.ts). So status:"ok" has proved BOTH halves - the
+# process is listening AND the database is reachable - which is exactly the
+# precondition step 2 needs. "It answered the port" is not the same claim.
+#
+# Returns 0 only when the engine is running and healthy.
+json_field() {
+  # json_field <json> <field> - empty string when absent or unparseable.
+  printf '%s' "$1" | node -e '
+    let raw = ""; const f = process.argv[1];
+    process.stdin.on("data", (d) => { raw += d; });
+    process.stdin.on("end", () => {
+      try { process.stdout.write(String(JSON.parse(raw)[f] ?? "")); }
+      catch { process.stdout.write(""); }
+    });
+  ' "$2" 2>/dev/null || true
+}
+
+engine_status() {
+  local json status bs err commit mode exposure
+  json="$(curl -fsS --max-time 5 "$LOCAL_API/api/health" 2>/dev/null || true)"
+
+  if [ -z "$json" ]; then
+    echo "engine:          NOT RUNNING"
+    echo "  nothing answered $LOCAL_API/api/health"
+    echo "  Start it however this host does, or directly:"
+    echo "    PAPERCLIP_CONFIG=\"$CONFIG_PATH\" ${PAPERCLIP_CMD[*]} run"
+    echo "  Then confirm with: $0 --check-engine"
+    return 1
+  fi
+
+  status="$(json_field "$json" status)"
+  bs="$(json_field "$json" bootstrapStatus)"
+  commit="$(json_field "$json" commit)"
+  mode="$(json_field "$json" deploymentMode)"
+  exposure="$(json_field "$json" deploymentExposure)"
+
+  if [ "$status" != "ok" ]; then
+    err="$(json_field "$json" error)"
+    echo "engine:          RUNNING but UNHEALTHY (status=${status:-unknown})"
+    [ -n "$err" ] && echo "  error:         $err"
+    if [ "$err" = "database_unreachable" ]; then
+      echo "  The process is listening, but Postgres is not answering it. Nothing"
+      echo "  in step 2 can work until that is fixed - every step is a database write."
+    fi
+    return 1
+  fi
+
+  echo "engine:          RUNNING and healthy   ($LOCAL_API)"
+  echo "  deployment:    ${mode:-unknown}/${exposure:-unknown}"
+  echo "  commit:        ${commit:-unknown}"
+  echo "  bootstrap:     ${bs:-unknown}$([ "$bs" = "bootstrap_pending" ] && printf '%s' "   (no instance_admin yet)" || true)"
+  return 0
+}
+
 # Grant instance_admin without a browser.
 #
 # This is the headless equivalent of the browser claim route. It is safe to do
@@ -346,17 +439,52 @@ claim_admin() {
   # response code does not matter, only that the header was seen.
   curl -sS -o /dev/null --max-time 10 "$LOCAL_API/api/companies" -H "$hdr: $email" || true
 
-  local uid
-  uid="$(psql "$cs" -tAc "select id from \"user\" where lower(email) = lower('$email') limit 1;" 2>/dev/null | tr -d '[:space:]')"
+  # The email is bound as a psql variable rather than interpolated. :'email' is
+  # quoted and escaped by psql itself, so an apostrophe in an address is a
+  # character rather than syntax - the same rule the CLI reference states for
+  # jq-built payloads, applied to SQL.
+  #
+  # The SQL goes in on STDIN, not through -c. psql only performs variable
+  # interpolation on input it reads through its own lexer (stdin or -f); with
+  # -c the string is handed to the server verbatim, so :'email' arrives as
+  # literal SQL and the server answers `syntax error at or near ":"`. That
+  # error was then swallowed by 2>/dev/null and surfaced as the wrong
+  # diagnosis - "no user row for <email>" - for an account that did exist.
+  local uid uid_err
+  uid_err="$(mktemp "${TMPDIR:-/tmp}/paperclip-uid.XXXXXX")"
+  uid="$(psql "$cs" -v ON_ERROR_STOP=1 -v email="$email" -tA 2>"$uid_err" <<'SQL' | tr -d '[:space:]'
+select id from "user" where lower(email) = lower(:'email') limit 1;
+SQL
+)"
+  # A query that ERRORED and a query that matched nothing both come back empty.
+  # Telling them apart is the whole difference between "this account has not
+  # been provisioned yet" and "the statement never reached the table".
+  if [ -s "$uid_err" ]; then
+    echo "the user lookup failed:" >&2
+    sed 's/^/    /' "$uid_err" >&2
+    rm -f "$uid_err"
+    return 1
+  fi
+  rm -f "$uid_err"
   if [ -z "$uid" ]; then
     echo "'$email' still has no user row after a proxy-auth request." >&2
     echo "  Check PAPERCLIP_PROXY_AUTH_AUTO_PROVISION=true and PAPERCLIP_PROXY_AUTH_EMAIL_DOMAINS." >&2
     return 1
   fi
 
-  psql "$cs" -qAc "insert into instance_user_roles (user_id, role)
-      select '$uid', 'instance_admin'
-      where not exists (select 1 from instance_user_roles where role = 'instance_admin');" > /dev/null 2>&1
+  # ON_ERROR_STOP and a checked exit status. This used to swallow every failure
+  # into /dev/null, and `set -e` is no help: the function is called as
+  # `claim_admin ... || exit 1`, which disables errexit for its entire body.
+  if ! psql "$cs" -v ON_ERROR_STOP=1 -v uid="$uid" -qA > /dev/null 2>&1 <<'SQL'
+insert into instance_user_roles (user_id, role)
+  select :'uid', 'instance_admin'
+  where not exists (select 1 from instance_user_roles where role = 'instance_admin');
+SQL
+  then
+    echo "the database refused the instance_admin grant." >&2
+    echo "  Nothing was changed. Check the connection string in $CONFIG_PATH." >&2
+    return 1
+  fi
 
   local holder
   holder="$(psql "$cs" -tAc "select u.email from instance_user_roles r join \"user\" u on u.id = r.user_id
@@ -430,6 +558,23 @@ if [ "$MODE" = "release" ]; then
   exit 0
 fi
 
+# ------------------------------------------------------ check engine mode ---
+# The single question step 2 depends on. Exits 0 when the engine is up and
+# healthy, 1 when it is not, so a test loop can gate on it:
+#   ./onboard-paperclip-1.sh --check-engine && ./onboard-paperclip-2.sh ...
+# --wait polls until it comes up instead of answering immediately.
+if [ "$MODE" = "check-engine" ]; then
+  [ "$WAIT_FOR_READY" = false ] || wait_for_server || true
+  if engine_status; then
+    case "$(health_field bootstrapStatus)" in
+      ready)             echo "next: ./onboard-paperclip-2.sh --owner-email <email>" ;;
+      bootstrap_pending) echo "next: $0 --set-owner --owner-email <email>   (or run step 2, which does it)" ;;
+    esac
+    exit 0
+  fi
+  exit 1
+fi
+
 # Make one email the sole instance_admin, and close the door behind it.
 #
 # --claim-admin is first-come-first-served: it only acts when nobody holds the
@@ -461,8 +606,33 @@ lock_owner() {
     curl -sS -o /dev/null --max-time 10 "$LOCAL_API/api/companies" -H "$hdr: $email" || true
   fi
 
-  local uid
-  uid="$(psql "$cs" -tAc "select id from \"user\" where lower(email) = lower('$email') limit 1;" 2>/dev/null | tr -d '[:space:]')"
+  # The email is bound as a psql variable rather than interpolated. :'email' is
+  # quoted and escaped by psql itself, so an apostrophe in an address is a
+  # character rather than syntax - the same rule the CLI reference states for
+  # jq-built payloads, applied to SQL.
+  #
+  # The SQL goes in on STDIN, not through -c. psql only performs variable
+  # interpolation on input it reads through its own lexer (stdin or -f); with
+  # -c the string is handed to the server verbatim, so :'email' arrives as
+  # literal SQL and the server answers `syntax error at or near ":"`. That
+  # error was then swallowed by 2>/dev/null and surfaced as the wrong
+  # diagnosis - "no user row for <email>" - for an account that did exist.
+  local uid uid_err
+  uid_err="$(mktemp "${TMPDIR:-/tmp}/paperclip-uid.XXXXXX")"
+  uid="$(psql "$cs" -v ON_ERROR_STOP=1 -v email="$email" -tA 2>"$uid_err" <<'SQL' | tr -d '[:space:]'
+select id from "user" where lower(email) = lower(:'email') limit 1;
+SQL
+)"
+  # A query that ERRORED and a query that matched nothing both come back empty.
+  # Telling them apart is the whole difference between "this account has not
+  # been provisioned yet" and "the statement never reached the table".
+  if [ -s "$uid_err" ]; then
+    echo "the user lookup failed:" >&2
+    sed 's/^/    /' "$uid_err" >&2
+    rm -f "$uid_err"
+    return 1
+  fi
+  rm -f "$uid_err"
   if [ -z "$uid" ]; then
     echo "no user row for '$email' — cannot make them the owner." >&2
     echo "  With proxy auth on, one authenticated request creates it." >&2
@@ -474,14 +644,30 @@ lock_owner() {
       from instance_user_roles r join \"user\" u on u.id = r.user_id
       where r.role = 'instance_admin';" 2>/dev/null | tr -d '[:space:]')"
 
-  # Grant, then remove everyone else. Order matters: granting first means the
-  # instance is never momentarily without an admin.
-  psql "$cs" -qAc "insert into instance_user_roles (user_id, role)
-      select '$uid', 'instance_admin'
-      where not exists (
-        select 1 from instance_user_roles where role = 'instance_admin' and user_id = '$uid');" > /dev/null 2>&1
-  psql "$cs" -qAc "delete from instance_user_roles
-      where role = 'instance_admin' and user_id <> '$uid';" > /dev/null 2>&1
+  # Grant and remove in ONE transaction, with ON_ERROR_STOP and a checked exit
+  # status.
+  #
+  # As two separate unchecked statements this could leave the instance with no
+  # admin at all: a silently failing grant did not stop the delete, which then
+  # removed every existing holder. `set -e` never caught it either, because the
+  # function is called as `lock_owner ... || exit 1` and errexit is disabled for
+  # the whole body of a function invoked that way. A transaction makes the
+  # ordering argument true instead of merely intended.
+  if ! psql "$cs" -v ON_ERROR_STOP=1 -v uid="$uid" -qA > /dev/null 2>&1 <<'SQL'
+begin;
+insert into instance_user_roles (user_id, role)
+  values (:'uid', 'instance_admin')
+  on conflict do nothing;
+delete from instance_user_roles
+  where role = 'instance_admin' and user_id <> :'uid';
+commit;
+SQL
+  then
+    echo "could not reassign instance_admin — the database refused the change." >&2
+    echo "  Nothing was removed: the grant and the removal are one transaction," >&2
+    echo "  so the previous holder is still in place." >&2
+    return 1
+  fi
 
   # Revoke every live bootstrap invite: the link script 1 printed is a standing
   # offer of ownership to whoever holds it.
@@ -497,6 +683,14 @@ lock_owner() {
       from instance_user_roles r join \"user\" u on u.id = r.user_id
       where r.role = 'instance_admin';" 2>/dev/null | tr -d '[:space:]')"
 
+  # Report what the database now holds, not what was asked for. After a
+  # successful transaction there is exactly one holder and it is this email;
+  # anything else means the change did not take.
+  if [ "$(printf '%s' "$after" | tr 'A-Z' 'a-z')" != "$(printf '%s' "$email" | tr 'A-Z' 'a-z')" ]; then
+    echo "instance_admin reads '$after' after the change, expected '$email'." >&2
+    return 1
+  fi
+
   echo "instance_admin: $after"
   [ "$before" != "$after" ] && echo "  (was: $before)"
   [ "${revoked:-0}" != "0" ] && echo "  revoked ${revoked} live bootstrap invite(s) — the ownership link no longer works"
@@ -508,8 +702,25 @@ lock_owner() {
 require_instance() {
   if [ ! -f "$CONFIG_PATH" ]; then
     echo "No config at $CONFIG_PATH — this instance has not been onboarded." >&2
-    echo "  A --factory reset removes it. Re-create it first:" >&2
-    echo "    ./onboard-paperclip-1.sh" >&2
+    echo "  A --factory reset removes it." >&2
+    echo >&2
+    # The mode flags REPLACE onboarding rather than preceding it, and reading
+    # "--claim-admin" as "onboard, then claim" is the natural mistake: it is one
+    # script, so a flag looks additive. It is not - this branch exits long
+    # before the onboard code at the bottom of the file. Say so here, where the
+    # wrong assumption actually shows up.
+    echo "  Note: '$MODE' is a MODE, not an extra step - it replaces onboarding" >&2
+    echo "  rather than running before it. Onboard first, with no flags at all:" >&2
+    echo >&2
+    echo "    ./onboard-paperclip-1.sh                 # writes config, migrates, stops" >&2
+    echo "    <start the engine>                       # $MODE needs one running" >&2
+    echo "    ./onboard-paperclip-1.sh --check-engine" >&2
+    echo "    ./onboard-paperclip-1.sh --$MODE --owner-email <email>" >&2
+    if [ "$MODE" = "claim-admin" ]; then
+      echo >&2
+      echo "  Though you probably do not need --claim-admin at all: step 2 calls" >&2
+      echo "  --set-owner itself on every run, so ./run-test.sh covers this." >&2
+    fi
     return 1
   fi
   local cs
@@ -535,10 +746,11 @@ if [ "$MODE" = "set-owner" ]; then
   # The server is only needed to auto-provision an unknown email. If the user
   # already exists, ownership is pure database work and the server can stay down.
   if [ "$(health_field status)" != "ok" ]; then
-    echo "Server is not answering on $LOCAL_API." >&2
+    echo "Engine is not answering on $LOCAL_API." >&2
     echo "  Ownership is a database operation, so this still works IF the account" >&2
-    echo "  already exists. Start the server if '$CLAIM_EMAIL' has never signed in:" >&2
-    echo "    sudo supervisorctl start paperclip" >&2
+    echo "  already exists. If '$CLAIM_EMAIL' has never signed in, the account has" >&2
+    echo "  to be provisioned first, which needs the engine up: start it, then" >&2
+    echo "    $0 --check-engine" >&2
   fi
   lock_owner "$CLAIM_EMAIL" || exit 1
   echo "bootstrapStatus: $(health_field bootstrapStatus)"
@@ -549,13 +761,13 @@ fi
 if [ "$MODE" = "status" ]; then
   report_release
   echo
-  st="$(health_field status)"; bs="$(health_field bootstrapStatus)"
-  echo "server:          $st"
-  echo "bootstrapStatus: $bs"
+  engine_status || true
+  echo
+  bs="$(health_field bootstrapStatus)"
   case "$bs" in
     ready)             echo "next: ./onboard-paperclip-2.sh --owner-email <email>" ;;
     bootstrap_pending) echo "next: $0 --claim-admin --owner-email <email>" ;;
-    *)                 echo "next: start the server, then re-run $0 --status" ;;
+    *)                 echo "next: start the engine, then re-run $0 --status" ;;
   esac
   exit 0
 fi
@@ -832,7 +1044,7 @@ echo "Onboarded: config=$CONFIG_PATH logs=$LOG_DIR backups=$PAPERCLIP_DB_BACKUP_
 INVITE_FILE="$(dirname "$CONFIG_PATH")/bootstrap-ceo-invite.txt"
 
 echo
-if invite_output="$("${PAPERCLIP_CMD[@]}" auth bootstrap-ceo --config "$CONFIG_PATH" --base-url "https://${PAPERCLIP_FQDN}" 2>&1 | tee /dev/stderr)"; then
+if invite_output="$("${PAPERCLIP_CMD[@]}" auth bootstrap-ceo --config "$CONFIG_PATH" --base-url "$PAPERCLIP_BASE_URL" 2>&1 | tee /dev/stderr)"; then
   # Not grepped by its "Invite URL:" label: clack prefixes the line with a box
   # character and picocolors wraps the URL in colour codes whenever this runs on
   # a tty. Strip the escapes, then match the URL itself.
@@ -855,7 +1067,7 @@ if invite_output="$("${PAPERCLIP_CMD[@]}" auth bootstrap-ceo --config "$CONFIG_P
   fi
 else
   echo "WARNING: could not create the bootstrap CEO invite (is the database reachable?)." >&2
-  echo "  Retry: ${PAPERCLIP_CMD[*]} auth bootstrap-ceo --config \"$CONFIG_PATH\" --base-url \"https:\/\/${PAPERCLIP_FQDN}\"" >&2
+  echo "  Retry: ${PAPERCLIP_CMD[*]} auth bootstrap-ceo --config \"$CONFIG_PATH\" --base-url \"$PAPERCLIP_BASE_URL\"" >&2
 fi
 
 echo
@@ -879,3 +1091,26 @@ echo "button rejects proxy-authenticated users; the invite URL is the path that 
 #   paperclipai run --config "$CONFIG_PATH" --instance "$PAPERCLIP_INSTANCE_ID"
 #
 # or equivalently: PAPERCLIP_CONFIG="$CONFIG_PATH" paperclipai run
+
+# ------------------------------------------------------------ next steps ----
+# Onboarding started an engine, used it to write the config and run migrations,
+# and stopped it again on purpose. Whether one is running NOW is a separate
+# question, and it is the one step 2 turns on - so answer it here rather than
+# leaving the operator to assume.
+echo
+echo "--- engine ---"
+if engine_status; then
+  echo
+  echo "Step 1 complete, and the engine is up."
+  echo "  next: ./onboard-paperclip-2.sh --owner-email <email>"
+else
+  echo
+  echo "Step 1 is complete - this is expected, not a failure. The engine started"
+  echo "here was only ever meant to write the config and run migrations, and was"
+  echo "stopped again."
+  echo
+  echo "Step 2 needs a running engine: it mints its API key through the engine and"
+  echo "every command it runs is an HTTP request to it. Start one, then:"
+  echo "  $0 --check-engine"
+  echo "  ./onboard-paperclip-2.sh --owner-email <email>"
+fi

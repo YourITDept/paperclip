@@ -1,14 +1,31 @@
 #!/usr/bin/env bash
 # onboard-paperclip-2.sh — phase two of Paperclip onboarding: tenant setup.
 #
-# Run this AFTER onboard-paperclip.sh has installed the instance, the first
-# admin has claimed it, and the server is running. Phase one gets the process
-# up; this one fills it with a company, secrets, an agent that can actually
-# authenticate to a model provider, and invite links for the humans.
+# Run this AFTER onboard-paperclip-1.sh has installed the instance. Phase one
+# writes the config and migrates the schema; this one fills it with a company,
+# secrets, an agent that can actually authenticate to a model provider, and
+# invite links for the humans.
 #
-# Everything here is idempotent. It looks things up by name before creating
-# them, so a re-run is a no-op and a partial run resumes. That is what makes it
-# usable for migrating an environment, not just standing one up the first time.
+# THE ENGINE MUST BE RUNNING. Not as a nicety — there is no offline path here.
+# The board API key is minted through the engine, every paperclipai command is
+# an HTTP request to it, and every phase below is a write. Step 1 deliberately
+# leaves the engine stopped, so start it yourself and confirm with
+#   ./onboard-paperclip-1.sh --check-engine
+# This script checks the same thing before it touches anything, and refuses to
+# start on an engine that is down or whose database is unreachable.
+#
+# The company, secret, agent and task are idempotent: each is looked up by name
+# before it is created, so a re-run is a no-op and a partial run resumes. That
+# is what makes this usable for migrating an environment, not just standing one
+# up the first time.
+#
+# INVITES ARE THE EXCEPTION, and it is not a fixable one. A re-run mints a fresh
+# link per role and the old ones stay live, so three runs leave nine usable
+# credentials on the instance. There is no lookup that would avoid it: the token
+# is stored hashed and is returned exactly once, at creation, so "reuse the
+# existing invite" cannot print a link. If you are re-running to converge the
+# rest, pass --only company,secrets,agent and mint invites deliberately; audit
+# what is outstanding with `paperclipai invite list -C <id>` and revoke the rest.
 #
 # Workflow reference: CustomCodeDoc/Paperclip Onboarding Steps.md (steps 4-8).
 # Command reference:  CustomCodeDoc/paperclipai-cli-reference.md
@@ -25,7 +42,7 @@
 # then creates the company, secret, agent and invites.
 #   ./onboard-paperclip-2.sh --dry-run    # print what it would do
 #   ./onboard-paperclip-2.sh --only company,secrets,agent,invite,task
-#   ./onboard-paperclip-2.sh --verify     # verification only, change nothing
+#   ./onboard-paperclip-2.sh --verify     # report only, change NOTHING
 #   ./onboard-paperclip-2.sh --mint-key --owner-email you@example.com
 #
 # Flags, each overriding the matching ONBOARD_* variable:
@@ -51,7 +68,14 @@
 #                          Valid: owner | admin | operator | viewer.
 #   --only <phases>        comma list: company,secrets,agent,invite,task
 #   --mint-key             print a board API key and exit
-#   --dry-run / --verify
+#   --dry-run      print what a run would do, change nothing. Tolerates a
+#                  stopped engine so a plan can still be previewed.
+#   --verify       report whether ownership, the company, the secret and the
+#                  agent exist. Creates nothing, mints no invites, assigns no
+#                  task. Exits 1 if anything is missing, so a test loop can gate
+#                  on it. It will not mint an API key either — minting leaves a
+#                  live credential behind, which is a change — so --verify needs
+#                  PAPERCLIP_API_KEY already set.
 #
 # Two URLs, deliberately. --api-url is the direct internal route; --mint-key
 # needs it, because a reverse proxy overwrites the user header it relies on.
@@ -121,6 +145,7 @@ ARG_API_URL=""
 ARG_PUBLIC_URL=""
 ARG_INVITE_ROLES=""
 MINTED_THIS_RUN=false
+VERIFY_FAILED=false
 ARG_AGENT_NAME=""
 ARG_TASK_TITLE=""
 ARG_TASK_PROMPT=""
@@ -141,7 +166,7 @@ while [ $# -gt 0 ]; do
     # Accepts a key on the command line for convenience. Prefer the environment:
     # an argument is visible in `ps` to every process on the box.
     --api-key)      ARG_API_KEY="${2:?--api-key needs a value}"; shift 2 ;;
-    -h|--help)      sed -n '2,99p' "$0"; exit 0 ;;
+    -h|--help)      sed -n '2,120p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -209,6 +234,68 @@ command -v jq > /dev/null 2>&1 || die "jq is required"
 
 # ---------------------------------------------------------------- inputs ----
 : "${PAPERCLIP_API_URL:?PAPERCLIP_API_URL is not set — is the container env sourced?}"
+
+# ---------------------------------------------------------------- engine ----
+# Step 2 needs a RUNNING engine for all of it, not just for convenience:
+#   * the board API key is minted through it (POST /api/board-api-keys)
+#   * every paperclipai command below is an HTTP request to it
+#   * ownership, company, secret, agent, invites and the task are all writes
+# There is no offline path here, so this is a hard gate rather than a warning.
+#
+# It runs BEFORE minting deliberately. Minting first meant a stopped engine
+# announced itself as a curl failure from inside the key request, which reads
+# like an auth problem and sends you looking at proxy headers.
+#
+# `status` is checked, not merely reachability. /api/health answers
+# status:"unhealthy" with error:"database_unreachable" when the process is up
+# but Postgres is not (server/src/routes/health.ts), and bootstrapStatus is then
+# absent — which the previous check read as "unknown" and let straight through.
+HEALTH=""
+BOOTSTRAP="unknown"
+require_engine() {
+  local status err
+  HEALTH="$(curl -fsS --max-time 5 "${PAPERCLIP_API_URL%/}/api/health" 2>/dev/null || true)"
+
+  if [ -z "$HEALTH" ]; then
+    if [ "$DRY_RUN" = true ]; then
+      info "engine:        NOT RUNNING — continuing because this is --dry-run"
+      return 0
+    fi
+    die "the engine is not running: nothing answered ${PAPERCLIP_API_URL%/}/api/health.
+         Everything this script does is an HTTP request to it, so there is
+         nothing it can do until it is up. Start it, confirm with
+           ./onboard-paperclip-1.sh --check-engine
+         and re-run."
+  fi
+
+  status="$(printf '%s' "$HEALTH" | jq -r '.status // "unknown"')"
+  BOOTSTRAP="$(printf '%s' "$HEALTH" | jq -r '.bootstrapStatus // "unknown"')"
+
+  if [ "$status" != "ok" ]; then
+    err="$(printf '%s' "$HEALTH" | jq -r '.error // "no error reported"')"
+    die "the engine is running but reports status='$status' ($err).
+         An engine whose database is unreachable still answers /api/health and
+         still fails every write — which is the expensive way to find out. Fix
+         that, confirm with ./onboard-paperclip-1.sh --check-engine, re-run."
+  fi
+
+  info "engine:        running and healthy at ${PAPERCLIP_API_URL%/}   (commit $(printf '%s' "$HEALTH" | jq -r '.commit // "unknown"'))"
+}
+
+# In --mint-key mode the ONLY thing on stdout may be the key itself. The
+# documented way to use it is a command substitution -
+#   export PAPERCLIP_API_KEY="$(./onboard-paperclip-2.sh --mint-key ...)"
+# which the --verify failure below recommends by name - and step/info write to
+# stdout, so the preflight banner was captured along with the key. The result
+# was a 163-character "key" whose first three lines were a progress report, and
+# the only symptom was `access whoami` failing as if the token were wrong.
+# Diagnostics go to stderr here; the operator still sees them.
+if [ "$MINT_KEY" = true ]; then
+  { step 0/6 "Preflight"; require_engine; } >&2
+else
+  step 0/6 "Preflight"
+  require_engine
+fi
 
 # ------------------------------------------------------------- mint a key ---
 # Minting is a function, not a mode, so the normal run can do it silently.
@@ -280,6 +367,12 @@ fi
 # Normal run: mint silently when no key was supplied, so a bare
 #   ./onboard-paperclip-2.sh --owner-email you@example.com
 # is all that is needed. A key in the environment always wins.
+if [ -z "${PAPERCLIP_API_KEY:-}" ] && [ "$VERIFY_ONLY" = true ]; then
+  die "--verify changes nothing, and minting a board API key IS a change: it
+         leaves a live credential on the instance. Supply one instead —
+           export PAPERCLIP_API_KEY=\"\$(./onboard-paperclip-2.sh --mint-key --owner-email ${OWNER_EMAIL:-you@example.com})\"
+         then re-run with --verify."
+fi
 if [ -z "${PAPERCLIP_API_KEY:-}" ]; then
   if [ "$DRY_RUN" = true ]; then
     info "would mint a board API key as ${OWNER_EMAIL:-<no --owner-email>}"
@@ -311,25 +404,28 @@ run() {
 }
 
 # --------------------------------------------------------------- preflight --
-step 0/6 "Preflight"
-
+# The engine gate above already ran and left $BOOTSTRAP holding the instance's
+# claim state.
+#
 # An unclaimed instance has no instance_admin, and company creation then fails
 # with "Creating companies requires board/instance-admin authentication" — a
 # message that points at agent API keys and sends you the wrong way entirely.
-# Check the real precondition first, and fix it, rather than failing at 1/6.
-BOOTSTRAP="$(curl -fsS --max-time 5 "${PAPERCLIP_API_URL%/}/api/health" 2>/dev/null \
-  | jq -r '.bootstrapStatus // "unknown"' 2>/dev/null || echo unreachable)"
-if [ "$BOOTSTRAP" = "unreachable" ]; then
-  die "cannot reach ${PAPERCLIP_API_URL%/}/api/health — is the server running?
-         Start it (supervisorctl/systemd), then re-run."
-fi
+# Settle the real precondition first, rather than failing at 1/6.
+#
 # Lock ownership to --owner-email, every run, whatever state the instance is in.
 #
 # Not just when unclaimed. Script 1 leaves a bootstrap_ceo invite link behind,
 # and anyone holding it can claim ownership until it is redeemed or expires.
 # This makes the named email the sole instance_admin and revokes those links, so
 # whatever happened between the two scripts is overwritten deterministically.
-if [ -n "$OWNER_EMAIL" ]; then
+if [ "$VERIFY_ONLY" = true ]; then
+  info "ownership:     not touched (--verify changes nothing)"
+  info "bootstrap:     $BOOTSTRAP"
+  if [ "$BOOTSTRAP" != "ready" ]; then
+    info "MISSING:       no instance_admin — the instance is unclaimed"
+    VERIFY_FAILED=true
+  fi
+elif [ -n "$OWNER_EMAIL" ]; then
   OWNER_TOOL="$(dirname "$0")/onboard-paperclip-1.sh"
   if [ -x "$OWNER_TOOL" ]; then
     if [ "$DRY_RUN" = true ]; then
@@ -350,9 +446,16 @@ elif [ "$BOOTSTRAP" = "bootstrap_pending" ]; then
 fi
 
 WHOAMI="$("${PC[@]}" access whoami --json 2>/dev/null || true)"
-[ -n "$WHOAMI" ] || die "access whoami failed — PAPERCLIP_API_KEY is missing, wrong, or the server is down.
-         Every later step would fail as a confusing 401. Fix the token first."
-info "authenticated: $(printf '%s' "$WHOAMI" | jq -r '.email // .userId // "board user"')"
+if [ -z "$WHOAMI" ]; then
+  if [ "$DRY_RUN" = true ]; then
+    info "whoami:        skipped — no live engine to ask (--dry-run)"
+  else
+    die "access whoami failed — PAPERCLIP_API_KEY is missing, wrong, or the engine
+         is down. Every later step would fail as a confusing 401. Fix the token first."
+  fi
+else
+  info "authenticated: $(printf '%s' "$WHOAMI" | jq -r '.email // .userId // "board user"')"
+fi
 [ "$MINTED_THIS_RUN" = true ] && info "api key:       minted for this run (not stored)"
 info "connecting to: $PAPERCLIP_API_URL   (internal — every request goes here)"
 info "invite links:  ${BASE_URL:-<unset>}   (text only — never connected to)"
@@ -374,9 +477,12 @@ if want company; then
   step 1/6 "Company '$COMPANY_NAME'"
   COMPANY_ID="$("${PC[@]}" company list --json 2>/dev/null \
     | jq -r --arg n "$COMPANY_NAME" 'if type=="array" then . else (.items // .invites // .companies // .agents // .secrets // []) end
-        | map(select(.name == $n)) | .[0].id // empty')"
+        | map(select(.name == $n)) | .[0].id // empty' || true)"
   if [ -n "$COMPANY_ID" ]; then
     info "exists: $COMPANY_ID"
+  elif [ "$VERIFY_ONLY" = true ]; then
+    info "MISSING: no company named '$COMPANY_NAME'"
+    VERIFY_FAILED=true
   else
     if [ "$DRY_RUN" = true ]; then
       info "would create company '$COMPANY_NAME'"; COMPANY_ID="<new>"
@@ -390,8 +496,17 @@ if want company; then
 else
   COMPANY_ID="$("${PC[@]}" company list --json 2>/dev/null \
     | jq -r --arg n "$COMPANY_NAME" 'if type=="array" then . else (.items // .invites // .companies // .agents // .secrets // []) end
-        | map(select(.name == $n)) | .[0].id // empty')"
+        | map(select(.name == $n)) | .[0].id // empty' || true)"
   [ -n "$COMPANY_ID" ] || die "company '$COMPANY_NAME' not found and --only excluded creating it"
+fi
+
+# Without a company there is no -C to pass, so every check below would fail as
+# a permissions error rather than as the missing company it actually is.
+if [ "$VERIFY_ONLY" = true ] && [ -z "$COMPANY_ID" ]; then
+  echo
+  echo "VERIFY: FAILED — company '$COMPANY_NAME' does not exist, so nothing"
+  echo "        underneath it could be checked. Nothing was changed."
+  exit 1
 fi
 
 # ----------------------------------------------------------------- secret ---
@@ -400,9 +515,12 @@ if want secrets; then
   step 2/6 "Secret '$SECRET_NAME'"
   SECRET_ID="$("${PC[@]}" secrets list -C "$COMPANY_ID" --json 2>/dev/null \
     | jq -r --arg k "$SECRET_KEY" 'if type=="array" then . else (.items // .invites // .companies // .agents // .secrets // []) end
-        | map(select(.key == $k)) | .[0].id // empty')"
+        | map(select(.key == $k)) | .[0].id // empty' || true)"
   if [ -n "$SECRET_ID" ]; then
     info "exists: $SECRET_ID  (rotate with: paperclipai secrets rotate)"
+  elif [ "$VERIFY_ONLY" = true ]; then
+    info "MISSING: no secret with key '$SECRET_KEY'"
+    VERIFY_FAILED=true
   elif [ "$DRY_RUN" = true ]; then
     info "would create secret '$SECRET_NAME' from \$OPENROUTER_API_KEY"; SECRET_ID="<new>"
   else
@@ -425,9 +543,12 @@ if want agent; then
   step 3/6 "Agent '$AGENT_NAME'"
   AGENT_ID="$("${PC[@]}" agent list -C "$COMPANY_ID" --json 2>/dev/null \
     | jq -r --arg n "$AGENT_NAME" 'if type=="array" then . else (.items // .invites // .companies // .agents // .secrets // []) end
-        | map(select(.name == $n)) | .[0].id // empty')"
+        | map(select(.name == $n)) | .[0].id // empty' || true)"
   if [ -n "$AGENT_ID" ]; then
     info "exists: $AGENT_ID"
+  elif [ "$VERIFY_ONLY" = true ]; then
+    info "MISSING: no agent named '$AGENT_NAME'"
+    VERIFY_FAILED=true
   elif [ "$DRY_RUN" = true ]; then
     info "would create agent '$AGENT_NAME' ($ADAPTER_TYPE)"; AGENT_ID="<new>"
   else
@@ -449,7 +570,9 @@ if want agent; then
 fi
 
 # ---------------------------------------------------------------- invites ---
-if want invite; then
+# Minting an invite creates a live credential, so --verify never enters here;
+# the verify block below counts what already exists instead.
+if want invite && [ "$VERIFY_ONLY" = false ]; then
   step 4/6 "Invite links"
   IFS=',' read -r -a ROLES <<< "$INVITE_ROLES"
   for role in "${ROLES[@]}"; do
@@ -504,7 +627,7 @@ fi
 # ------------------------------------------------------------------- task ---
 TASK_TITLE="${ARG_TASK_TITLE:-${ONBOARD_TASK_TITLE:-}}"
 TASK_PROMPT="${ARG_TASK_PROMPT:-${ONBOARD_TASK_PROMPT:-}}"
-if want task && [ -n "$TASK_TITLE" ]; then
+if want task && [ -n "$TASK_TITLE" ] && [ "$VERIFY_ONLY" = false ]; then
   step 5/6 "Task for the agent"
   [ -n "$AGENT_ID" ] || die "a task needs an agent; run without --only, or set --only agent,task"
   PROMPT="$TASK_PROMPT"
@@ -530,6 +653,11 @@ fi
 
 # ------------------------------------------------------------------ verify --
 step 6/6 "Verify"
+# Nothing was created in a dry run, so counting what exists would print blanks
+# and read like a failed verification.
+if [ "$DRY_RUN" = true ]; then
+  info "skipped — nothing was created (--dry-run)"
+else
 info "company:  $("${PC[@]}" company list --json 2>/dev/null | jq -r --arg n "$COMPANY_NAME" \
   'if type=="array" then . else (.items // .invites // .companies // .agents // .secrets // []) end | map(select(.name==$n)) | length') match(es) for '$COMPANY_NAME'"
 if want secrets; then
@@ -541,6 +669,19 @@ info "agents:   $("${PC[@]}" agent list -C "$COMPANY_ID" --json 2>/dev/null | jq
   'if type=="array" then . else (.items // .invites // .companies // .agents // .secrets // []) end | length')"
 info "invites:  $("${PC[@]}" invite list -C "$COMPANY_ID" --json 2>/dev/null | jq -r \
   'if type=="array" then . else (.items // .invites // .companies // .agents // .secrets // []) end | length') outstanding"
+fi
+
+if [ "$VERIFY_ONLY" = true ]; then
+  echo
+  if [ "$VERIFY_FAILED" = true ]; then
+    echo "VERIFY: FAILED — see the MISSING lines above. Nothing was changed."
+    echo "        Run without --verify to create what is missing."
+    exit 1
+  fi
+  echo "VERIFY: OK — ownership, company, secret and agent are all in place."
+  echo "        Nothing was changed."
+  exit 0
+fi
 
 cat <<EOF
 
