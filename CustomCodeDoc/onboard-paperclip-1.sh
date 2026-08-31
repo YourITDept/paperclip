@@ -503,9 +503,43 @@ lock_owner() {
   return 0
 }
 
+# Preconditions shared by the modes that touch the database directly.
+# Both used to fail as a silent two-minute wait; the cause is knowable up front.
+require_instance() {
+  if [ ! -f "$CONFIG_PATH" ]; then
+    echo "No config at $CONFIG_PATH — this instance has not been onboarded." >&2
+    echo "  A --factory reset removes it. Re-create it first:" >&2
+    echo "    ./onboard-paperclip-1.sh" >&2
+    return 1
+  fi
+  local cs
+  cs="$(node -e "
+    try { const c = require('$CONFIG_PATH');
+      process.stdout.write(c.database?.connectionString ?? ''); } catch { process.stdout.write(''); }
+  ")"
+  if [ -z "$cs" ]; then
+    echo "No database connectionString in $CONFIG_PATH — cannot reach the database." >&2
+    return 1
+  fi
+  if ! psql "$cs" -tAc "select 1;" > /dev/null 2>&1; then
+    echo "Cannot reach the database named in $CONFIG_PATH." >&2
+    echo "  Is the Postgres container up?" >&2
+    return 1
+  fi
+  return 0
+}
+
 # -------------------------------------------------------- set owner mode ---
 if [ "$MODE" = "set-owner" ]; then
-  [ "$(health_field status)" = "ok" ] || wait_for_server || exit 1
+  require_instance || exit 1
+  # The server is only needed to auto-provision an unknown email. If the user
+  # already exists, ownership is pure database work and the server can stay down.
+  if [ "$(health_field status)" != "ok" ]; then
+    echo "Server is not answering on $LOCAL_API." >&2
+    echo "  Ownership is a database operation, so this still works IF the account" >&2
+    echo "  already exists. Start the server if '$CLAIM_EMAIL' has never signed in:" >&2
+    echo "    sudo supervisorctl start paperclip" >&2
+  fi
   lock_owner "$CLAIM_EMAIL" || exit 1
   echo "bootstrapStatus: $(health_field bootstrapStatus)"
   exit 0
@@ -528,6 +562,7 @@ fi
 
 # ------------------------------------------------------- claim admin mode ---
 if [ "$MODE" = "claim-admin" ]; then
+  require_instance || exit 1
   [ "$(health_field status)" = "ok" ] || wait_for_server || exit 1
   if [ "$(health_field bootstrapStatus)" = "ready" ]; then
     echo "Instance already claimed; nothing to do."
