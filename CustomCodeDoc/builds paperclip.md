@@ -1,6 +1,6 @@
 # Building Paperclip — the container toolchain
 
-**Status:** Current as of `W4-20260828b` (2026-08-28).
+**Status:** Current as of `W5-20260830a` (2026-08-31).
 **Owner:** cwa@youritdept.com
 **Companion to:** [`ReverseProxyCustomChanges.md`](CustomCodeDoc/ReverseProxyCustomChanges.md) —
 that file records *what the fork carries*; this one records *what builds and
@@ -10,6 +10,15 @@ tests it*, and where those commands are meant to run.
 > environment.** Every version below is supplied by the image. Nothing in the
 > toolchain is taken from a developer's host, and nothing needs to be installed
 > on one to produce a correct build.
+
+---
+
+> **RULE 0 — never commit, push, or check anything in.** Building and packaging
+> produce real artifacts and can rewrite tracked files (version stamps,
+> `pnpm-lock.yaml`, `cli/package.json`). None of that may be committed. The
+> operator reviews every diff visually in the VS Code IDE and commits it
+> themselves. Full statement at the top of
+> [`Review and Test Changes.md`](CustomCodeDoc/Review%20and%20Test%20Changes.md).
 
 ---
 
@@ -155,23 +164,62 @@ Versions are what the lockfile currently resolves.
 
 ### 4.1 Patched dependencies — read before bumping pnpm
 
-Declared under the `pnpm` key in [`package.json`](package.json):
+**Updated 2026-08-31 (`W5-20260830a`). There are now four patches, not two, and
+they are declared in two places.**
 
-| Package | Patch |
-| --- | --- |
-| `embedded-postgres@18.1.0-beta.16` | forces `LC_MESSAGES=C` and passes through `process.env` at `initdb`, so log scraping is locale-independent |
-| `acpx@0.12.0` | — |
+| Package | Patch | Bundled into |
+| --- | --- | --- |
+| `embedded-postgres@18.1.0-beta.16` | forces `LC_MESSAGES=C` and passes through `process.env` at `initdb`, so log scraping is locale-independent | `@paperclipai/db` |
+| `acpx@0.12.0` | agent-environment construction (`buildAgentEnvironment`, `promotePrefixedAuthEnvironment`) | `@paperclipai/adapter-utils` |
+| `acpx@0.13.1` | *(new, upstream #12400/#12401)* the pinned ACPX runtime | **nothing — see the packaging trap below** |
+| `@agentclientprotocol/codex-acp@1.6.2` | *(new)* isolated-context behaviour, gated entirely on `PAPERCLIP_ACPX_ISOLATED_CONTEXT` | **nothing — see below** |
 
-Overrides in the same block: `rollup >=4.59.0`, `react ^19.2.8`,
-`react-dom ^19.2.8`.
+Overrides: `rollup >=4.59.0`, `react ^19.2.8`, `react-dom ^19.2.8`.
 
-> **Trap.** pnpm 10 moved `overrides` and `patchedDependencies` out of
-> `package.json` into `pnpm-workspace.yaml`. A pnpm bump past 9 that does not
-> move these two blocks makes both patches and all three overrides **silently
-> stop applying** — the install still succeeds. The `embedded-postgres` patch is
-> what the database-backed test suites depend on. Verify after any pnpm bump
-> that `node_modules/.pnpm/` still contains an `embedded-postgres@…_patch_hash=…`
-> directory.
+**Declared in both manifests.** Upstream now writes `patchedDependencies` into
+**both** [`package.json`](package.json) (`pnpm` key) and
+[`pnpm-workspace.yaml`](pnpm-workspace.yaml), with the note *"Newer pnpm versions
+read patch configuration only from the workspace manifest."* Keep the two in
+sync; upstream's `acpx-codex-package-contract` test asserts both configurations
+resolve to the same patches.
+
+> **Trap, now HALF defused — read which half.** pnpm 10 moved `overrides` and
+> `patchedDependencies` out of `package.json` into `pnpm-workspace.yaml`.
+>
+> - `patchedDependencies` — **handled.** Upstream duplicated it into
+>   `pnpm-workspace.yaml`, so a bump past pnpm 9 keeps finding the patches.
+> - `overrides` — **still exposed.** It lives *only* in `package.json`. A bump
+>   past pnpm 9 makes `rollup`, `react` and `react-dom` **silently stop being
+>   overridden**, and the install still succeeds.
+>
+> After any pnpm bump, verify both halves:
+>
+> ```bash
+> ls node_modules/.pnpm | grep -E 'embedded-postgres@|acpx@|codex-acp@'   # expect 4
+> node -e 'console.log(require("react/package.json").version)'            # expect 19.2.8+
+> ```
+
+> **Packaging trap — a patch in the repo is not a patch in the release.**
+> `scripts/pack-local.sh` carries a patched dependency into a bundle only when
+> the owning package declares it in `bundleDependencies`. Two of the four do
+> (`adapter-utils` → `acpx`, `db` → `embedded-postgres`) and are verified present
+> and patched in the deployed tree. **`@paperclipai/adapter-codex-local` now
+> depends on `@agentclientprotocol/codex-acp: ^1.6.2` and declares no
+> `bundleDependencies`**, so a packed install resolves it from the public
+> registry — unpatched, and `^` may drift off the tested version. Harmless today
+> because that patch is gated on `PAPERCLIP_ACPX_ISOLATED_CONTEXT`, which only
+> the native runner sets; it becomes real the moment upstream ungates it.
+> Re-check on every merge.
+>
+> **Verify a bundle actually carries its patches** (markers, not versions —
+> a version match proves nothing):
+>
+> ```bash
+> grep -rq promotePrefixedAuthEnvironment \
+>   <install>/node_modules/@paperclipai/adapter-utils/node_modules/acpx   # acpx
+> grep -rq LC_MESSAGES \
+>   <install>/node_modules/@paperclipai/db/node_modules/embedded-postgres # postgres
+> ```
 
 ### 4.2 Server runtime libraries
 

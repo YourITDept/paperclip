@@ -10,6 +10,11 @@ metadata:
 
 # Codex Home change set — handoff instructions
 
+> **RULE 0 — never commit, push, or check anything in.** The operator
+> reviews every diff visually in the VS Code IDE and commits it themselves.
+> Full statement at the top of
+> [`Review and Test Changes.md`](CustomCodeDoc/Review%20and%20Test%20Changes.md).
+
 > To use this as a real, auto-discovered skill, copy this file to
 > `skills/codex-home-changes/SKILL.md`. It lives at the repo root because that
 > is where the working notes for this branch live.

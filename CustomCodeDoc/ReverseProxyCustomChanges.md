@@ -35,6 +35,12 @@ This section exists so the next time is a single prompt.
 > `ReverseProxyCustomChanges.md` — start at §0, which tells you everything you
 > need. When you're done, append a new dated session entry to the Running Log at
 > the bottom of that file. Don't commit unless I ask.
+>
+> **See RULE 0** at the top of
+> [`Review and Test Changes.md`](CustomCodeDoc/Review%20and%20Test%20Changes.md) —
+> never commit, push, or check anything in. The operator reviews every diff
+> visually in the VS Code IDE; a commit made for them destroys that review.
+> Leave the work in the tree and say what you touched.
 
 Nothing else needs to be said. Everything below is what that prompt relies on.
 

@@ -1,0 +1,152 @@
+#!/usr/bin/expect -f
+#
+# File: bin/onboard-paperclip.exp
+# Version: 1.1.0
+# Changed: 2026-08-25
+#
+# License: MIT License - THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND
+#
+# Unattended wrapper around onboard-paperclip.sh - nothing more. All of the
+# decisions (paths, database, secrets, config patches, CEO invite) live in the
+# .sh, which stays runnable on its own; this only supplies the Ctrl+C that an
+# operator would otherwise have to type.
+#
+# Why one is needed: onboard cannot write a config without also starting the
+# server. With --yes, cli/src/commands/onboard.ts sets shouldRunNow and calls
+# runCommand() in the same process, so it never returns; --run only defaults
+# that to false, and --install-service does not help because
+# detectServiceManager() probes `systemctl --user` and reports "No usable
+# systemd user manager" in a container. Dropping --yes would avoid the run but
+# turn the whole wizard interactive.
+#
+# So: run the .sh, wait until the server reports it is listening (which also
+# means migrations finished - stopping earlier can interrupt one), keep logging
+# until the output goes quiet, then Ctrl+C. The .sh traps that and carries on
+# with its config patches and the CEO invite, which are logged too. supervisord
+# starts the real server later.
+#
+# The .sh passes --yes, and all four onboard prompts are gated on it, so the pty
+# this creates cannot wake one up and stall the boot.
+#
+# Usage: onboard-paperclip.exp [args passed to onboard-paperclip.sh]
+#   ONBOARD_SH              override the script location
+#   ONBOARD_READY_TIMEOUT   seconds to wait for "Server listening"  (default 900)
+#   ONBOARD_QUIET_SECONDS   idle seconds before sending Ctrl+C      (default 15)
+#   ONBOARD_FINISH_TIMEOUT  idle seconds to finish after Ctrl+C     (default 60)
+#
+# Exit: the .sh's own status once it finishes, or non-zero if the server never
+# came up or had to be killed - the caller decides how loud that is.
+
+log_user 1
+match_max 100000
+
+set here [file dirname [file normalize [info script]]]
+set onboard_sh [file join $here onboard-paperclip.sh]
+if {[info exists env(ONBOARD_SH)]} { set onboard_sh $env(ONBOARD_SH) }
+
+# Generous rather than tight: migrations against a cold database are the slow part.
+set ready_timeout 900
+if {[info exists env(ONBOARD_READY_TIMEOUT)]} { set ready_timeout $env(ONBOARD_READY_TIMEOUT) }
+
+# Idle window instead of a fixed sleep: a chatty startup is captured in full, a
+# quiet one costs nothing.
+set quiet_seconds 15
+if {[info exists env(ONBOARD_QUIET_SECONDS)]} { set quiet_seconds $env(ONBOARD_QUIET_SECONDS) }
+
+# The .sh still has the config patches and the CEO invite to do after Ctrl+C.
+set finish_timeout 60
+if {[info exists env(ONBOARD_FINISH_TIMEOUT)]} { set finish_timeout $env(ONBOARD_FINISH_TIMEOUT) }
+
+if {![file exists $onboard_sh]} {
+    puts "\[onboard-paperclip.exp\] ERROR: $onboard_sh not found"
+    exit 2
+}
+
+# Reaped by hand below so the .sh's exit status survives.
+proc reap {pid_unused} {
+    catch wait result
+    if {[info exists result] && [llength $result] >= 4 && [lindex $result 2] == 0} {
+        return [lindex $result 3]
+    }
+    return 1
+}
+
+set pid [spawn -noecho /bin/bash $onboard_sh {*}$argv]
+
+# ------------------------------------------------------------------ ready ---
+# "Server listening" only - the host:port and timestamp prefix both vary
+# (server/src/index.ts logs `Server listening on ${host}:${port}`).
+set timeout $ready_timeout
+set listening 0
+expect {
+    -re {Server listening on [^\r\n]+} {
+        set listening 1
+    }
+    timeout {
+        puts "\n\[onboard-paperclip.exp\] ERROR: no 'Server listening' after ${ready_timeout}s - giving up"
+    }
+    eof {
+        # Finished without ever serving: an early exit (config already exists,
+        # --apply-config, --lock-signup, a failure), or a future CLI that stopped
+        # starting the server here. Its status is the answer either way.
+        set code [reap $pid]
+        puts "\n\[onboard-paperclip.exp\] onboard-paperclip.sh finished on its own (status $code)"
+        exit $code
+    }
+}
+
+# ------------------------------------------------------------------ drain ---
+# log_user echoes everything read, so this only has to keep reading.
+if {$listening} {
+    puts "\n\[onboard-paperclip.exp\] Server is up - logging until quiet for ${quiet_seconds}s"
+    set timeout $quiet_seconds
+    expect {
+        -re {.+} { exp_continue }
+        timeout { }
+        eof {
+            set code [reap $pid]
+            puts "\n\[onboard-paperclip.exp\] onboard-paperclip.sh finished while draining (status $code)"
+            exit $code
+        }
+    }
+}
+
+# ------------------------------------------------------------------- stop ---
+# Ctrl+C through the pty rather than a kill, so it reaches the foreground group
+# the way an operator's would: node has no SIGINT handler and dies, while the
+# .sh traps it and continues with its config patches.
+puts "\n\[onboard-paperclip.exp\] Stopping the onboarding server (Ctrl+C)"
+send \003
+
+# Wait for the .sh to finish the rest of its work. Idle-based again: the patches
+# and the invite take a moment, and killing mid-patch would leave a half-written
+# config behind. Escalation is last-resort only - it takes out the whole process
+# group, the .sh included, so it is followed by a non-zero exit.
+set timeout $finish_timeout
+expect {
+    -re {.+} { exp_continue }
+    eof {
+        set code [reap $pid]
+        if {$listening} {
+            puts "\n\[onboard-paperclip.exp\] Done (status $code)"
+            exit $code
+        }
+        exit 1
+    }
+    timeout {
+        puts "\n\[onboard-paperclip.exp\] No output for ${finish_timeout}s after Ctrl+C - sending SIGTERM to the process group"
+        catch {exec kill -TERM -$pid}
+        set timeout 15
+        expect {
+            eof { }
+            timeout {
+                puts "\[onboard-paperclip.exp\] Still alive - sending SIGKILL"
+                catch {exec kill -KILL -$pid}
+                set timeout 15
+                expect eof
+            }
+        }
+        reap $pid
+        exit 1
+    }
+}

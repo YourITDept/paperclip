@@ -10,6 +10,41 @@ metadata:
 
 # Review and Test Changes — the standing post-merge procedure
 
+> ## RULE 0 — never commit, push, or otherwise check anything in
+>
+> **This is the operator's standing instruction and it overrides any inference
+> you might draw from the task.** It applies to every agent and every session
+> that touches this fork, including onboarding runs, and it is not softened by
+> "the change is small", "the tests pass", "the procedure says to fix it", or
+> the operator having approved a *previous* commit.
+>
+> **Never run:** `git commit`, `git push`, `git merge --commit`, `git rebase`,
+> `git cherry-pick`, `git stash drop`, `git reset --hard`, `gh pr create`,
+> `gh pr merge`, or any command that rewrites history or publishes a branch.
+>
+> **Do instead:** leave every change in the working tree, unstaged, and say
+> plainly which files you touched and why. Then stop.
+>
+> **Why — this is the part worth understanding.** The operator reviews every
+> change **visually in the VS Code IDE**, diff by diff. A commit made for them
+> destroys that review: the diff collapses into history, an agent's edits become
+> indistinguishable from their own, and the one checkpoint that catches a wrong
+> call is gone. Leaving work uncommitted is not caution or ceremony — it is what
+> makes the review possible at all. An agent that commits "to be helpful" has
+> removed the human from the loop.
+>
+> **Ready-to-commit is the deliverable.** Finish the work completely, leave the
+> tree clean of anything unrelated, and hand over a tree the operator can read in
+> the IDE and commit themselves. "I have left N files modified, here is what each
+> one does" is the correct end state — not "committed".
+>
+> **If you believe a commit is genuinely required**, stop and ask, naming the
+> files and the reason. Explicit authorization for one commit authorizes that
+> commit only; it never becomes a standing permission.
+>
+> Generated files count. A regenerated `pnpm-lock.yaml` is still a change the
+> operator reviews and commits, not something to slip in because a tool wrote it.
+
 > **What this file is for.** Every time upstream code is merged into the fork,
 > the same question has to be answered: *did the upstream change break anything
 > the fork carries?* This document is the answer procedure. It is written so
@@ -783,6 +818,151 @@ files. Re-run a suspect suite alone before classifying it.
 > **Numbering note.** The header at the top of this file calls the session log
 > "§7". It is this section, **§8** — §7 is the test procedure. Kept as-is so old
 > cross-references still resolve; read "§7 session log" as this section.
+
+### 2026-08-31 — Session 13: verify the fork on `W5-20260830a` (upstream merge #36)
+
+**Who:** Claude (Opus 5) with chris@anderson-family.com
+**Branch:** `W5-20260830a` @ `28998bf27` — identical content to `W4-20260830c`,
+re-cut into the W5 bucket. Upstream tip `3623a369a`.
+**Scope:** merge #36, seven ACPX commits (#12398–#12404).
+
+**Outcome: the merge broke nothing. Every Session 12 fix survived it.**
+
+#### Session 12's fixes all survived merge #36
+
+| Fix | State |
+| --- | --- |
+| Change set 9 — `OPENROUTER_API_KEY` in the codex allowlist | present |
+| Regression guard in `execute-identity.test.ts` | present, passing |
+| `copyTextToClipboard` in both vault pages | present, zero `navigator.clipboard` left |
+| Vault routes in the OpenAPI coverage exclusions | present |
+| Regenerated lockfile | committed by the operator |
+
+#### What upstream actually changed
+
+**Every upstream change is confined to `packages/paperclip-runner/`, the patches,
+and packaging. Zero fork register files were touched** — confirmed by diffing
+upstream tip to upstream tip (`001428a2d..3623a369a`), which shows
+`acpx-engine/execute.ts` unchanged.
+
+> **Method note worth keeping.** Diffing the *fork tip* against the upstream tip
+> renders the fork's own additions as deletions, which reads like upstream ripped
+> out the fork's code. It does not mean that. Always diff **upstream-tip to
+> upstream-tip** to see what a merge actually brought.
+
+#### OpenRouter — re-verified end to end on this branch
+
+| Check | Result |
+| --- | --- |
+| Launch-env probe, host-env only (the deployment's global setup) | `OPENROUTER_API_KEY` **PRESENT** |
+| Real Codex run against `/sysops/llm/openrouter/default` | `provider: openrouter`, `openai/gpt-5.6-luna`, `PONG`, exit 0 |
+
+#### Finding 8 — stale lockfile, third occurrence (§7.5 #3)
+
+Upstream added `acpx@0.13.1` and `@agentclientprotocol/codex-acp@1.6.2` to
+`patchedDependencies` without regenerating the lockfile. `--frozen-lockfile`
+failed with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`. Fixed with
+`--no-frozen-lockfile`; **all four patches now apply and `embedded-postgres`
+kept its hash** (`55uhvnotpqyiy37rn3pqpukhei`). With that lockfile committed,
+`--frozen-lockfile` succeeds again — verified.
+
+The regenerated lockfile also pulled in **`skillflag@0.2.1`**, a new transitive
+dependency arriving via `acpx@0.13.1`. Recorded because it entered the tree by
+version bump rather than deliberate choice.
+
+#### Finding 9 — the pnpm-10 trap is now half defused
+
+Upstream duplicated `patchedDependencies` into `pnpm-workspace.yaml` but left
+`overrides` in `package.json` only. `builds paperclip.md` §4.1 has been rewritten
+to say which half is safe: patches survive a pnpm-10 bump, `rollup`/`react`/
+`react-dom` overrides still would not.
+
+#### Finding 10 — a patched dependency that the packaging does not carry
+
+`@paperclipai/adapter-codex-local` now depends on
+`@agentclientprotocol/codex-acp: ^1.6.2` and declares **no `bundleDependencies`**,
+so `scripts/pack-local.sh` ships it unpatched — a packed install resolves it from
+the public registry, and `^` can drift off the tested version. The two
+long-standing bundled patches were verified genuinely present *and patched* in
+the deployed tree by marker, not by version:
+
+| Bundled dep | Marker | Deployed tree |
+| --- | --- | --- |
+| `acpx` in `adapter-utils` | `promotePrefixedAuthEnvironment` | patched |
+| `embedded-postgres` in `db` | `LC_MESSAGES` | patched |
+
+Harmless today — the `codex-acp` patch is gated on
+`PAPERCLIP_ACPX_ISOLATED_CONTEXT`, which only the native runner sets and the
+fork's ACP lane never does. It becomes real if upstream ungates it. Recorded in
+`builds paperclip.md` §4.1 as a packaging trap with a marker-based verification
+recipe. **`pack-local.sh` has no verification step of its own** — seven build
+steps, none checking the output.
+
+#### The ACPX "sandbox" is not an OS sandbox — terminology, recorded once
+
+Asked directly this session, and worth pinning because the word is overloaded
+five ways in this tree:
+
+| Layer | What it is | Applies to this deployment |
+| --- | --- | --- |
+| Docker container | real kernel isolation | always |
+| Paperclip execution target | `local` vs `remote`; `transport: "sandbox"` = a remote cloud provider (daytona, e2b, modal, …) | `local` |
+| Paperclip local confinement | real OS confinement via **bwrap** (`--unshare-pid/ipc/uts`, optional `--unshare-net`) | available (`/usr/bin/bwrap`), opt-in, off |
+| Codex CLI's own sandbox | Codex's built-in; the `sandbox: read-only` seen in run output | on by default |
+| ACPX "runtime sandbox" | **not OS isolation** — a private 0700 home directory plus an env allowlist | native runner only, off |
+
+Setting `filesystemScope` or `networkScope` on an agent **silently forces it onto
+the CLI engine** ([`acp.ts:107`](packages/adapters/codex-local/src/server/acp.ts#L107));
+with `engine: "acp"` set explicitly it is a hard error instead.
+
+#### Full suite — all four groups, run to real completion
+
+| Group | Coverage | Tests | Failures |
+| --- | --- | --- | --- |
+| `general-server` | full | 5280 passed | 38 |
+| `general-workspaces-a` | **2 summary blocks** (UI + CLI) | 4825 + 426 | **0** |
+| `general-workspaces-b` | full (12 blocks) | 693 + others | **0** |
+| `serialized` | **140/140 swept, no abort** | **1998 passed** | **1** |
+| `typecheck` | all workspaces | — | clean |
+
+**Every failure classified:**
+
+- **Environmental (38, `general-server`).** Six files: `workspace-runtime*` (ports
+  and HTTPS exposure), `cursor-local-*` (`cursor-agent` absent),
+  `local-service-supervisor`. All carry zero fork delta. §7.5 #4.
+- **Pre-existing upstream flake (1, serialized #60).** `heartbeat-process-recovery`
+  → `reaps orphaned descendant process groups…`, expects 2 heartbeat runs, gets 3.
+  Reproduced on a clean `001428a2d` worktree in Session 12 with no fork code
+  present. Fails on a solo re-run here too, so it is deterministic on this host
+  rather than load-related — but it is upstream's.
+- **Nothing fork-caused.**
+
+**Session 12's two fork fixes are confirmed working by this run:** `openapi-routes`
+(serialized #115) now passes **5/5** — it was the fork-caused failure found when
+the sweep first reached it — and the CLI project runs green, which the clipboard
+fix unblocked. The serialized total moved 1997 → 1998 for exactly that reason.
+
+> **Sweep hygiene — a mistake worth recording.** The first attempt at this
+> sweep was driven by a multi-line *inline* Bash command. Its newlines were
+> collapsed, so `echo "G3_EXIT=$?"` became an argument to vitest and the `rm` of
+> the previous run's results never executed as its own statement. The stale
+> results file from Session 12 was then read as a completed run and briefly
+> reported as this branch's result. **The tell was that it showed
+> `openapi-routes` failing — a bug already fixed and committed.** A result that
+> contradicts a known fix is stale until proven otherwise. Drive the sweep from
+> `serial-sweep.sh` (a file), and check the results file's mtime before quoting
+> it.
+
+#### Documentation updated this session
+
+- **RULE 0** added at the top of this file — never commit, push, or check
+  anything in — with the operator's reason: every diff is reviewed visually in
+  the VS Code IDE, and a commit made for them destroys that review. Cross-linked
+  from `ReverseProxyCustomChanges.md`, `builds paperclip.md`, and
+  `Codex-changes-instructions.md`.
+- `builds paperclip.md` §4.1 rewritten (four patches, dual manifest, the half-
+  defused pnpm-10 trap, the packaging trap and its verification recipe); status
+  line moved to `W5-20260830a`.
 
 ### 2026-08-30 — Session 12: verify the fork on `W4-20260830b` (upstream merges #33, #34, #35)
 
