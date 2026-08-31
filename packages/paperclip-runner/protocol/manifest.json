@@ -30,7 +30,7 @@
     {
       "path": "schemas/event.schema.json",
       "id": "https://paperclip.dev/schemas/prp/v1/event.schema.json",
-      "sha256": "e9827a7c31f004ae91388964a96b4ddf6ab40b85f29bf3922683d5dcf64f2559"
+      "sha256": "d48916630976ff7e850b6e2d7d94131761fda322f5d8a05212651ec46b0db19d"
     },
     {
       "path": "schemas/fixture.schema.json",
@@ -65,12 +65,12 @@
     {
       "path": "schemas/question-set.schema.json",
       "id": "https://paperclip.dev/schemas/prp/v1/question-set.schema.json",
-      "sha256": "3bda40311ae3153bbf9d4a8c59f716680e17d711a4db3570193963918359751c"
+      "sha256": "42b5441a3d388851dacb6e4500dfd4a17d878eded2e724228078b647e7440d3f"
     },
     {
       "path": "schemas/request.schema.json",
       "id": "https://paperclip.dev/schemas/prp/v1/request.schema.json",
-      "sha256": "bd41f01c00eddc1b635d3131a7183ddb616ff8fe68d5e348ddd9593a674c8d8e"
+      "sha256": "c8d00e10150c90963f19641c075f50da7f67617dd817f41b356287ad85c53f2b"
     },
     {
       "path": "schemas/result.schema.json",
@@ -176,10 +176,22 @@
       "compatibilityCase": "canonical"
     },
     {
+      "path": "fixtures/questions/acpx.json",
+      "sha256": "6f1b65d5168b39f4bc821e778901bf077b1df10495f4bc1217b515eca4a339e4",
+      "expectation": "accept",
+      "compatibilityCase": "acpx-structured-input"
+    },
+    {
       "path": "fixtures/questions/codex.json",
-      "sha256": "ad673b6f9d70b74b53656e622d15fad1a66430f39d62b9ef71479d194a198bd6",
+      "sha256": "a02a862b008d8327b4665bbde8ae3b73ad1f8dca7891072b0839b0e84b5920fa",
       "expectation": "accept",
       "compatibilityCase": "codex-structured-input"
+    },
+    {
+      "path": "fixtures/questions/opencode.json",
+      "sha256": "7e5f753d04321f78a38a4362b2a4c7aeacbb4736d4db72a699f23c245884da72",
+      "expectation": "accept",
+      "compatibilityCase": "opencode-structured-input"
     },
     {
       "path": "fixtures/replay/duplicate-event.json",
