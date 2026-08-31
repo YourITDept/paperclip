@@ -548,6 +548,16 @@ const ACPX_INHERITED_PROVIDER_ENV_KEYS: Readonly<Record<string, ReadonlySet<stri
   codex: new Set([
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
+    // Fork-carried: a Codex home may point at an OpenRouter credential vault
+    // (PAPERCLIP_CODEX_HOME / CODEX_HOME -> /sysops/llm/openrouter/<name>),
+    // whose config.toml authenticates with
+    //   [model_providers.openrouter.auth]
+    //   command = "sh"; args = ["-c", 'printf %s "$OPENROUTER_API_KEY"']
+    // That command runs inside the spawned child, so without this key the
+    // token resolves empty and OpenRouter answers 401. Upstream lists the
+    // same key under `pi` but not `codex`, because upstream's Codex lane
+    // never targets a custom model_provider. Ours does.
+    "OPENROUTER_API_KEY",
   ]),
   claude: new Set([
     "ANTHROPIC_API_KEY",

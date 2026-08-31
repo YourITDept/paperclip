@@ -103,6 +103,36 @@ describe("acpx identity split and launch environment", () => {
     expect(true).toBe(true);
   });
 
+  // Fork-carried regression guard. Upstream #12387 introduced the host-env
+  // projection and listed OPENROUTER_API_KEY under `pi` but not `codex`. Our
+  // Codex homes are OpenRouter vaults (PAPERCLIP_CODEX_HOME ->
+  // /sysops/llm/openrouter/<name>) whose config.toml authenticates with
+  //   [model_providers.openrouter.auth]
+  //   command = "sh"; args = ["-c", 'printf %s "$OPENROUTER_API_KEY"']
+  // That command runs inside the spawned child. Verified against the real
+  // vault: without the key the CLI reports `provider auth command \`sh\`
+  // produced an empty token` and OpenRouter answers 401; with it the run
+  // succeeds. The failure is silent at build time, so it is pinned here.
+  it("keeps OPENROUTER_API_KEY reachable by the codex launch environment", () => {
+    const inherited = {
+      PATH: "/usr/bin",
+      OPENROUTER_API_KEY: "openrouter-host-secret",
+    };
+
+    expect(
+      projectAcpxInheritedHostEnvironment(inherited, "codex", true),
+    ).toHaveProperty("OPENROUTER_API_KEY", "openrouter-host-secret");
+
+    // The whole point is the value reaching the spawned child, so assert on the
+    // finished launch environment and not only on the projection helper.
+    const launched = finalizeLaunchEnvironment({}, [], {
+      acpxAgent: "codex",
+      inheritHostEnvironment: true,
+      inheritedEnv: inherited,
+    }) as unknown as { env: Record<string, string> };
+    expect(launched.env.OPENROUTER_API_KEY).toBe("openrouter-host-secret");
+  });
+
   it("inherits only safe host context and the selected provider's credentials", () => {
     const inherited = {
       PATH: "/usr/bin",
@@ -137,6 +167,11 @@ describe("acpx identity split and launch environment", () => {
       LC_ALL: "C.UTF-8",
       HTTPS_PROXY: "https://proxy.example",
       OPENAI_API_KEY: "openai-host-secret",
+      // Fork-carried: our Codex homes are OpenRouter credential vaults, whose
+      // config.toml auth command reads $OPENROUTER_API_KEY inside the child.
+      // Upstream omits it here because upstream's Codex lane never targets a
+      // custom model_provider. Dropping it yields a 401 at run time.
+      OPENROUTER_API_KEY: "openrouter-host-secret",
     });
     expect(projectAcpxInheritedHostEnvironment(inherited, "claude", true)).toEqual({
       PATH: "/usr/bin",

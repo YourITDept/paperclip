@@ -225,6 +225,7 @@ is the list to check against every incoming change.
 | 6 | **Invite auto-accept guard** — `Boolean(invite) &&` as the first term of `shouldAutoAcceptHumanInvite` | [`Reviewing onboarding process and error messages.md`](CustomCodeDoc/Reviewing%20onboarding%20process%20and%20error%20messages.md), and `ReverseProxyCustomChanges.md` §0.1 #1 | `ui/src/pages/InviteLanding.tsx` |
 | 7 | **Startup banner** | — | `server/src/startup-banner.ts` |
 | 8 | **Local packaging scripts** | [`builds paperclip.md`](CustomCodeDoc/builds%20paperclip.md) | `scripts/pack-local.sh`, `scripts/reset-local.sh`, `releases/` |
+| 9 | **`OPENROUTER_API_KEY` in the ACPX `codex` host-env allowlist** — without it an OpenRouter-backed Codex vault gets an empty auth token and a 401 | §8 Session 12, Finding 2 | `packages/adapter-utils/src/acpx-engine/execute.ts` (`ACPX_INHERITED_PROVIDER_ENV_KEYS`), `packages/adapter-utils/src/acpx-engine/execute-identity.test.ts` |
 
 ### 4.1 The three files where fork and upstream both edit
 
@@ -236,6 +237,17 @@ are almost always kept:
   `PAPERCLIP_CODEX_HOME` resolution and its provenance log line.
 - `packages/adapters/codex-local/src/server/execute.ts` — the same override on
   the Codex CLI lane.
+
+A fourth collision point was added in Session 12:
+`server/src/__tests__/openapi-routes.test.ts` — the fork's `codex-vaults.ts` and
+`claude-vaults.ts` entries in `explicitOpenApiCoverageExclusions`. An upstream
+rewrite of that set drops them silently and the suite goes red naming both files.
+
+Change set 9 lives in the first of these too: the fork's `OPENROUTER_API_KEY`
+entry sits inside upstream's `ACPX_INHERITED_PROVIDER_ENV_KEYS` table, so an
+upstream edit to that table is a likely conflict — and, worse, a *silent* loss if
+upstream rewrites the table wholesale. The regression guard in
+`execute-identity.test.ts` is what turns that into a red test instead of a 401.
 
 ---
 
@@ -409,7 +421,7 @@ grep -n "codexVault\|claudeVault" server/src/app.ts server/src/routes/index.ts
 
 ```bash
 SC=/tmp/paperclip-tests; mkdir -p $SC
-CLEAN="env -u PAPERCLIP_CODEX_HOME -u PAPERCLIP_PUBLIC_URL"      # see 7.5 #2
+CLEAN="env -u PAPERCLIP_CODEX_HOME -u PAPERCLIP_PUBLIC_URL -u PAPERCLIP_TELEMETRY_DISABLED"  # see 7.5 #2
 
 corepack pnpm --filter @paperclipai/plugin-sdk ensure-build-deps  # see 7.5 #1
 
@@ -447,6 +459,65 @@ Budget ~30 min for `general-server` alone.
 >
 > The tell is the log: one `[test:run]` banner line means one group ran. Four
 > banner lines means the suite actually completed.
+>
+> #### It also masks *projects within* a group — not just later groups
+>
+> Discovered 2026-08-30 (Session 12), and it changes how a group's numbers must
+> be read. `general-workspaces-a` contains **two** vitest projects,
+> `@paperclipai/ui` and `paperclipai` (the CLI). They report separate summary
+> blocks, and the abort applies between them too: when the UI project failed,
+> the run exited and **the CLI project never executed at all** — 0 of its 426
+> tests. The group still printed a confident-looking
+> `Test Files 1 failed | 503 passed` line, which is the UI project alone.
+>
+> That number is not the group. Fixing the single UI failure revealed a CLI
+> failure (§7.5 #2b-2) that had been invisible for an unknown number of sessions.
+>
+> **Count the summary blocks, not just the banners.** `general-workspaces-a`
+> must print **two** `Test Files` blocks. One block means a project was skipped
+> and the group's result is incomplete, however green it looks:
+>
+> ```bash
+> grep -cE '^ Test Files' $SC/g2.log     # expect 2 for general-workspaces-a
+> ```
+>
+> #### `--mode serialized` is the worst case: it truncates per *file*
+>
+> [`runSerializedSuites`](scripts/run-vitest-stable.mjs#L380) loops the 140
+> suites calling `runVitest` **once per file**, and `runVitest` exits the process
+> on any non-zero status. **One failing suite therefore abandons every suite
+> after it**, in `localeCompare` order.
+>
+> Measured 2026-08-30 (Session 12): the group stopped at
+> `heartbeat-process-recovery.test.ts`, which is suite **60 of 140**. The other
+> **80 suites (57%) never ran** — and the group's printed
+> `Tests 1 failed | 110 passed` is only that last file's tally, not the group's.
+> A reader who takes that line as the serialized result overstates coverage by
+> more than half.
+>
+> **Get the real list and the real coverage:**
+>
+> ```bash
+> # the authoritative 140-suite list, straight from the runner
+> node scripts/run-vitest-stable.mjs --mode serialized --dry-run \
+>   | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>\
+>       console.log(JSON.parse(s).selectedSerializedSuites.join("\n")))' \
+>   > /tmp/serial-files.txt
+>
+> # run every one in its own process, WITHOUT the abort
+> while IFS= read -r f; do
+>   $CLEAN corepack pnpm exec vitest run --project @paperclipai/server \
+>     "$f" --pool=forks --isolate > "/tmp/logs/$(echo "$f" | tr / _).log" 2>&1
+>   printf '%s\t%s\n' "$?" "$f" >> /tmp/serial-results.tsv
+> done < /tmp/serial-files.txt
+> ```
+>
+> `--shard-index`/`--shard-count` do **not** solve this: each shard still aborts
+> on its own first failure. Sharding narrows the loss, it does not remove it.
+>
+> **Consequence for this document.** Every serialized result recorded before
+> Session 12 was truncated at its first failure by an unrecorded amount. Treat
+> pre-Session-12 serialized tallies as lower bounds, not coverage.
 
 
 `scripts/run-vitest-stable.mjs` splits the work rather than running one flat
@@ -491,7 +562,24 @@ corepack pnpm exec vitest run ui/src/lib/new-agent-preset.test.ts ui/src/pages/N
 
 # change set 6 — invite auto-accept guard (18/18 expected)
 corepack pnpm exec vitest run ui/src/pages/InviteLanding.test.tsx
+
+# change set 9 — OPENROUTER_API_KEY reaches the codex launch env (9/9 expected)
+corepack pnpm exec vitest run \
+  packages/adapter-utils/src/acpx-engine/execute-identity.test.ts
 ```
+
+**Change set 9 has an out-of-band check too**, because the failure is a runtime
+401 rather than a type error. Against the real vault:
+
+```bash
+CODEX_HOME=/sysops/llm/openrouter/default \
+  /vhome/paperclip/node_modules/.bin/codex exec --skip-git-repo-check \
+  "Reply with exactly: PONG"
+```
+
+Expect `provider: openrouter` and `PONG`. Re-run it with
+`env -u OPENROUTER_API_KEY` to see the failure mode the allowlist entry prevents:
+`provider auth command 'sh' produced an empty token`, then `401 Unauthorized`.
 
 ### 7.3 Typecheck
 
@@ -605,12 +693,36 @@ both say *"no public URL is configured"*.
 
 Verified: with the variable cleared, all 30 OAuth cases in that file pass.
 
+##### 2b-2. `PAPERCLIP_TELEMETRY_DISABLED` — the CLI telemetry suite
+
+Found 2026-08-30 (Session 12), and the first one found in the **CLI** package
+rather than the server. `cli/src/__tests__/telemetry.test.ts` →
+`creates telemetry state only after the first event is tracked` asserts
+`expect(client).not.toBeNull()`, but
+[`shared/src/telemetry/config.ts:71`](packages/shared/src/telemetry/config.ts#L71)
+returns `{ enabled: false }` whenever `PAPERCLIP_TELEMETRY_DISABLED === "1"`, so
+`initTelemetry({ enabled: true })` hands back `null`.
+
+The suite's `beforeEach` **does** scrub the environment — but only the five CI
+variables (`CI`, `CONTINUOUS_INTEGRATION`, `BUILD_NUMBER`, `GITHUB_ACTIONS`,
+`GITLAB_CI`). The container exports `PAPERCLIP_TELEMETRY_DISABLED`, which is not
+on that list. The tell is the assertion message: `expected null not to be null`.
+
+Verified: with the variable cleared, both cases pass.
+
 ##### 2c. Treat this as a class, not two bugs
 
 The container exports ~24 `PAPERCLIP_*` variables for the live deployment and the
-suite assumes a clean environment. Two have bitten so far; `PAPERCLIP_DEPLOYMENT_MODE=authenticated`,
+suite assumes a clean environment. **Three have bitten so far** —
+`PAPERCLIP_CODEX_HOME`, `PAPERCLIP_PUBLIC_URL`, and now
+`PAPERCLIP_TELEMETRY_DISABLED`. `PAPERCLIP_DEPLOYMENT_MODE=authenticated`,
 `PAPERCLIP_PROXY_AUTH_ENABLED=true`, `PAPERCLIP_ALLOWED_HOSTNAMES` and
-`PAPERCLIP_CONFIG` are plausible next candidates.
+`PAPERCLIP_CONFIG` remain plausible next candidates.
+
+> The third one is the reason to read this as a standing class rather than a
+> list. It was not on the predicted-candidates list above, it lives in a
+> different workspace package from the first two, and it surfaced only once an
+> unrelated fix stopped masking its project (§7.1). Assume more exist.
 
 Upstream already knows the class exists — [`run-vitest-stable.mjs:287`](scripts/run-vitest-stable.mjs#L287)
 explicitly overrides `PAPERCLIP_HOME` and `TMPDIR` to sandbox paths before
@@ -667,3 +779,275 @@ files. Re-run a suspect suite alone before classifying it.
 
 ## 8. Session log — append only
 
+
+> **Numbering note.** The header at the top of this file calls the session log
+> "§7". It is this section, **§8** — §7 is the test procedure. Kept as-is so old
+> cross-references still resolve; read "§7 session log" as this section.
+
+### 2026-08-30 — Session 12: verify the fork on `W4-20260830b` (upstream merges #33, #34, #35)
+
+**Who:** Claude (Opus 5) with chris@anderson-family.com
+**Branch:** `W4-20260830b` @ `a32055fd3`, upstream tip `001428a2d`.
+**Scope:** the branch carries merges #33/#34/#35 on top of the last recorded
+verification (Session 11, `W4-20260828b`, merge #29) — 111 non-merge commits.
+The merge was already committed via the GitHub PR route; no local merge was
+needed and **nothing was re-applied** (the §6.3 ancestor check case).
+
+**Outcome: the merge broke nothing the fork carries, but it did break OpenRouter,
+and it exposed a latent fork bug that had never been run.**
+
+#### What came in
+
+37 of the incoming commits are one upstream campaign: a native **`paperclip-runner`**
+package plus an **ACPX profile boundary**. This is the §6.4 question-3 case —
+upstream building its own version of ground the fork already occupies.
+
+#### Register check (§4) — all intact
+
+All 30 register files present. All three §4.1 collision files kept both sides.
+All five `resolveManagedCodexHomeOverride` read sites present (line numbers have
+drifted from `Codex-changes-instructions.md` §3A.3: heartbeat 1190→1337,
+acpx-engine 1036→1217, codex-local execute 646→651). Only one register file was
+touched by the incoming commits — `acpx-engine/execute.ts`, by #12387, purely
+additive and nowhere near the fork's block.
+
+| Change set | Suite | Result |
+| --- | --- | --- |
+| 1 reverse-proxy auth | 3 files | 28/28 |
+| 2 `PAPERCLIP_CODEX_HOME` | `codex-home` + `server-utils` | 171/171 |
+| 3+4 credential vaults | 4 files | 83/83 |
+| 5 create-agent-from-vault | 2 files | 18/18 |
+| 6 invite auto-accept guard | `InviteLanding` | 18/18 |
+| `pnpm run typecheck` | all workspaces | clean, exit 0 |
+
+#### Full suite — all four groups run to completion
+
+| Group | Tests | Failures |
+| --- | --- | --- |
+| `general-server` | 5279 passed | 39 |
+| `general-workspaces-a` | 4824 passed (UI only — see below) | 1 |
+| `general-workspaces-b` | 73 passed | 0 |
+| `serialized` | **truncated at suite 60 of 140** — see Finding 6 | 1 |
+
+**Known-failure classification (§7.4):**
+
+- **Environmental (36).** `workspace-runtime*` (32, ports/HTTPS exposure; one
+  took 74 s), `cursor-local-*` (3, `cursor-agent` absent), `local-service-supervisor`
+  (1), `plugin-worker-manager-duplex` (1, `DUPLEX_CHANNEL_OPEN_FAILED`). All seven
+  files carry **zero** fork delta. Matches §7.5 #4.
+- **Pre-existing upstream, flaky (1).** `heartbeat-process-recovery` →
+  `reaps orphaned descendant process groups…` expects 2 heartbeat runs, gets 3.
+  **Reproduced on a clean `001428a2d` worktree** with no fork code (passed run 1,
+  failed run 2 — it is nondeterministic on this host, so a single green run is not
+  evidence). Not ours.
+- **Fork-caused (1) — fixed this session.** See Finding 3.
+
+> **Two of the four rows above are incomplete, and that is Finding 6.** The
+> abort-on-first-failure in `run-vitest-stable.mjs` fires *inside* a group, not
+> only between groups:
+>
+> - `general-workspaces-a` holds two vitest projects. The UI failure aborted the
+>   run before the `paperclipai` CLI project started, so 426 CLI tests never
+>   executed and "4824 passed" is the UI project alone.
+> - `serialized` loops **per file**. It stopped at suite 60 of 140, so 80 suites
+>   never ran, and "110 passed" is only the last file's tally.
+>
+> Both were re-run to real completion afterwards. See Finding 6.
+
+#### Finding 1 — upstream stale lockfile, patch-hash variant (§7.5 #3 recurrence)
+
+`--frozen-lockfile` failed with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`. Cause:
+`0834a0c1f` (#12387) edited `patches/acpx@0.12.0.patch` **without regenerating
+`pnpm-lock.yaml`**. The fork has zero delta on `package.json`, `pnpm-lock.yaml`
+and `patches/`, so this is purely upstream's. Fixed with the documented
+`corepack pnpm install --no-frozen-lockfile`; the delta is 3 lines (the acpx
+hash only). `embedded-postgres` hash unchanged at
+`55uhvnotpqyiy37rn3pqpukhei`, so the database suites' patch is unaffected.
+
+> **New sub-case for §7.5 #3.** The trap previously described only *specifier*
+> drift. A changed **patch file** produces the same class of failure with a
+> different error string. Same answer.
+
+#### Finding 2 — OpenRouter broken on the ACP lane (new fork-carried fix)
+
+**Symptom:** Codex agents backed by the OpenRouter vault fail with
+`provider auth command 'sh' produced an empty token` → `401 Unauthorized`.
+
+**Cause:** #12387 added `projectAcpxInheritedHostEnvironment()` to the *shared*
+ACP lane — a per-agent allowlist applied to the host env before the child spawn.
+Before it, the lane spawned with `{ ...process.env, ...env }` (full passthrough).
+`ACPX_INHERITED_PROVIDER_ENV_KEYS.codex` listed `OPENAI_API_KEY` and
+`CODEX_API_KEY` but **not** `OPENROUTER_API_KEY` — upstream lists that key only
+under `pi`, because upstream's Codex lane never targets a custom `model_provider`.
+Ours does: `/sysops/llm/openrouter/default/config.toml` authenticates with
+`command = "sh"; args = ["-c", 'printf %s "$OPENROUTER_API_KEY"']`, and that
+command runs **inside the spawned child**.
+
+`codex-local/src/server/acp.ts:161` sets `agent: "codex"`, so the Codex ACP lane
+lands in exactly the wrong bucket. The CLI lane is **unaffected** —
+`codex-local/src/server/execute.ts:1025` still does full passthrough.
+
+**Verified against the real vault**, not by reading alone:
+
+| Child env | Result |
+| --- | --- |
+| key absent (what the merged ACP lane produced) | `empty token` → 401 |
+| key present | provider `openrouter`, model `openai/gpt-5.6-luna`, reply `PONG`, exit 0 |
+
+**Fix (operator's choice, 2026-08-30): the one-line allowlist patch.** Adds
+`OPENROUTER_API_KEY` to the `codex` set. Restores the existing global
+deployment model with no per-agent configuration.
+
+**This is a new fork-carried change — register it as change set 9** (see §4).
+It lives in a §4.1 collision file, so expect it to need re-applying.
+
+The rejected alternative remains valid as a migration target: adapter/agent
+config env is merged **after** the projection and is never filtered
+(`isForbiddenConfigEnvKey` blocks only `PAPERCLIP_API_KEY`), so binding
+`OPENROUTER_API_KEY` as a company secret on each agent also works and carries no
+fork patch. Retire change set 9 if that migration ever completes.
+
+> **Also note:** `startup-banner.ts:138` reads `OPENROUTER_API_KEY` from the
+> **server's** env, so the banner printed green throughout this outage. It is not
+> evidence the key reaches an agent.
+
+#### Finding 3 — fork-caused clipboard bug (pre-existing, fixed)
+
+`ui/src/lib/clipboard-usage.test.ts` flagged `InstanceCodexVaults.tsx` and
+`InstanceClaudeVaults.tsx` for calling `navigator.clipboard.writeText` directly
+instead of `copyTextToClipboard` from `ui/src/lib/clipboard.ts`.
+
+**Not caused by this merge** — the guard test dates to #10875 and both pages
+violated it on `W4-20260828b` too. It had never been *seen* because
+`general-workspaces-a` had never run to completion: this is the §7.1 `test:run`
+trap, and this session is the first time the fork's own UI group finished.
+
+It is a real bug, not a lint. The helper exists precisely because on a
+non-secure context — which is what the fork's reverse-proxied deployment is —
+`navigator.clipboard.writeText` can resolve **without copying** while the toast
+reports success. These two pages exist to hand operators device-login codes.
+
+Fixed: both now call `copyTextToClipboard`.
+
+#### Finding 4 — convergence risk to record, no action yet
+
+Upstream's new `packages/paperclip-runner` carries its own Codex/ACPX lane whose
+sandbox sets `CODEX_HOME` (and, for Claude, `CLAUDE_CONFIG_DIR`) to a
+sandbox-owned directory unconditionally, and whose env sanitizer
+(`drivers/acpx/environment.ts`) strips everything outside a fixed allowlist
+containing neither `PAPERCLIP_CODEX_HOME` nor `CODEX_HOME`.
+
+**Change sets 2, 3 and 4 would silently not apply to that lane.** Nothing is
+broken today: the lane needs `adapterType === "paperclip_runner"` *and* an enable
+flag that defaults to `false` (`routes/adapters.ts:285`), and `paperclip_runner`
+is force-added to the disabled set otherwise. Re-check this on every merge — if
+that flag ever defaults on, the vault features stop applying without any test
+going red.
+
+#### Finding 5 — a third `PAPERCLIP_*` env leak (§7.5 #2 class)
+
+Revealed once Finding 3's fix stopped masking the CLI project.
+`cli/src/__tests__/telemetry.test.ts` →
+`creates telemetry state only after the first event is tracked` fails with
+`expected null not to be null`: the container exports
+`PAPERCLIP_TELEMETRY_DISABLED`, `resolveTelemetryConfig()` short-circuits to
+`{ enabled: false }`, and `initTelemetry()` returns `null`. The suite scrubs the
+five CI variables but not this one.
+
+Environmental, not ours — zero fork delta, and it passes 2/2 with the variable
+cleared. **The standard `CLEAN` prefix in §7.1 now clears it**, and §7.5 gained
+sub-section 2b-2. This is the third confirmed member of a class the doc already
+predicted would grow; it was not on the predicted list and it lives in a
+different workspace package from the first two.
+
+#### Finding 6 — the suite has been under-running for an unknown number of sessions
+
+The §7.1 trap was known to stop *later groups*. It also stops work **inside** a
+group, which was not known and which invalidates part of this session's own
+first-pass numbers:
+
+| Group | Believed | Actual |
+| --- | --- | --- |
+| `general-workspaces-a` | 4825 tests, 1 failure | UI project only; the `paperclipai` CLI project (59 files, 426 tests) **never started** |
+| `serialized` | "110 passed, 1 failed" | stopped at suite **60 of 140**; **80 suites never ran**, and the quoted line is one file's tally |
+
+Mechanism: [`runVitest`](scripts/run-vitest-stable.mjs#L298) calls
+`process.exit()` on any non-zero status.
+[`runProjectGroup`](scripts/run-vitest-stable.mjs#L309) loops *projects* through
+it and [`runSerializedSuites`](scripts/run-vitest-stable.mjs#L380) loops
+*individual files* through it. So the blast radius is: first failing group kills
+later groups, first failing project kills later projects, first failing
+serialized suite kills the remaining ~half of the serialized lane.
+
+This is why both new failures this session appeared only *after* an unrelated
+fix: each fix unblocked a lane that had never executed. Finding 5 had been
+sitting behind the clipboard bug.
+
+**Re-run to real completion after the fixes:**
+
+- `general-workspaces-a`: **two** summary blocks, UI 504/504 (4825 tests) and
+  CLI 59/59 (426 tests), exit 0.
+- `serialized`: swept all 140 suites one process each with the abort removed
+  (recipe now in the §7.1 trap box).
+
+§7.1 gained a documented detection recipe and the no-abort sweep. **Treat every
+serialized tally recorded before this session as a lower bound, not coverage.**
+
+#### Finding 7 — fork routes missing from the OpenAPI coverage guard (fork-caused, fixed)
+
+**Found only because Finding 6's sweep reached it.** `openapi-routes.test.ts` →
+`covers the mounted server routes exactly` is serialized suite **#115**, i.e. 55
+suites past the abort point. It has never run in any recorded session.
+
+`loadActualRoutes()` walks `server/src/routes/*.ts` and requires every file
+containing a `router.<method>(` to be either in the test's `apiPrefixes` map
+(and then fully present in the OpenAPI document) or in
+`explicitOpenApiCoverageExclusions`. The fork's `codex-vaults.ts` and
+`claude-vaults.ts` are in neither, so they land in `unknownRouteFiles`:
+
+```
+- unknownRouteFiles: []
++ unknownRouteFiles: ["claude-vaults.ts", "codex-vaults.ts"]
+```
+
+**Fixed by excluding them, not by documenting them.** The OpenAPI document is
+upstream's published public contract; these are unpublished, fork-private,
+instance-admin endpoints. That is the same rationale the existing entries
+(`pipelines.ts`, `cases.ts`, `smoke-lab.ts`) carry. Verified 5/5.
+
+**This is a fork-carried edit in an upstream test file — a new collision point.**
+If upstream rewrites that exclusion set, the fork's two lines vanish and this
+suite goes red again with the diff above. That diff *is* the tell; it names the
+two files directly.
+
+#### Full serialized coverage — the real number
+
+After removing the abort (§7.1 recipe), all **140** suites ran:
+
+| | |
+| --- | --- |
+| Suites run | 140 / 140 |
+| Tests | **1997 passed, 2 failed** |
+| `heartbeat-process-recovery` (#60) | pre-existing upstream flake — reproduced on a clean `001428a2d` worktree |
+| `openapi-routes` (#115) | fork-caused, **fixed this session** (Finding 7) |
+
+The previously-recorded serialized figure for this branch was "110 passed, 1
+failed". The real figure is 1997 tests across 140 suites. That gap is the size of
+the Finding 6 blind spot.
+
+#### Changes left in the working tree (uncommitted, per §5.4)
+
+| File | Change |
+| --- | --- |
+| `pnpm-lock.yaml` | regenerated acpx patch hash (Finding 1) |
+| `packages/adapter-utils/src/acpx-engine/execute.ts` | `OPENROUTER_API_KEY` in the `codex` allowlist (Finding 2) |
+| `packages/adapter-utils/src/acpx-engine/execute-identity.test.ts` | fork-owned expectation + regression guard (Finding 2) |
+| `ui/src/pages/InstanceCodexVaults.tsx` | `copyTextToClipboard` (Finding 3) |
+| `ui/src/pages/InstanceClaudeVaults.tsx` | `copyTextToClipboard` (Finding 3) |
+| `server/src/__tests__/openapi-routes.test.ts` | vault routes added to the OpenAPI coverage exclusions (Finding 7) |
+
+Post-fix verification: `typecheck` clean; `adapter-utils` 1021/1021;
+`codex-local` + `claude-local` 654/655 (1 skipped); fork change sets 280/280;
+`clipboard-usage` green; `openapi-routes` 5/5;
+`general-workspaces-a` fully green across **both** projects (UI 4825, CLI 426);
+serialized swept 140/140 → 1997 passed, 1 failing (the upstream flake).

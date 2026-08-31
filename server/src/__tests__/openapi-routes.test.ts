@@ -73,6 +73,12 @@ const explicitOpenApiCoverageExclusions = new Set([
   "cases.ts",
   // Smoke lab routes are experimental and not yet represented in the public OpenAPI document.
   "smoke-lab.ts",
+  // Fork-carried: the Codex/Claude credential-vault routes are instance-admin
+  // endpoints this fork adds (CustomCodeDoc §4 change sets 3 and 4). They are
+  // deliberately absent from the public OpenAPI document — that document is
+  // upstream's published contract, and these routes are ours and unpublished.
+  "codex-vaults.ts",
+  "claude-vaults.ts",
 ]);
 
 // The set of contract-first routes whose OpenAPI document leads the mounted

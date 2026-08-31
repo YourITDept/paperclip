@@ -31,6 +31,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { CreateAgentFromLoginButton } from "@/components/CreateAgentFromLoginButton";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { cn } from "../lib/utils";
@@ -90,7 +91,7 @@ function CopyButton({ value, label = "Copy" }: { value: string; label?: string }
       variant="outline"
       size="sm"
       onClick={() => {
-        void navigator.clipboard?.writeText(value).then(
+        void copyTextToClipboard(value).then(
           () => {
             setCopied(true);
             setTimeout(() => setCopied(false), 1600);
