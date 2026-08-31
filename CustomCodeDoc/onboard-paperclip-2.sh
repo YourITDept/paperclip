@@ -283,6 +283,31 @@ run() {
 
 # --------------------------------------------------------------- preflight --
 step 0/6 "Preflight"
+
+# An unclaimed instance has no instance_admin, and company creation then fails
+# with "Creating companies requires board/instance-admin authentication" — a
+# message that points at agent API keys and sends you the wrong way entirely.
+# Check the real precondition first, and fix it, rather than failing at 1/6.
+BOOTSTRAP="$(curl -fsS --max-time 5 "${PAPERCLIP_API_URL%/}/api/health" 2>/dev/null \
+  | jq -r '.bootstrapStatus // "unknown"' 2>/dev/null || echo unreachable)"
+if [ "$BOOTSTRAP" = "unreachable" ]; then
+  die "cannot reach ${PAPERCLIP_API_URL%/}/api/health — is the server running?
+         Start it (supervisorctl/systemd), then re-run."
+fi
+if [ "$BOOTSTRAP" = "bootstrap_pending" ]; then
+  info "instance is unclaimed (bootstrapStatus=bootstrap_pending)"
+  [ -n "$OWNER_EMAIL" ] || die "an unclaimed instance needs --owner-email to claim it"
+  CLAIMER="$(dirname "$0")/onboard-paperclip-1.sh"
+  if [ -x "$CLAIMER" ]; then
+    info "claiming instance_admin for $OWNER_EMAIL ..."
+    "$CLAIMER" --claim-admin --owner-email "$OWNER_EMAIL" || \
+      die "could not claim instance_admin — see the message above"
+  else
+    die "instance is unclaimed and $CLAIMER is missing.
+         Run: ./onboard-paperclip-1.sh --claim-admin --owner-email $OWNER_EMAIL"
+  fi
+fi
+
 WHOAMI="$("${PC[@]}" access whoami --json 2>/dev/null || true)"
 [ -n "$WHOAMI" ] || die "access whoami failed — PAPERCLIP_API_KEY is missing, wrong, or the server is down.
          Every later step would fail as a confusing 401. Fix the token first."
@@ -306,7 +331,7 @@ COMPANY_ID=""
 if want company; then
   step 1/6 "Company '$COMPANY_NAME'"
   COMPANY_ID="$("${PC[@]}" company list --json 2>/dev/null \
-    | jq -r --arg n "$COMPANY_NAME" 'if type=="array" then . else (.items // []) end
+    | jq -r --arg n "$COMPANY_NAME" 'if type=="array" then . else (.items // .invites // .companies // .agents // .secrets // []) end
         | map(select(.name == $n)) | .[0].id // empty')"
   if [ -n "$COMPANY_ID" ]; then
     info "exists: $COMPANY_ID"
@@ -322,7 +347,7 @@ if want company; then
   fi
 else
   COMPANY_ID="$("${PC[@]}" company list --json 2>/dev/null \
-    | jq -r --arg n "$COMPANY_NAME" 'if type=="array" then . else (.items // []) end
+    | jq -r --arg n "$COMPANY_NAME" 'if type=="array" then . else (.items // .invites // .companies // .agents // .secrets // []) end
         | map(select(.name == $n)) | .[0].id // empty')"
   [ -n "$COMPANY_ID" ] || die "company '$COMPANY_NAME' not found and --only excluded creating it"
 fi
@@ -332,7 +357,7 @@ SECRET_ID=""
 if want secrets; then
   step 2/6 "Secret '$SECRET_NAME'"
   SECRET_ID="$("${PC[@]}" secrets list -C "$COMPANY_ID" --json 2>/dev/null \
-    | jq -r --arg k "$SECRET_KEY" 'if type=="array" then . else (.items // []) end
+    | jq -r --arg k "$SECRET_KEY" 'if type=="array" then . else (.items // .invites // .companies // .agents // .secrets // []) end
         | map(select(.key == $k)) | .[0].id // empty')"
   if [ -n "$SECRET_ID" ]; then
     info "exists: $SECRET_ID  (rotate with: paperclipai secrets rotate)"
@@ -357,7 +382,7 @@ AGENT_ID=""
 if want agent; then
   step 3/6 "Agent '$AGENT_NAME'"
   AGENT_ID="$("${PC[@]}" agent list -C "$COMPANY_ID" --json 2>/dev/null \
-    | jq -r --arg n "$AGENT_NAME" 'if type=="array" then . else (.items // []) end
+    | jq -r --arg n "$AGENT_NAME" 'if type=="array" then . else (.items // .invites // .companies // .agents // .secrets // []) end
         | map(select(.name == $n)) | .[0].id // empty')"
   if [ -n "$AGENT_ID" ]; then
     info "exists: $AGENT_ID"
@@ -462,16 +487,16 @@ fi
 # ------------------------------------------------------------------ verify --
 step 6/6 "Verify"
 info "company:  $("${PC[@]}" company list --json 2>/dev/null | jq -r --arg n "$COMPANY_NAME" \
-  'if type=="array" then . else (.items // []) end | map(select(.name==$n)) | length') match(es) for '$COMPANY_NAME'"
+  'if type=="array" then . else (.items // .invites // .companies // .agents // .secrets // []) end | map(select(.name==$n)) | length') match(es) for '$COMPANY_NAME'"
 if want secrets; then
   "${PC[@]}" secrets doctor -C "$COMPANY_ID" > /dev/null 2>&1 \
     && info "secrets: doctor clean" \
     || info "secrets: doctor reported findings — run: paperclipai secrets doctor -C $COMPANY_ID"
 fi
 info "agents:   $("${PC[@]}" agent list -C "$COMPANY_ID" --json 2>/dev/null | jq -r \
-  'if type=="array" then . else (.items // []) end | length')"
+  'if type=="array" then . else (.items // .invites // .companies // .agents // .secrets // []) end | length')"
 info "invites:  $("${PC[@]}" invite list -C "$COMPANY_ID" --json 2>/dev/null | jq -r \
-  'if type=="array" then . else (.items // []) end | length') outstanding"
+  'if type=="array" then . else (.items // .invites // .companies // .agents // .secrets // []) end | length') outstanding"
 
 cat <<EOF
 

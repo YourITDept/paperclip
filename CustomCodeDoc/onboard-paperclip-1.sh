@@ -23,11 +23,19 @@ set -euo pipefail
 
 MODE="onboard"
 FORCE_LOCK=false
+WAIT_FOR_READY=false
+CLAIM_EMAIL="${ONBOARD_OWNER_EMAIL:-}"
+WAIT_TIMEOUT="${ONBOARD_WAIT_TIMEOUT:-120}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --lock-signup) MODE="lock-signup"; shift ;;
     --apply-config) MODE="apply-config"; shift ;;
     --force) FORCE_LOCK=true; shift ;;
+    --wait) WAIT_FOR_READY=true; shift ;;
+    --status) MODE="status"; shift ;;
+    --claim-admin) MODE="claim-admin"; shift ;;
+    --owner-email) CLAIM_EMAIL="${2:?--owner-email needs a value}"; shift 2 ;;
+    --timeout) WAIT_TIMEOUT="${2:?--timeout needs a value}"; shift 2 ;;
     -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -256,6 +264,126 @@ if [ "$MODE" = "apply-config" ]; then
   exit 0
 fi
 
+# --------------------------------------------------- health / claim helpers --
+# /api/health is unauthenticated and reports bootstrapStatus:
+#   "bootstrap_pending" -> no instance_admin exists yet
+#   "ready"             -> one does; script 2 can run
+# That field is the contract between this script and onboard-paperclip-2.sh.
+LOCAL_API="http://127.0.0.1:$PORT"
+
+health_field() {
+  local field="$1" json
+  json="$(curl -fsS --max-time 5 "$LOCAL_API/api/health" 2>/dev/null || true)"
+  [ -n "$json" ] || { printf 'unreachable'; return; }
+  printf '%s' "$json" | node -e '
+    let raw = ""; const f = process.argv[1];
+    process.stdin.on("data", (d) => { raw += d; });
+    process.stdin.on("end", () => {
+      try { process.stdout.write(String(JSON.parse(raw)[f] ?? "unknown")); }
+      catch { process.stdout.write("unknown"); }
+    });
+  ' "$field" 2>/dev/null || printf 'unknown'
+}
+
+wait_for_server() {
+  local deadline=$(( $(date +%s) + WAIT_TIMEOUT )) status
+  echo "Waiting up to ${WAIT_TIMEOUT}s for the server on $LOCAL_API ..."
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    status="$(health_field status)"
+    if [ "$status" = "ok" ]; then
+      echo "  server is up (bootstrapStatus=$(health_field bootstrapStatus))"
+      return 0
+    fi
+    sleep 2
+  done
+  echo "  server did not become healthy within ${WAIT_TIMEOUT}s (last status: ${status:-unreachable})" >&2
+  return 1
+}
+
+# Grant instance_admin without a browser.
+#
+# This is the headless equivalent of the browser claim route. It is safe to do
+# in SQL because claimFirstInstanceAdmin (server/src/first-admin-claim.ts) does
+# exactly one thing: insert a single instance_user_roles row, only when no
+# instance_admin exists. There are no memberships or grants to keep in step.
+# The NOT EXISTS makes it idempotent and preserves first-come-first-served.
+#
+# The user row itself is created by proxy-header auth: one authenticated GET
+# with the user header auto-provisions it when
+# PAPERCLIP_PROXY_AUTH_AUTO_PROVISION=true. Letting the app do that keeps
+# schema knowledge for `user` out of this script.
+claim_admin() {
+  local email="$1"
+  [ -n "$email" ] || { echo "claim-admin needs --owner-email" >&2; return 1; }
+  command -v psql > /dev/null 2>&1 || { echo "psql is required for --claim-admin" >&2; return 1; }
+
+  local cs
+  cs="$(node -e "
+    try { const c = require('$CONFIG_PATH');
+      process.stdout.write(c.database?.connectionString ?? ''); } catch { process.stdout.write(''); }
+  ")"
+  [ -n "$cs" ] || { echo "no database connectionString in $CONFIG_PATH" >&2; return 1; }
+
+  local hdr="${PAPERCLIP_PROXY_AUTH_USER_HEADER:-x-forwarded-user}"
+  if [ "${PAPERCLIP_PROXY_AUTH_ENABLED:-}" != "true" ]; then
+    echo "PAPERCLIP_PROXY_AUTH_ENABLED is not 'true'; cannot auto-provision '$email'." >&2
+    echo "  Enable proxy auth, or create the account another way first." >&2
+    return 1
+  fi
+
+  # Provision the user. Any authenticated route runs the actor middleware; the
+  # response code does not matter, only that the header was seen.
+  curl -sS -o /dev/null --max-time 10 "$LOCAL_API/api/companies" -H "$hdr: $email" || true
+
+  local uid
+  uid="$(psql "$cs" -tAc "select id from \"user\" where lower(email) = lower('$email') limit 1;" 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$uid" ]; then
+    echo "'$email' still has no user row after a proxy-auth request." >&2
+    echo "  Check PAPERCLIP_PROXY_AUTH_AUTO_PROVISION=true and PAPERCLIP_PROXY_AUTH_EMAIL_DOMAINS." >&2
+    return 1
+  fi
+
+  psql "$cs" -qAc "insert into instance_user_roles (user_id, role)
+      select '$uid', 'instance_admin'
+      where not exists (select 1 from instance_user_roles where role = 'instance_admin');" > /dev/null 2>&1
+
+  local holder
+  holder="$(psql "$cs" -tAc "select u.email from instance_user_roles r join \"user\" u on u.id = r.user_id
+      where r.role = 'instance_admin' limit 1;" 2>/dev/null | tr -d '[:space:]')"
+  if [ "$(printf '%s' "$holder" | tr 'A-Z' 'a-z')" = "$(printf '%s' "$email" | tr 'A-Z' 'a-z')" ]; then
+    echo "instance_admin: $holder"
+    return 0
+  fi
+  echo "instance_admin is already held by '${holder:-unknown}', not '$email'." >&2
+  echo "  The claim is first-come-first-served and was not reassigned." >&2
+  return 1
+}
+
+# ------------------------------------------------------------ status mode ---
+if [ "$MODE" = "status" ]; then
+  st="$(health_field status)"; bs="$(health_field bootstrapStatus)"
+  echo "server:          $st"
+  echo "bootstrapStatus: $bs"
+  case "$bs" in
+    ready)             echo "next: ./onboard-paperclip-2.sh --owner-email <email>" ;;
+    bootstrap_pending) echo "next: $0 --claim-admin --owner-email <email>" ;;
+    *)                 echo "next: start the server, then re-run $0 --status" ;;
+  esac
+  exit 0
+fi
+
+# ------------------------------------------------------- claim admin mode ---
+if [ "$MODE" = "claim-admin" ]; then
+  [ "$(health_field status)" = "ok" ] || wait_for_server || exit 1
+  if [ "$(health_field bootstrapStatus)" = "ready" ]; then
+    echo "Instance already claimed; nothing to do."
+    exit 0
+  fi
+  claim_admin "$CLAIM_EMAIL" || exit 1
+  echo "bootstrapStatus: $(health_field bootstrapStatus)"
+  exit 0
+fi
+
 # ------------------------------------------------------- lock signup mode ---
 # Sets auth.disableSignUp=true, closing account creation once the instance has
 # an admin. Refuses to run while the instance is still unclaimed: with no admin
@@ -399,21 +527,85 @@ chmod 600 "$ENV_PATH"
 # Without it the CLI searches cwd upward for .paperclip/config.json and would
 # silently use that instead - this script runs from a repo checkout.
 echo "Using CLI: ${PAPERCLIP_CMD[*]}"
-echo "NOTE: onboard ends by starting Paperclip in the foreground - there is no flag"
-echo "      that only writes the config. Stop it with Ctrl+C once it reports"
-echo "      \"Server listening\"; this script carries on afterwards."
-echo "      onboard-paperclip.exp does exactly that, unattended."
 
-# Ctrl+C goes to the whole foreground process group, this shell included, so it
-# has to be caught: by the time the operator (or the expect wrapper) sends it,
-# onboard has done its job and the config patches and CEO invite below still
-# have to run. Bash defers the trap until the foreground child exits, so the
-# handler just notes it and execution continues at the next line.
+# ---------------------------------------------------- run onboard, then stop --
+# `onboard --yes` writes the config and then starts the server in the FOREGROUND
+# and never returns: cli/src/commands/onboard.ts sets
+#   shouldRunNow = !serviceInstalled && (opts.run === true || opts.yes === true)
+# and there is no flag that overrides it. --install-service does not help either,
+# because detectServiceManager() finds no systemd user manager in a container.
+#
+# This used to need onboard-paperclip.exp, which drove a pty and typed the Ctrl+C
+# an operator otherwise had to. That is now done here instead: run onboard in its
+# own process group in the background, poll /api/health until the server is up
+# (which also means migrations finished — stopping earlier can interrupt one),
+# then signal the group and carry on. No expect, no pty, no operator.
+#
+# The server is deliberately left STOPPED. supervisord/systemd starts the real
+# one afterwards; this script only needed it up long enough to prove the config
+# works and the schema is migrated.
 ONBOARD_RC=0
-trap 'echo; echo "[onboard-paperclip.sh] Interrupted - Paperclip stopped, continuing setup"' INT
-# "${PAPERCLIP_CMD[@]}" onboard --config "$CONFIG_PATH" --yes --bind lan --install-service
-"${PAPERCLIP_CMD[@]}" onboard --config "$CONFIG_PATH" --yes --bind lan || ONBOARD_RC=$?
-trap - INT
+ONBOARD_LOG="$(mktemp "${TMPDIR:-/tmp}/paperclip-onboard.XXXXXX.log")"
+ONBOARD_READY_TIMEOUT="${ONBOARD_READY_TIMEOUT:-900}"
+
+echo "Running onboard (server will be started, then stopped automatically)..."
+echo "  log: $ONBOARD_LOG"
+
+# setsid gives onboard its own process group, so the stop below reaches the node
+# server AND anything it spawned, without ever signalling this script.
+if command -v setsid > /dev/null 2>&1; then
+  setsid "${PAPERCLIP_CMD[@]}" onboard --config "$CONFIG_PATH" --yes --bind lan \
+    > "$ONBOARD_LOG" 2>&1 &
+else
+  "${PAPERCLIP_CMD[@]}" onboard --config "$CONFIG_PATH" --yes --bind lan \
+    > "$ONBOARD_LOG" 2>&1 &
+fi
+ONBOARD_PID=$!
+
+# Wait for readiness. Two exits: the server answers /api/health, or onboard died.
+onboard_ready=false
+deadline=$(( $(date +%s) + ONBOARD_READY_TIMEOUT ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  if ! kill -0 "$ONBOARD_PID" 2>/dev/null; then
+    wait "$ONBOARD_PID" 2>/dev/null || ONBOARD_RC=$?
+    echo "  onboard exited on its own (status ${ONBOARD_RC})"
+    break
+  fi
+  if [ "$(health_field status)" = "ok" ]; then
+    onboard_ready=true
+    echo "  server is up — config written and migrations applied"
+    break
+  fi
+  sleep 2
+done
+
+if [ "$onboard_ready" = true ]; then
+  # Signal the process group (negative pid) so the node server and its children
+  # all stop. SIGINT first because node has no handler and exits cleanly on it;
+  # escalate only if something is still alive.
+  echo "  stopping the onboarding server..."
+  kill -INT -"$ONBOARD_PID" 2>/dev/null || kill -INT "$ONBOARD_PID" 2>/dev/null || true
+  for _ in $(seq 1 15); do
+    kill -0 "$ONBOARD_PID" 2>/dev/null || break
+    sleep 1
+  done
+  if kill -0 "$ONBOARD_PID" 2>/dev/null; then
+    echo "  still running after SIGINT — sending SIGTERM"
+    kill -TERM -"$ONBOARD_PID" 2>/dev/null || kill -TERM "$ONBOARD_PID" 2>/dev/null || true
+    sleep 3
+    kill -KILL -"$ONBOARD_PID" 2>/dev/null || true
+  fi
+  wait "$ONBOARD_PID" 2>/dev/null || true
+  echo "  stopped"
+elif [ "$ONBOARD_RC" = 0 ] && ! [ -f "$CONFIG_PATH" ]; then
+  echo "onboard never reported a healthy server within ${ONBOARD_READY_TIMEOUT}s." >&2
+  echo "  see $ONBOARD_LOG" >&2
+fi
+
+# Surface the tail either way: this is the only place onboard's own output shows.
+echo "--- last 20 lines of onboard output ---"
+tail -20 "$ONBOARD_LOG" 2>/dev/null || true
+echo "---"
 
 # 130 (SIGINT) is the expected way out of the line above. Anything else that did
 # not leave a config behind is a real failure - patching a file that onboard
@@ -454,8 +646,11 @@ echo
 if invite_output="$("${PAPERCLIP_CMD[@]}" auth bootstrap-ceo --config "$CONFIG_PATH" --base-url "https://${PAPERCLIP_FQDN}" 2>&1 | tee /dev/stderr)"; then
   # Not grepped by its "Invite URL:" label: clack prefixes the line with a box
   # character and picocolors wraps the URL in colour codes whenever this runs on
-  # a tty (the expect wrapper gives it one). Strip the escapes, then match the
-  # URL itself.
+  # a tty. Strip the escapes, then match the URL itself.
+  #
+  # This bootstrap invite is now a FALLBACK. --claim-admin grants instance_admin
+  # headlessly and is the normal path; this link only matters if proxy auth is
+  # off, or someone wants to claim from a browser instead.
   invite_url="$(printf '%s\n' "$invite_output" \
     | sed 's/\x1b\[[0-9;]*m//g' \
     | grep -oE 'https?://[^[:space:]]+/invite/[^[:space:]]+' \

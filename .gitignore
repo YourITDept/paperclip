@@ -75,3 +75,5 @@ releases/local/
 .vercel/
 .env.local
 test-results/
+# Testing
+CustomCodeDoc/*.txt
