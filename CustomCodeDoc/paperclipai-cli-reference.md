@@ -120,7 +120,7 @@ Once a token exists, this is the whole sequence. Every step is verified to exist
 > granular flags. Build the JSON with `jq -n`, never string interpolation.
 
 ```bash
-export PAPERCLIP_API_URL="https://your-host/api"
+export PAPERCLIP_API_URL="https://your-host"      # origin only — no /api
 export PAPERCLIP_API_KEY="…"          # never inline a secret in a script
 
 # 1. company

@@ -126,7 +126,7 @@ Everything after this needs `PAPERCLIP_API_KEY`. The client layer reads
 paperclipai auth login                    # browser approval, once
 paperclipai token board create --json     # then mint a scriptable token
 export PAPERCLIP_API_KEY="…"
-export PAPERCLIP_API_URL="https://<host>/api"
+export PAPERCLIP_API_URL="https://<host>"      # origin only — no /api
 paperclipai access whoami                 # assert before continuing
 ```
 
