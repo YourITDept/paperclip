@@ -19,6 +19,10 @@
 # ---------------------------------------------------------------- usage -----
 #   ./onboard-paperclip-2.sh --owner-email you@example.com
 #   ./onboard-paperclip-2.sh --owner-email you@example.com --company "Acme"
+#
+# That first line is the whole thing: no key to mint, export, or copy. The
+# script mints its own board key, claims the instance if it is unclaimed, and
+# then creates the company, secret, agent and invites.
 #   ./onboard-paperclip-2.sh --dry-run    # print what it would do
 #   ./onboard-paperclip-2.sh --only company,secrets,agent,invite,task
 #   ./onboard-paperclip-2.sh --verify     # verification only, change nothing
@@ -28,14 +32,20 @@
 #   --owner-email <email>  instance owner. Identity used by --mint-key, and
 #                          recorded in the invite file.
 #   --company <name>       company to create or reuse (default "YourITDept")
-#   --api-key <key>        board API key. Prefer PAPERCLIP_API_KEY in the
-#                          environment — an argument is visible in `ps`.
+#   --api-key <key>        board API key. OPTIONAL — when neither this nor
+#                          PAPERCLIP_API_KEY is set, the script mints its own
+#                          via proxy-header auth. Prefer the environment over
+#                          this flag: an argument is visible in `ps`.
 #   --api-url <url>        where to reach the server. Origin only, no /api.
 #                          Default PAPERCLIP_API_URL, the INTERNAL address
 #                          (e.g. http://dev07paperclip97:3100).
 #   --public-url <url>     base for invite links — the public FQDN a human's
 #                          browser can open (e.g. https://dev07.example.com).
 #                          Default PAPERCLIP_PUBLIC_URL.
+#   --agent-name <name>    agent to create (default "Codex Worker")
+#   --task-title <text>    create a task and assign it to that agent
+#   --task-prompt <text>   the task body — the agent's prompt. Required with
+#                          --task-title.
 #   --invite-roles <list>  comma list, one invite minted per entry.
 #                          Default "owner,admin,operator" — three links.
 #                          Valid: owner | admin | operator | viewer.
@@ -48,10 +58,6 @@
 # --public-url only ever appears inside invite links. Getting these backwards
 # gives you either a broken --mint-key or invite links nobody can open.
 #
-# A one-liner for a fresh instance:
-#   export PAPERCLIP_API_KEY="$(./onboard-paperclip-2.sh --mint-key \
-#     --owner-email you@example.com)"
-#   ./onboard-paperclip-2.sh --owner-email you@example.com
 #
 # ------------------------------------------------------- getting a key -----
 # --mint-key gets one without a browser, using this fork's proxy-header auth.
@@ -99,6 +105,10 @@
 # company with the role it carries, until it is used or expires.
 set -euo pipefail
 
+# No browser: this runs headless at container start. `auth login` would
+# otherwise try xdg-open (cli/src/client/board-auth.ts:183), which honours this.
+export PAPERCLIP_NO_BROWSER=1
+
 # ------------------------------------------------------------------ args ----
 DRY_RUN=false
 VERIFY_ONLY=false
@@ -110,6 +120,10 @@ ARG_API_KEY=""
 ARG_API_URL=""
 ARG_PUBLIC_URL=""
 ARG_INVITE_ROLES=""
+MINTED_THIS_RUN=false
+ARG_AGENT_NAME=""
+ARG_TASK_TITLE=""
+ARG_TASK_PROMPT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run)      DRY_RUN=true; shift ;;
@@ -121,6 +135,9 @@ while [ $# -gt 0 ]; do
     --api-url)      ARG_API_URL="${2:?--api-url needs a value}"; shift 2 ;;
     --public-url)   ARG_PUBLIC_URL="${2:?--public-url needs a value}"; shift 2 ;;
     --invite-roles) ARG_INVITE_ROLES="${2:?--invite-roles needs a value}"; shift 2 ;;
+    --agent-name)   ARG_AGENT_NAME="${2:?--agent-name needs a value}"; shift 2 ;;
+    --task-title)   ARG_TASK_TITLE="${2:?--task-title needs a value}"; shift 2 ;;
+    --task-prompt)  ARG_TASK_PROMPT="${2:?--task-prompt needs a value}"; shift 2 ;;
     # Accepts a key on the command line for convenience. Prefer the environment:
     # an argument is visible in `ps` to every process on the box.
     --api-key)      ARG_API_KEY="${2:?--api-key needs a value}"; shift 2 ;;
@@ -194,76 +211,88 @@ command -v jq > /dev/null 2>&1 || die "jq is required"
 : "${PAPERCLIP_API_URL:?PAPERCLIP_API_URL is not set — is the container env sourced?}"
 
 # ------------------------------------------------------------- mint a key ---
-# Done before the API-key check, because this is how you get one.
-if [ "$MINT_KEY" = true ]; then
-  command -v curl > /dev/null 2>&1 || die "curl is required for --mint-key"
-  EMAIL="$OWNER_EMAIL"
-  [ -n "$EMAIL" ] || die "--mint-key needs an owner email — the board user to authenticate as.
+# Minting is a function, not a mode, so the normal run can do it silently.
+# Requiring the operator to mint separately and export the result was two steps
+# for something the script can always do for itself.
+mint_board_key() {
+  local email="$1" hdr base resp key
+  command -v curl > /dev/null 2>&1 || die "curl is required to mint an API key"
+  [ -n "$email" ] || die "minting a key needs an owner email.
          Pass --owner-email you@example.com, or set ONBOARD_OWNER_EMAIL."
   [ "${PAPERCLIP_PROXY_AUTH_ENABLED:-}" = "true" ] \
-    || die "--mint-key needs PAPERCLIP_PROXY_AUTH_ENABLED=true.
-         Without it, use the browser route:
-           paperclipai auth login && paperclipai token board create --json"
-  HDR="${PAPERCLIP_PROXY_AUTH_USER_HEADER:-x-forwarded-user}"
-  BASE="${PAPERCLIP_API_URL%/}"
-  # --dry-run must not mint a real key. Minting is a mutation that leaves a
-  # live credential behind, so honour the flag here rather than treating
-  # --mint-key as a mode that ignores it.
-  if [ "$DRY_RUN" = true ]; then
-    printf 'would POST %s/api/board-api-keys
-' "$BASE" >&2
-    printf '  %s: %s
-' "$HDR" "$EMAIL" >&2
-    printf '  Origin: %s
-' "$BASE" >&2
-    printf '
-(dry run — no key minted, nothing printed to stdout)
-' >&2
-    exit 0
-  fi
+    || die "cannot mint a key: PAPERCLIP_PROXY_AUTH_ENABLED is not 'true'.
+         Either enable proxy auth, or supply a key yourself:
+           paperclipai auth login && paperclipai token board create --json
+           export PAPERCLIP_API_KEY=..."
+
+  hdr="${PAPERCLIP_PROXY_AUTH_USER_HEADER:-x-forwarded-user}"
+  base="${PAPERCLIP_API_URL%/}"
+
   # Origin is REQUIRED, not decoration. boardMutationGuard (a CSRF guard) exempts
   # local_implicit / board_key / cloud_tenant sources but NOT proxy_header, so a
   # proxy-header POST with no Origin/Referer is rejected 403 "Board mutation
   # requires trusted browser origin" even though the identity resolved fine.
-  # $BASE is trusted because it matches the Host header curl already sends.
-  RESP="$(curl -sS -X POST "$BASE/api/board-api-keys" \
-    -H "$HDR: $EMAIL" \
-    -H "Origin: $BASE" \
+  # $base is trusted because it matches the Host header curl already sends.
+  resp="$(curl -sS -X POST "$base/api/board-api-keys" \
+    -H "$hdr: $email" \
+    -H "Origin: $base" \
     -H 'Content-Type: application/json' \
     -d "$(jq -nc --arg n "onboard-paperclip-2 $(date -u +%Y-%m-%dT%H:%M:%SZ)" '{name:$n}')" \
-    2>&1)" || die "request failed: $RESP"
-  KEY="$(printf '%s' "$RESP" | jq -r '.key // .token // .apiKey // empty' 2>/dev/null || true)"
-  if [ -z "$KEY" ]; then
-    printf 'Could not read a key from the response:\n%s\n\n' "$RESP" >&2
-    case "$RESP" in
+    2>&1)" || die "request failed: $resp"
+
+  key="$(printf '%s' "$resp" | jq -r '.key // .token // .apiKey // empty' 2>/dev/null || true)"
+  if [ -z "$key" ]; then
+    printf 'Could not read a key from the response:\n%s\n\n' "$resp" >&2
+    case "$resp" in
       *"trusted browser origin"*)
-        die "the CSRF guard rejected this, not proxy auth — your identity was fine.
+        die "the CSRF guard rejected this, not proxy auth — the identity was fine.
          boardMutationGuard requires an Origin/Referer matching a trusted origin.
-         Trusted here: \$PAPERCLIP_API_URL ($BASE), \$PAPERCLIP_PUBLIC_URL,
+         Trusted here: \$PAPERCLIP_API_URL ($base), \$PAPERCLIP_PUBLIC_URL,
          http://localhost:3100, http://127.0.0.1:3100.
-         This script sends 'Origin: $BASE'; if that is still refused, the server
-         is seeing a different Host than $BASE — try --api-url http://localhost:3100" ;;
+         This script sends 'Origin: $base'; if that is still refused, the server
+         is seeing a different Host — try --api-url http://localhost:3100" ;;
       *"Board authentication required"*|*401*)
-        die "proxy auth did not resolve '$EMAIL' — check the header name ($HDR),
+        die "proxy auth did not resolve '$email' — check the header name ($hdr),
          PAPERCLIP_PROXY_AUTH_EMAIL_DOMAINS, and whether the user exists
          (PAPERCLIP_PROXY_AUTH_AUTO_PROVISION=true creates it on first sight)" ;;
       *"Permission denied"*|*403*)
-        die "'$EMAIL' authenticated but lacks permission to mint a board key" ;;
+        die "'$email' authenticated but lacks permission to mint a board key" ;;
       *)
         die "unexpected response — see above" ;;
     esac
   fi
-  # Printed to stdout alone so it can be captured; nothing else goes to stdout.
-  printf '%s\n' "$KEY"
-  printf '\nExport it, then re-run without --mint-key:\n  export PAPERCLIP_API_KEY=%s\n' "$KEY" >&2
+  printf '%s' "$key"
+}
+
+# --mint-key: print one and stop. Useful for scripting or to hand to another tool.
+if [ "$MINT_KEY" = true ]; then
+  if [ "$DRY_RUN" = true ]; then
+    printf 'would POST %s/api/board-api-keys as %s\n' "${PAPERCLIP_API_URL%/}" "$OWNER_EMAIL" >&2
+    printf '(dry run — no key minted, nothing printed to stdout)\n' >&2
+    exit 0
+  fi
+  MINTED="$(mint_board_key "$OWNER_EMAIL")"
+  printf '%s\n' "$MINTED"
+  printf '\nExport it, or just run without --mint-key and the script mints its own:\n  export PAPERCLIP_API_KEY=%s\n' "$MINTED" >&2
   exit 0
 fi
 
-: "${PAPERCLIP_API_KEY:?PAPERCLIP_API_KEY is not set — get one with: $0 --mint-key   (or: paperclipai auth login && paperclipai token board create)}"
+# Normal run: mint silently when no key was supplied, so a bare
+#   ./onboard-paperclip-2.sh --owner-email you@example.com
+# is all that is needed. A key in the environment always wins.
+if [ -z "${PAPERCLIP_API_KEY:-}" ]; then
+  if [ "$DRY_RUN" = true ]; then
+    info "would mint a board API key as ${OWNER_EMAIL:-<no --owner-email>}"
+    PAPERCLIP_API_KEY="dry-run-placeholder"
+  else
+    PAPERCLIP_API_KEY="$(mint_board_key "$OWNER_EMAIL")"
+    MINTED_THIS_RUN=true
+  fi
+fi
 export PAPERCLIP_API_URL PAPERCLIP_API_KEY
 
 # COMPANY_NAME and OWNER_EMAIL are resolved during argument parsing above.
-AGENT_NAME="${ONBOARD_AGENT_NAME:-Codex Worker}"
+AGENT_NAME="${ARG_AGENT_NAME:-${ONBOARD_AGENT_NAME:-Codex Worker}}"
 ADAPTER_TYPE="${ONBOARD_ADAPTER_TYPE:-codex_local}"
 SECRET_NAME="${ONBOARD_SECRET_NAME:-OpenRouter}"
 SECRET_KEY="${ONBOARD_SECRET_KEY:-openrouter_api_key}"
@@ -294,24 +323,37 @@ if [ "$BOOTSTRAP" = "unreachable" ]; then
   die "cannot reach ${PAPERCLIP_API_URL%/}/api/health — is the server running?
          Start it (supervisorctl/systemd), then re-run."
 fi
-if [ "$BOOTSTRAP" = "bootstrap_pending" ]; then
-  info "instance is unclaimed (bootstrapStatus=bootstrap_pending)"
-  [ -n "$OWNER_EMAIL" ] || die "an unclaimed instance needs --owner-email to claim it"
-  CLAIMER="$(dirname "$0")/onboard-paperclip-1.sh"
-  if [ -x "$CLAIMER" ]; then
-    info "claiming instance_admin for $OWNER_EMAIL ..."
-    "$CLAIMER" --claim-admin --owner-email "$OWNER_EMAIL" || \
-      die "could not claim instance_admin — see the message above"
+# Lock ownership to --owner-email, every run, whatever state the instance is in.
+#
+# Not just when unclaimed. Script 1 leaves a bootstrap_ceo invite link behind,
+# and anyone holding it can claim ownership until it is redeemed or expires.
+# This makes the named email the sole instance_admin and revokes those links, so
+# whatever happened between the two scripts is overwritten deterministically.
+if [ -n "$OWNER_EMAIL" ]; then
+  OWNER_TOOL="$(dirname "$0")/onboard-paperclip-1.sh"
+  if [ -x "$OWNER_TOOL" ]; then
+    if [ "$DRY_RUN" = true ]; then
+      info "would lock instance ownership to $OWNER_EMAIL and revoke bootstrap invites"
+    else
+      info "locking instance ownership to $OWNER_EMAIL ..."
+      "$OWNER_TOOL" --set-owner --owner-email "$OWNER_EMAIL" \
+        | sed 's/^/  /' || die "could not set the instance owner — see above"
+    fi
+  elif [ "$BOOTSTRAP" = "bootstrap_pending" ]; then
+    die "instance is unclaimed and $OWNER_TOOL is missing.
+         Run: ./onboard-paperclip-1.sh --set-owner --owner-email $OWNER_EMAIL"
   else
-    die "instance is unclaimed and $CLAIMER is missing.
-         Run: ./onboard-paperclip-1.sh --claim-admin --owner-email $OWNER_EMAIL"
+    info "note: $OWNER_TOOL missing — ownership not verified"
   fi
+elif [ "$BOOTSTRAP" = "bootstrap_pending" ]; then
+  die "an unclaimed instance needs --owner-email so ownership can be assigned"
 fi
 
 WHOAMI="$("${PC[@]}" access whoami --json 2>/dev/null || true)"
 [ -n "$WHOAMI" ] || die "access whoami failed — PAPERCLIP_API_KEY is missing, wrong, or the server is down.
          Every later step would fail as a confusing 401. Fix the token first."
 info "authenticated: $(printf '%s' "$WHOAMI" | jq -r '.email // .userId // "board user"')"
+[ "$MINTED_THIS_RUN" = true ] && info "api key:       minted for this run (not stored)"
 info "connecting to: $PAPERCLIP_API_URL   (internal — every request goes here)"
 info "invite links:  ${BASE_URL:-<unset>}   (text only — never connected to)"
 if [ -z "$PUBLIC_URL" ]; then
@@ -460,17 +502,19 @@ if want invite; then
 fi
 
 # ------------------------------------------------------------------- task ---
-if want task && [ -n "${ONBOARD_TASK_TITLE:-}" ]; then
+TASK_TITLE="${ARG_TASK_TITLE:-${ONBOARD_TASK_TITLE:-}}"
+TASK_PROMPT="${ARG_TASK_PROMPT:-${ONBOARD_TASK_PROMPT:-}}"
+if want task && [ -n "$TASK_TITLE" ]; then
   step 5/6 "Task for the agent"
   [ -n "$AGENT_ID" ] || die "a task needs an agent; run without --only, or set --only agent,task"
-  PROMPT="${ONBOARD_TASK_PROMPT:-}"
-  [ -n "$PROMPT" ] || die "ONBOARD_TASK_TITLE is set but ONBOARD_TASK_PROMPT is empty"
+  PROMPT="$TASK_PROMPT"
+  [ -n "$PROMPT" ] || die "a task title was given but the prompt is empty — pass --task-prompt"
   if [ "$DRY_RUN" = true ]; then
-    info "would create task '$ONBOARD_TASK_TITLE' assigned to $AGENT_ID"
+    info "would create task '$TASK_TITLE' assigned to $AGENT_ID"
   else
     ISSUE_ID="$("${PC[@]}" issue create --json \
       -C "$COMPANY_ID" \
-      --title "$ONBOARD_TASK_TITLE" \
+      --title "$TASK_TITLE" \
       --description "$PROMPT" \
       --assignee-agent-id "$AGENT_ID" \
       --status todo \

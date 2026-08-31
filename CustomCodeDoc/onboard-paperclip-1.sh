@@ -33,7 +33,9 @@ while [ $# -gt 0 ]; do
     --force) FORCE_LOCK=true; shift ;;
     --wait) WAIT_FOR_READY=true; shift ;;
     --status) MODE="status"; shift ;;
+    --release) MODE="release"; shift ;;
     --claim-admin) MODE="claim-admin"; shift ;;
+    --set-owner) MODE="set-owner"; shift ;;
     --owner-email) CLAIM_EMAIL="${2:?--owner-email needs a value}"; shift 2 ;;
     --timeout) WAIT_TIMEOUT="${2:?--timeout needs a value}"; shift 2 ;;
     -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
@@ -102,6 +104,15 @@ export PAPERCLIP_DB_BACKUP_DIR="/sysops/db_backups/paperclip"
 # --bind lan forces deploymentMode=authenticated, exposure=private, host=0.0.0.0.
 # These three still come from the environment:
 export PORT=3100
+
+# No browser, ever. This script runs at container start where there is no
+# display and nothing to open a browser with. Two CLI paths would otherwise try:
+# the dashboard opener after a service install (cli/src/onboard-service.ts:111)
+# and `auth login`'s xdg-open (cli/src/client/board-auth.ts:183). Both check
+# PAPERCLIP_NO_BROWSER, so setting it here disables both.
+# The onboard run below is already non-interactive, but that relies on stdio not
+# being a tty — this does not, so it holds however the script is invoked.
+export PAPERCLIP_NO_BROWSER=1
 export SERVE_UI=true
 
 # The public name callers use to reach this host. It seeds the bootstrap invite
@@ -359,8 +370,151 @@ claim_admin() {
   return 1
 }
 
+# ------------------------------------------------------- release awareness ---
+# This host carries several installed releases side by side and /vhome/paperclip
+# is what PAPERCLIP_CLI resolves through, so "which Paperclip am I driving?" has
+# a real answer that is easy to get wrong. It already cost a debugging round:
+# the symlink pointed at an older release whose CLI force-set
+# PAPERCLIP_OPEN_ON_LISTEN=true, so onboarding opened a browser that no
+# environment variable could suppress — fixed in newer builds (#12435).
+#
+# Report it rather than assume it. `newest` is by directory mtime, which is how
+# these are laid down; it is a hint, not a version comparison.
+RELEASE_DIR_ROOT="${PAPERCLIP_RELEASE_ROOT:-/install/paperclip}"
+PAPERCLIP_LINK="${PAPERCLIP_LINK:-/vhome/paperclip}"
+
+report_release() {
+  local linked newest
+  linked="$(readlink -f "$PAPERCLIP_LINK" 2>/dev/null || echo '<unresolved>')"
+  newest="$(ls -1dt "$RELEASE_DIR_ROOT"/*/ 2>/dev/null | head -1)"
+  newest="${newest%/}"
+
+  echo "release link:    $PAPERCLIP_LINK -> ${linked##*/}"
+  echo "newest on disk:  ${newest##*/}"
+  if [ -n "$newest" ] && [ "$linked" != "$newest" ]; then
+    echo "  WARNING: the link is NOT the newest installed release."
+    echo "           Repoint it if that is not deliberate:"
+    echo "             sudo supervisorctl stop paperclip"
+    echo "             sudo ln -sfn $newest $PAPERCLIP_LINK"
+    echo "             sudo supervisorctl start paperclip"
+  fi
+
+  # The CLI the scripts actually invoke, and whether it still carries the
+  # force-open-browser bug. Cheap, and it is the concrete symptom people hit.
+  local cli_dist="$linked/node_modules/paperclipai/dist/index.js"
+  if [ -f "$cli_dist" ]; then
+    if grep -q 'PAPERCLIP_OPEN_ON_LISTEN = "true"' "$cli_dist" 2>/dev/null; then
+      echo "  WARNING: this release forces PAPERCLIP_OPEN_ON_LISTEN=true — onboarding"
+      echo "           will open a browser and no env var can stop it. Use a newer release."
+    fi
+  fi
+
+  # What the *running* server reports, which can differ from the link if it has
+  # not been restarted since a repoint.
+  local commit
+  # The braces + `|| true` matter: this script runs under `set -euo pipefail`,
+  # so an unreachable server made curl fail the pipeline and abort the whole
+  # function before it could print anything. A reporting helper must never be
+  # able to kill its caller.
+  commit="$( { curl -fsS --max-time 3 "$LOCAL_API/api/health" 2>/dev/null || true; } \
+    | node -e 'let r="";process.stdin.on("data",d=>r+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(r).commit||"unknown"))}catch{process.stdout.write("unreachable")}})' 2>/dev/null || true)"
+  echo "running commit:  ${commit:-unreachable}"
+  if [ "$commit" = "unreachable" ]; then
+    echo "  (server not answering — start it, or it has not restarted since the repoint)"
+  fi
+}
+
+# ----------------------------------------------------------- release mode ---
+if [ "$MODE" = "release" ]; then
+  report_release
+  exit 0
+fi
+
+# Make one email the sole instance_admin, and close the door behind it.
+#
+# --claim-admin is first-come-first-served: it only acts when nobody holds the
+# role. That is right for a first claim, but it leaves two open questions once
+# onboarding is scripted:
+#
+#   * script 1 mints a bootstrap_ceo invite link. Anyone holding that link can
+#     claim ownership until it is used or expires.
+#   * if someone already claimed, --claim-admin silently leaves them in place.
+#
+# lock_owner settles both: the named email ends up holding instance_admin, any
+# other holder is removed, and every live bootstrap invite is revoked so the
+# link cannot be redeemed afterwards. Idempotent — safe to run every time.
+lock_owner() {
+  local email="$1"
+  [ -n "$email" ] || { echo "lock_owner needs an email" >&2; return 1; }
+  command -v psql > /dev/null 2>&1 || { echo "psql is required" >&2; return 1; }
+
+  local cs
+  cs="$(node -e "
+    try { const c = require('$CONFIG_PATH');
+      process.stdout.write(c.database?.connectionString ?? ''); } catch { process.stdout.write(''); }
+  ")"
+  [ -n "$cs" ] || { echo "no database connectionString in $CONFIG_PATH" >&2; return 1; }
+
+  local hdr="${PAPERCLIP_PROXY_AUTH_USER_HEADER:-x-forwarded-user}"
+  if [ "${PAPERCLIP_PROXY_AUTH_ENABLED:-}" = "true" ]; then
+    # Provision the account if it has never been seen. Harmless if it exists.
+    curl -sS -o /dev/null --max-time 10 "$LOCAL_API/api/companies" -H "$hdr: $email" || true
+  fi
+
+  local uid
+  uid="$(psql "$cs" -tAc "select id from \"user\" where lower(email) = lower('$email') limit 1;" 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$uid" ]; then
+    echo "no user row for '$email' — cannot make them the owner." >&2
+    echo "  With proxy auth on, one authenticated request creates it." >&2
+    return 1
+  fi
+
+  local before
+  before="$(psql "$cs" -tAc "select coalesce(string_agg(u.email, ','), '(none)')
+      from instance_user_roles r join \"user\" u on u.id = r.user_id
+      where r.role = 'instance_admin';" 2>/dev/null | tr -d '[:space:]')"
+
+  # Grant, then remove everyone else. Order matters: granting first means the
+  # instance is never momentarily without an admin.
+  psql "$cs" -qAc "insert into instance_user_roles (user_id, role)
+      select '$uid', 'instance_admin'
+      where not exists (
+        select 1 from instance_user_roles where role = 'instance_admin' and user_id = '$uid');" > /dev/null 2>&1
+  psql "$cs" -qAc "delete from instance_user_roles
+      where role = 'instance_admin' and user_id <> '$uid';" > /dev/null 2>&1
+
+  # Revoke every live bootstrap invite: the link script 1 printed is a standing
+  # offer of ownership to whoever holds it.
+  local revoked
+  revoked="$(psql "$cs" -tAc "with revoked as (
+        update invites set revoked_at = now(), updated_at = now()
+        where invite_type = 'bootstrap_ceo' and revoked_at is null and accepted_at is null
+        returning 1)
+      select count(*) from revoked;" 2>/dev/null | tr -d '[:space:]')"
+
+  local after
+  after="$(psql "$cs" -tAc "select coalesce(string_agg(u.email, ','), '(none)')
+      from instance_user_roles r join \"user\" u on u.id = r.user_id
+      where r.role = 'instance_admin';" 2>/dev/null | tr -d '[:space:]')"
+
+  echo "instance_admin: $after"
+  [ "$before" != "$after" ] && echo "  (was: $before)"
+  [ "${revoked:-0}" != "0" ] && echo "  revoked ${revoked} live bootstrap invite(s) — the ownership link no longer works"
+  return 0
+}
+
+# -------------------------------------------------------- set owner mode ---
+if [ "$MODE" = "set-owner" ]; then
+  [ "$(health_field status)" = "ok" ] || wait_for_server || exit 1
+  lock_owner "$CLAIM_EMAIL" || exit 1
+  echo "bootstrapStatus: $(health_field bootstrapStatus)"
+  exit 0
+fi
+
 # ------------------------------------------------------------ status mode ---
 if [ "$MODE" = "status" ]; then
+  report_release
+  echo
   st="$(health_field status)"; bs="$(health_field bootstrapStatus)"
   echo "server:          $st"
   echo "bootstrapStatus: $bs"
