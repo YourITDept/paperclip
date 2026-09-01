@@ -107,12 +107,26 @@ export function NewAgent() {
     [searchKey],
   );
 
+  // Hoisted above the create-values state because the preset initializer below
+  // has to consult them. Upstream gates a URL preset on adapter availability,
+  // but the fork seeds the preset in the initializer rather than the effect, so
+  // a gate that is only readable further down is a gate the preset walks past:
+  // `?adapterType=<disabled-experimental>` would reach the form on mount.
+  const disabledTypes = useDisabledAdaptersSync();
+  const adapterRegistryLoaded = useAdapterRegistryLoaded();
+
   const [name, setName] = useState("");
   const [title, setTitle] = useState("");
   const [role, setRole] = useState("general");
   const [reportsTo, setReportsTo] = useState<string | null>(null);
   const [configValues, setConfigValues] = useState<CreateConfigValues>(() =>
-    applyNewAgentPreset(presetAdapterType, presetEnvBindings),
+    // On a cold cache the registry has not arrived, so this declines to seed and
+    // the guarded effect below applies the preset once the list lands. Declining
+    // is the safe direction: it leaves the adapter defaults alone rather than
+    // admitting a runtime the deployer disabled.
+    presetAdapterType && (!adapterRegistryLoaded || disabledTypes.has(presetAdapterType))
+      ? defaultCreateValues
+      : applyNewAgentPreset(presetAdapterType, presetEnvBindings),
   );
   const [permissions, setPermissions] = useState<Partial<AgentPermissions>>(
     buildPermissionsForTrustPreset(null, "standard"),
@@ -131,8 +145,6 @@ export function NewAgent() {
     result: null,
     login: null,
   });
-  const disabledTypes = useDisabledAdaptersSync();
-  const adapterRegistryLoaded = useAdapterRegistryLoaded();
 
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),

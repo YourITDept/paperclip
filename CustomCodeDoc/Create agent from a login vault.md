@@ -142,7 +142,7 @@ an agent that already exists.
 | `ui/src/lib/new-agent-preset.ts` | **New.** Build and parse the preset query string; all validation lives here |
 | `ui/src/lib/new-agent-preset.test.ts` | **New.** 13 tests: round trip, splitting, and every rejection rule |
 | `ui/src/components/CreateAgentFromLoginButton.tsx` | **New.** The shared button. Navigates only |
-| `ui/src/pages/NewAgent.tsx` | Reads the `env` preset; `applyNewAgentPreset` seeds state in the initializer |
+| `ui/src/pages/NewAgent.tsx` | Reads the `env` preset; `applyNewAgentPreset` seeds state in the initializer, **gated on adapter availability since 2026-09-01 — see §8** |
 | `ui/src/pages/NewAgent.test.tsx` | Mock priming extracted to `primeApiMocks()`; router mock now driven by `routerSearch`; 2 preset tests added |
 | `ui/src/pages/InstanceClaudeVaults.tsx` | Button in the row and in the success panel; `LoginPanel` takes `vaultDir` |
 | `ui/src/pages/InstanceCodexVaults.tsx` | Same, for `CODEX_HOME` |
@@ -196,3 +196,108 @@ asserts it never reaches the form.
 - **The name is still typed by hand.** By design (§2), but if a naming convention
   emerges — `claude_device` → an agent called something predictable — that is the
   obvious next thing to prefill.
+
+---
+
+## 8. The availability gate — why this preset diverges from upstream
+
+**Added 2026-09-01 (Session 15)**, on the upstream merge that brought
+`1955b0e2d` *"Gate Paperclip Runner setup behind an experimental flag"*.
+
+This is the first time an upstream change and this feature disagreed about the
+**same behaviour** rather than merely landing near each other in a file. It is
+written up at length because "why can't the fork just match upstream here?" is
+the obvious question, and the answer is not obvious.
+
+### 8.1 The two designs
+
+Both sides turn `?adapterType=…` into form state. They do it at different
+moments, and each is right for its own reasons:
+
+| | Upstream | This fork |
+| --- | --- | --- |
+| Where the preset is applied | in a `useEffect`, after mount | in the `useState` **initializer**, during mount |
+| Why there | the effect can wait for the adapter registry to arrive | the environment-variables editor snapshots its rows on mount (§3.3) |
+| What it gated on | `adapterRegistryLoaded` + `disabledTypes` | `isValidAdapterType` only |
+
+The fork put the work in the initializer **deliberately** — §3.3 records that
+seeding through an effect works today but leans on the env-var editor's "adopt
+external changes while the local draft is clean" heuristic staying as it is.
+That reasoning is still sound, and it is precisely why the fork could not simply
+adopt upstream's effect-only approach and delete its own.
+
+### 8.2 What broke
+
+`1955b0e2d` added the availability gate to the effect, and two tests with it.
+The fork's initializer runs **before** that effect and never consulted the gate,
+so a URL naming a disabled experimental runtime populated the form on mount.
+Upstream's own new test caught it:
+
+```
+AssertionError: expected 'New Agent…Adapter typePaperclip Runner…'
+not to contain 'Paperclip Runner'
+ ❯ src/pages/NewAgent.test.tsx  "ignores a native-runner URL preset
+   while the experimental adapter is disabled"
+```
+
+**This was not a merge artefact.** That region of both files merged cleanly.
+Two independently correct designs met and disagreed — the case §5.3 of
+[`Review and Test Changes.md`](CustomCodeDoc/Review%20and%20Test%20Changes.md)
+says to stop and raise rather than resolve unilaterally. It was raised, and the
+operator chose to honour upstream's gate.
+
+### 8.3 The resolution
+
+The initializer now reads the gate too, which requires the two registry hooks to
+be called **above** the create-values state:
+
+```tsx
+const disabledTypes = useDisabledAdaptersSync();
+const adapterRegistryLoaded = useAdapterRegistryLoaded();
+
+const [configValues, setConfigValues] = useState<CreateConfigValues>(() =>
+  presetAdapterType && (!adapterRegistryLoaded || disabledTypes.has(presetAdapterType))
+    ? defaultCreateValues
+    : applyNewAgentPreset(presetAdapterType, presetEnvBindings),
+);
+```
+
+**The cold-cache cost, stated honestly.** `useAdapterRegistryLoaded` is backed by
+a react-query fetch of `adaptersApi.list()` with a five-minute `staleTime`. On a
+cold load `adapters` is `undefined`, so the initializer **declines to seed** and
+the preset arrives through the guarded effect instead — the very path §3.3
+preferred to avoid. On a warm cache, which is the normal flow (the operator
+clicks **Create agent** on a vault settings page that has already rendered
+adapter menus), the initializer still seeds synchronously as designed.
+
+That trade was made knowingly. Admitting a runtime the deployer has disabled is
+a worse failure than seeding through a path that is fragile-but-working, and
+declining to seed leaves the adapter defaults alone — the behaviour that existed
+before this feature. The direction of harm matches the reasoning upstream itself
+wrote into `useAdapterRegistryLoaded`: *"Silently changing a saved answer is the
+error worth refusing to make."*
+
+### 8.4 What to check after the next merge
+
+`ui/src/pages/NewAgent.tsx` is now a §4.1 collision point. Two things can undo
+this, and they fail very differently:
+
+1. **The hook order.** If `useDisabledAdaptersSync` / `useAdapterRegistryLoaded`
+   drift back below the `useState`, the initializer references them before they
+   are declared. That is a **type error** — it fails loudly, so it is safe.
+2. **The gate expression itself.** If an upstream refactor rewrites the
+   initializer without the gate, nothing fails to compile and nothing crashes.
+   Only upstream's own test goes red:
+   `"ignores a native-runner URL preset while the experimental adapter is disabled"`.
+   **That test is the canary. Do not delete it as "upstream's test" —** the fork
+   now depends on it to protect a fork-specific interaction.
+
+Verify with:
+
+```bash
+corepack pnpm exec vitest run ui/src/pages/NewAgent.test.tsx \
+  ui/src/lib/new-agent-preset.test.ts ui/src/pages/InviteLanding.test.tsx
+```
+
+39 passing across the three files; `NewAgent.test.tsx` contributes 7 — the
+fork's 2 preset tests and upstream's 2 gate tests among them.

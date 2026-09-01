@@ -278,6 +278,14 @@ are almost always kept:
   and `claude-vaults.ts` entries in `explicitOpenApiCoverageExclusions`. Added
   as a collision point in Session 12. An upstream rewrite of that set drops them
   silently and the suite goes red naming both files.
+- `ui/src/pages/NewAgent.tsx` and `ui/src/pages/NewAgent.test.tsx` — change set
+  5's preset seeding. Added as a collision point in Session 15, and the first
+  **semantic** collision the fork has hit: upstream gates a URL preset on adapter
+  availability in an effect, the fork seeds it in the `useState` initializer that
+  runs first. The initializer now carries the same gate. Full reasoning in
+  [`Create agent from a login vault.md`](CustomCodeDoc/Create%20agent%20from%20a%20login%20vault.md) §8.
+  The canary is upstream's own test, `"ignores a native-runner URL preset while
+  the experimental adapter is disabled"` — it is load-bearing for the fork now.
 
 **v6 removed two of the four.** `packages/adapter-utils/src/acpx-engine/execute.ts`
 and `packages/adapters/codex-local/src/server/execute.ts` were collision points
@@ -704,7 +712,7 @@ is recognised as standing rather than re-investigated from scratch.
 
 ### 7.5 Prerequisites and traps — read before believing a failure
 
-Four things have produced confusing failures that were **not** real defects.
+Five things have produced confusing failures that were **not** real defects.
 Check each before investigating a red suite.
 
 #### 1. Build the plugin SDK first, or 12 suites collect nothing
@@ -872,6 +880,33 @@ Afterwards, re-confirm the patches survived:
 ls node_modules/.pnpm | grep -E 'embedded-postgres@|acpx@'
 ```
 
+**The second variant — a patch file, not a specifier (added Session 15).** The
+same class of staleness also arrives with a *different* error code, and the
+message points at `package.json` even though `package.json` is fine:
+
+```
+ERR_PNPM_LOCKFILE_CONFIG_MISMATCH  Cannot proceed with the frozen installation.
+The current "patchedDependencies" configuration doesn't match the lockfile
+```
+
+Here `patchedDependencies` is **identical** in merge-base, fork and upstream —
+nothing about the configuration changed. pnpm stores a *content hash* of every
+patch file, and upstream had rewritten `patches/acpx@0.13.1.patch` without
+refreshing the lockfile (`560e7e48b`/#12608; also Session 12's Finding 1). The
+hash in the lockfile describes a patch that no longer exists.
+
+**Tell the two apart before reaching for a fix**, because the wrong diagnosis
+sends you hunting a dependency change that never happened:
+
+```bash
+git diff --stat HEAD FETCH_HEAD -- pnpm-lock.yaml patches/
+```
+
+A `patches/` file in that list and an untouched lockfile is this variant. The
+remedy is the same `--no-frozen-lockfile` regeneration; the resulting diff should
+be confined to patch hashes and any new workspace importers upstream forgot to
+record. Anything else in that diff deserves a second look.
+
 #### 4. Some failures are the machine, not the merge
 
 `workspace-runtime*` and `local-service-supervisor` bind real ports, spawn
@@ -881,6 +916,45 @@ a 123 s baseline in `general-server-shard-durations.json`; under load it takes
 `cursor-agent` is not installed in the image. None of these are fork-touched
 files. Re-run a suspect suite alone before classifying it.
 
+#### 5. Exit 137 is memory, not a type error — do not run typecheck beside the suite
+
+**Added Session 15.** `pnpm run typecheck` died three times running with:
+
+```
+ui typecheck: Killed          …then…    server typecheck: Killed
+ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL   Exit status 137
+```
+
+**137 = 128 + 9 = SIGKILL — the OOM killer, not `tsc`.** The signature is that
+the *count of `error TS` lines is zero*: a real type failure prints errors and
+exits 1 or 2. Check that first:
+
+```bash
+grep -cE 'error TS' <log>     # 0 + exit 137  ->  memory, re-run it alone
+```
+
+Two things make this newly easy to hit:
+
+- The host has **15 GB**, and the server typecheck now runs
+  `prepare:runner-vendor`, which builds upstream's Rust runner binary before
+  `tsc` starts. That is new with the Paperclip Runner subsystem.
+- The four-group suite holds ~8 vitest processes. Typecheck and the suite
+  **cannot** run concurrently on this host. Which project gets killed varies
+  with timing, which makes it look like a moving code fault rather than a
+  resource limit.
+
+Also check for **leftover runs from earlier sessions**. Session 15 found four
+abandoned `paperclip-company-cli-e2e` processes, 11 hours to 1.5 days old,
+holding ~2.5 GB between them; they ignored `SIGTERM` and needed `kill -9`.
+Clearing them moved available memory from 4 GB to 7 GB and the typecheck passed
+immediately:
+
+```bash
+ps -eo pid,rss,etime,cmd --sort=-rss | head -12
+```
+
+Run typecheck **alone**, before or after the suite, never beside it.
+
 ---
 
 ## 8. Session log — append only
@@ -889,6 +963,223 @@ files. Re-run a suspect suite alone before classifying it.
 > **Numbering note.** The header at the top of this file calls the session log
 > "§7". It is this section, **§8** — §7 is the test procedure. Kept as-is so old
 > cross-references still resolve; read "§7 session log" as this section.
+
+### 2026-09-01 — Session 15: local upstream merge into `W6-20260901a` (14 commits)
+
+**Who:** Claude (Opus 5) with chris@anderson-family.com
+**Branch:** `W6-20260901a` @ `3003ce14c` · **Upstream:** `paperclipai/master`
+@ `1955b0e2d` · **Merge base:** `9f9a950d0` (#12593, the lockfile-refresh chore)
+**Scope:** take the upstream merge locally (the PR route was not used), resolve
+conflicts, verify the §4 register, run the suite.
+**Left uncommitted per RULE 0** — the operator reviews and commits.
+
+#### What came in
+
+14 upstream commits, 721 files, +173k/-30k. Almost all of it is the new
+**Paperclip Runner** subsystem (#12608, #12616, #12617, #12638-#12641, #12652-#12654,
+#12656) plus managed-OAuth fixes (#12619, #12623). None of it touches the fork's
+server-side change sets.
+
+#### Finding 1 — the merge is only 2 files wide, and `merge-tree` proves it first
+
+`git merge-tree --write-tree` (§5.2 step 4) named the entire conflict set before
+anything was modified: `ui/src/pages/NewAgent.tsx` and its test. Nine files were
+touched by *both* sides; seven auto-merged with both hunks intact (`.gitignore`,
+`environment-config.ts`, `tool-access.ts`, `index.css`, `queryKeys.ts`,
+`InviteLanding.tsx`, `InviteLanding.test.tsx` — the §0.1 canary file among them,
+guard present at `InviteLanding.tsx:320`).
+
+#### Finding 2 — `pnpm install --frozen-lockfile` fails, and it is upstream's bug
+
+```
+ERR_PNPM_LOCKFILE_CONFIG_MISMATCH  Cannot proceed with the frozen installation.
+The current "patchedDependencies" configuration doesn't match the lockfile
+```
+
+**This is not a merge artefact and not the fork's fault.** `pnpm-lock.yaml` is
+byte-identical across merge-base, fork HEAD and upstream tip — nobody edited it.
+Upstream `560e7e48b` (#12608) rewrote `patches/acpx@0.13.1.patch` by 184 lines
+**without refreshing the lockfile**, and pnpm stores a *content hash* of each
+patch file. Upstream master alone fails the same way; their periodic
+`chore(lockfile): refresh pnpm-lock.yaml` bot had not yet run.
+
+Regenerating with `--no-frozen-lockfile` produced a 216-line diff that is
+entirely upstream's unrecorded work:
+
+| Change | What it is |
+| --- | --- |
+| `acpx@0.13.1` hash `klzqvo4xom3l6xnrgmyg2xpqci` → `lzpwjtiaybzoijy455dfycwavu` | the rewritten patch's real hash |
+| new `packages/paperclip-eval-kernel` importer | a workspace #12653 added and never recorded |
+| new `packages/paperclip-runner` deps | the runner subsystem's own dependencies |
+
+**This is the second time.** Session 12's Finding 1 was the same acpx patch-hash
+regeneration. Treat `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH` after an upstream merge
+as *expected* until upstream's lockfile bot catches up, and check whether the
+regenerated diff is confined to patch hashes and new importers before worrying.
+
+#### Finding 3 — the first *semantic* conflict the fork has hit
+
+Two of the three conflict hunks were ordinary adjacency and both sides were kept:
+
+- **`NewAgent.tsx` effect deps** — upstream added `adapterRegistryLoaded`/
+  `disabledTypes`, the fork had `presetEnvBindings`. The effect body reads all
+  four; the union is the exhaustive-deps-correct array.
+- **`NewAgent.test.tsx` router mock** — both sides had independently invented a
+  `useSearchParams` mock (the fork's `routerSearch` string ref, upstream's
+  `mockSearchParams`). One `vi.mock` factory can only supply one implementation,
+  so the fork's was folded into upstream's and its two preset tests rewritten to
+  drive it. The fork's `primeApiMocks()` extraction was kept and upstream's
+  mock resets moved into the two `beforeEach` blocks.
+
+The third was **not** adjacency, and §5.3 was followed — raised with the
+operator rather than resolved unilaterally. Upstream `1955b0e2d` gates a URL
+adapter preset on availability inside a `useEffect`; change set 5 seeds the
+preset in the `useState` **initializer**, which runs first and did not consult
+the gate. A link naming a disabled experimental runtime therefore reached the
+form, and upstream's own new test caught it.
+
+**Operator's decision: honour upstream's gate.** The initializer now reads it,
+with the two registry hooks hoisted above the create-values state. The accepted
+cost is that on a cold react-query cache the registry has not arrived, so the
+initializer declines to seed and the preset comes through the effect — the path
+§3.3 of the change set 5 doc preferred to avoid. Warm cache, the normal flow,
+still seeds in the initializer. Full write-up:
+[`Create agent from a login vault.md`](CustomCodeDoc/Create%20agent%20from%20a%20login%20vault.md) §8.
+
+#### §4 register audit — all live change sets present
+
+| # | Change set | State after merge |
+| --- | --- | --- |
+| 1 | Reverse-proxy / forward-auth | present; precedence still bearer → cloud (`auth.ts:255`) → proxy (`:265`) → session (`:277`); `proxy_header` still threaded through `environment-config.ts` and `tool-access.ts` |
+| 3 | Codex credential vaults | present; routes mounted `app.ts:556` |
+| 4 | Claude credential vaults | present; routes mounted `app.ts:557` |
+| 5 | Create agent from a login vault | present; **modified this session** — see Finding 3 |
+| 6 | Invite auto-accept guard | present, `InviteLanding.tsx:320` |
+| 8 | Local packaging scripts | present |
+| 2, 7, 9 | RETIRED in v6 | correctly absent; not restored |
+
+`git merge-base --is-ancestor ddcd436f5 HEAD` passes — the add-on is carried in
+history, nothing was cherry-picked (§6.3).
+
+#### Targeted verification
+
+```
+ui/src/lib/new-agent-preset.test.ts + NewAgent.test.tsx + InviteLanding.test.tsx
+  → 39 passed (39), 3 files
+```
+
+Before the Finding 3 fix this was 38/39 with upstream's gate test failing; after,
+all four preset-related tests pass — the fork's 2 and upstream's 2 together.
+
+#### Finding 4 — typecheck is clean, but only when it runs alone
+
+`corepack pnpm run typecheck` → **exit 0, zero errors, zero kills**, across every
+project including `server` and `cli`. Given the merge moved 721 files, this is
+the check that would have surfaced an upstream rename the fork failed to follow.
+Nothing was found.
+
+Getting that result took four attempts, and the three failures were **all
+memory**, not code — exit 137 with zero `error TS` lines. New §7.5 trap #5
+records the signature and the cause. The contributing factor was four abandoned
+`paperclip-company-cli-e2e` runs from previous sessions, 11 hours to 1.5 days
+old, holding ~2.5 GB; the operator authorised clearing them along with a stale
+`paperclipai run`. Available memory went 4 GB → 7 GB and typecheck passed on the
+next attempt.
+
+**Operational note for the next session:** typecheck and the four-group suite
+cannot run concurrently on this 15 GB host, and the server typecheck now builds
+upstream's Rust runner binary first. Run them in sequence.
+
+#### Suite ordering — run `general-server` last, not first
+
+§7.1 lists the four groups server-first. On this host that is the wrong order:
+§7.5 #4 records that `general-server` reliably fails for environmental reasons
+and it costs ~30 minutes, while **five of the eight §4 change sets have their
+tests in `general-workspaces-a`**. A first run this session spent 30 minutes on
+`general-server` and never reached the groups that exercise the fork. Prefer:
+
+```
+general-workspaces-a  →  general-workspaces-b  →  serialized  →  general-server
+```
+
+#### Full suite — all four groups, run in the corrected order
+
+| Group | Result |
+| --- | --- |
+| `general-workspaces-a` | **exit 0** — UI 527 files / 5128 tests, CLI 59 files / 426 tests. **Two summary blocks**, so neither project was skipped (§7.1) |
+| `general-workspaces-b` | **exit 0** — 12 project blocks, 2928 passed, 11 skipped |
+| `serialized` | **exit 0** — **141/141 suites, 2056 passed, zero failures.** The group ran to completion for the first time since the abort was documented; Session 12 had to strip the abort by hand to get past suite 60 |
+| `general-server` | exit 1 — 472 passed / 7 failed files; 5627 passed, 39 failed, 10 skipped |
+
+**~16,165 tests passed. Every one of the 39 failures is in `general-server` and
+every one is already classified — none is attributable to this merge.**
+
+**Failure classification (§7.4).** Identical to Session 14's, file for file. Six
+of the seven are **environmental**, all named in §7.5 #4: `workspace-runtime.test.ts`,
+`workspace-runtime-exposure-reservation.test.ts`,
+`services/workspace-runtime-exposure.test.ts`, `local-service-supervisor.test.ts`,
+and the two `cursor-local-*` files.
+
+The seventh, `cli-invocation-safety.test.ts`, is the **known fork-caused failure
+from v6** already recorded in Session 14 — the `--pnpm` comment lines in the two
+onboard scripts whose trailing prose defeats the guard's logical-line extraction.
+It was left unfixed pending the operator's call and **still is**. Confirmed
+pre-existing rather than merge-caused: the test file is untouched by this merge
+(`git log HEAD..FETCH_HEAD -- server/src/__tests__/cli-invocation-safety.test.ts`
+is empty) and the offending lines are present at `HEAD`.
+
+> **It reported five lines, not three — and two of them were this document.**
+> Session 14 recorded the failure by pasting the guard's output into the log. The
+> guard scans `CustomCodeDoc/`, so the pasted evidence became two more offending
+> lines for the next run: the register was manufacturing its own findings.
+> **When quoting this guard's output, wrap the phrase in backticks** —
+> `` `pnpm paperclipai` `` — because for a `.md` file the guard trusts a backtick
+> span adjacent to the marker and extracts only the phrase inside it. That is why
+> the one quoted line that already had backticks never tripped. Fixed in the
+> Session 14 entry by amendment; Session 15's own additions add none.
+
+#### Finding 5 — the v6 CLI-guard failure is fixed, on the operator's instruction
+
+Session 14 left `cli-invocation-safety.test.ts` failing and recorded the fix it
+recommended without applying it. The operator authorised it this session and it
+was done exactly as recommended: **reword the comments so the phrase ends the
+line.** The upstream test was not touched, `DOC_PHRASES` was not widened, and the
+extraction was not relaxed.
+
+Three comments, all in the fork's own onboard scripts:
+
+| File | Was | Now |
+| --- | --- | --- |
+| `onboard-paperclip-1.sh:18` | `(pnpm paperclipai, via tsx)` | trailing prose moved ahead; line ends `The form run is` / `pnpm paperclipai` |
+| `onboard-paperclip-1.sh:100` | `` `pnpm paperclipai` -> tsx over `` | ends `The form run is pnpm paperclipai` |
+| `onboard-paperclip-2.sh:209` | `(pnpm paperclipai,` | ends `The form run is` / `pnpm paperclipai` |
+
+A fourth and fifth offender were **this document** — see the amendment on the
+Session 14 entry. Fixed by backticking the quoted phrase.
+
+```
+cli-invocation-safety.test.ts   37 passed (37)
+```
+
+Both scripts pass `bash -n`, every changed line is a comment, and the executable
+bits are unchanged — no behavioural change to onboarding.
+
+#### Changes left in the working tree (uncommitted, per §5.4)
+
+The merge itself is staged (721 files). Beyond it:
+
+| File | Change | Why |
+| --- | --- | --- |
+| `ui/src/pages/NewAgent.tsx` | conflict resolution + availability gate | Finding 3 |
+| `ui/src/pages/NewAgent.test.tsx` | conflict resolution, mocks unified | Finding 3 |
+| `pnpm-lock.yaml` | regenerated (+180/−36) | Finding 2 — upstream's unrecorded work, not a fork change |
+| `CustomCodeDoc/onboard-paperclip-1.sh` | 2 comments reworded | Finding 5 |
+| `CustomCodeDoc/onboard-paperclip-2.sh` | 1 comment reworded | Finding 5 |
+| `CustomCodeDoc/Create agent from a login vault.md` | new §8 | Finding 3 rationale |
+| `CustomCodeDoc/Review and Test Changes.md` | §4.1 collision point, §7.5 traps 3+5, Session 14 amendment, this entry | — |
+
+`CustomCodeDoc/l` was deleted during `pnpm install` and restored from `HEAD`; it
+is a tracked scratch file, not part of the merge.
 
 ### 2026-09-01 — Session 14: v6 retirement review on `W6-20260831a` (upstream merge #38)
 
@@ -939,10 +1230,18 @@ describe the new `--pnpm` flag and mention `pnpm paperclipai` followed by
 trailing prose:
 
 ```
-CustomCodeDoc/onboard-paperclip-1.sh:18:  (pnpm paperclipai, via tsx)
+CustomCodeDoc/onboard-paperclip-1.sh:18:  (`pnpm paperclipai`, via tsx)
 CustomCodeDoc/onboard-paperclip-1.sh:100: `pnpm paperclipai` -> tsx over
-CustomCodeDoc/onboard-paperclip-2.sh:103: (pnpm paperclipai,
+CustomCodeDoc/onboard-paperclip-2.sh:103: (`pnpm paperclipai`,
 ```
+
+> **Amendment, 2026-09-01 (Session 15).** Backticks were added around the phrase
+> in the first and third quoted lines above. The entry is otherwise unchanged —
+> this is not a rewrite of the finding. As quoted originally those two lines were
+> themselves guard violations, so recording the failure re-created it inside this
+> document; the middle line never tripped because it already carried backticks,
+> which is the `.md` span rule doing its job. The underlying comments in the two
+> onboard scripts were reworded in Session 15 and the suite is now green.
 
 The bare phrase `pnpm paperclipai` is already in the guard's `DOC_PHRASES`, so
 prose mentions are fine in principle. The trip is the *trailing text*: for `.sh`

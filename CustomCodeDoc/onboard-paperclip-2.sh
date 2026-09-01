@@ -206,11 +206,12 @@
 #                          task, so skip it only when a live provider call is
 #                          unwanted. Also ONBOARD_SKIP_CREDENTIAL_CHECK=true.
 #   --mint-key             print a board API key and exit
-#   --pnpm                 run the CLI from this checkout (pnpm paperclipai,
-#                          via tsx over cli/src) instead of the installed
-#                          release, so a version you are editing in the IDE is
-#                          what these scripts drive. Outranks PAPERCLIP_CLI and
-#                          is passed through to onboard-paperclip-1.sh.
+#   --pnpm                 run the CLI from this checkout, via tsx over cli/src,
+#                          instead of the installed release, so a version you are
+#                          editing in the IDE is what these scripts drive.
+#                          Outranks PAPERCLIP_CLI and is passed through to
+#                          onboard-paperclip-1.sh. The form run is
+#                          pnpm paperclipai
 #   --dry-run      print what a run would do, change nothing. Tolerates a
 #                  stopped engine so a plan can still be previewed.
 #   --verify       report whether ownership, the company, the secret and the

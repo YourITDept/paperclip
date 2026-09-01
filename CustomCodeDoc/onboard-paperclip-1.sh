@@ -15,8 +15,9 @@
 #   ./onboard-paperclip-1.sh --lock-signup      # close signup once the CEO has claimed
 #
 # Flags: --owner-email <email>   --timeout <seconds>   --wait   --force
-#        --pnpm   run the CLI from this checkout (pnpm paperclipai, via tsx)
-#                 instead of the installed release. Outranks PAPERCLIP_CLI.
+#        --pnpm   run the CLI from this checkout, via tsx, instead of the
+#                 installed release. Outranks PAPERCLIP_CLI. The form run is
+#                 pnpm paperclipai
 #
 # THE ENGINE IS LEFT STOPPED when onboarding finishes. This script starts one
 # only long enough to write the config and run migrations, then stops it again;
@@ -97,9 +98,9 @@ find_repo_root() {
   return 1
 }
 
-# --pnpm runs the CLI from the working tree (`pnpm paperclipai` -> tsx over
-# cli/src/index.ts) instead of the installed release, so a version being edited
-# in the IDE is the one these scripts drive.
+# --pnpm runs the CLI from the working tree — tsx over cli/src/index.ts —
+# instead of the installed release, so a version being edited in the IDE is the
+# one these scripts drive. The form run is pnpm paperclipai
 #
 # --silent is NOT optional. pnpm prints its "> paperclip@ paperclipai ..."
 # banner on STDOUT, and every JSON capture in these scripts pipes stdout
