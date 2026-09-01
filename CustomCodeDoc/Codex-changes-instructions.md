@@ -1,14 +1,43 @@
 ---
 name: codex-home-changes
-description: What the PAPERCLIP_CODEX_HOME ("Codex Home") change set is, why it exists, exactly what was modified, what is verified, and the register of known gaps still open. Read this before touching any codex-local CODEX_HOME resolution code, and before concluding that the override "does not work" — section 2 and section 6 step 0 cover the two ways to test the wrong process entirely.
+description: HISTORICAL. The PAPERCLIP_CODEX_HOME ("Codex Home") change set — what it was, why it was built, exactly what it modified, and the gap register that ultimately retired it. The code it describes was removed from the fork in v6; nothing here matches the current tree. Read it for the reasoning if the managed-home question is ever reopened, not as a guide to code that exists.
 metadata:
-  status: OpenRouter path working and in use; gaps 5.2-5.6 open
+  status: RETIRED in v6 (88bca7b78) — superseded by per-agent credential binding; kept as historical record
   owner: Chris (cwa@youritdept.com)
   written: 2026-08-20
+  retired: 2026-08-31
   base-commit: 364ab497 "This seems to be working, so I'm going to test it through a release cycle."
+  superseded-by: CustomCodeDoc/Review and Test Changes.md §4.2, CustomCodeDoc/onboard-paperclip-2.sh
 ---
 
 # Codex Home change set — handoff instructions
+
+> # ⚠ RETIRED — this describes code that no longer exists
+>
+> **`PAPERCLIP_CODEX_HOME` was removed from the fork on 2026-08-31 in
+> `88bca7b78` ("We are now in v6").** So were the startup-banner rows that
+> reported it and the `OPENROUTER_API_KEY` entry in the ACPX `codex` host-env
+> allowlist. The removal was deliberate, not a merge accident: the commit has a
+> single parent and it rewrote `onboard-paperclip-2.sh` in the same breath to
+> replace the feature.
+>
+> **What replaced it.** A Codex vault is handed off with a plain `CODEX_HOME` —
+> the self-managed escape hatch this document was written to avoid — and
+> `OPENROUTER_API_KEY` is bound to each agent as a `secret_ref`. Resolved
+> adapter env is merged *after* the ACPX host-env projection and is not filtered
+> by it, so a bound key reaches the child process without any allowlist entry.
+> The trade the fork accepted: Paperclip no longer seeds auth, injects skills,
+> or merges `PAPERCLIP_CODEX_PROVIDERS` into those homes, so each vault's own
+> `config.toml` is authoritative. See
+> [`Review and Test Changes.md`](CustomCodeDoc/Review%20and%20Test%20Changes.md)
+> §4.2 for the current arrangement and its two known consequences.
+>
+> **Do not use this document to restore anything.** Sections 3, 3A, 4, 6 and 7
+> describe file contents, log lines, and a definition-of-done that the tree no
+> longer matches — every symbol they name is gone. Sections 1, 5 and 8 are the
+> parts still worth reading: they are the reasoning for why a third "managed but
+> relocatable" home state was wanted, and the gap register that argued against
+> keeping it. If the managed-home question is ever reopened, start there.
 
 > **RULE 0 — never commit, push, or check anything in.** The operator
 > reviews every diff visually in the VS Code IDE and commits it themselves.
@@ -32,12 +61,17 @@ config and, failing that, from the server's own process environment.
   staging all still happen — just at a path we chose instead of the default
   `<instanceRoot>/companies/<companyId>/codex-home`.
 
-**Status as of 2026-08-20:** the override now works for the case it was built for.
-The blocker was **not** the override plumbing — it was the credential gate, which
-recognised only OpenAI-shaped credentials and so rejected an OpenRouter home before
-dispatch. See **5.0**, which is the fix and the reproduction. 5.1 and 5.7 are fixed
-too; 5.2 through 5.6 are still open, and 5.6 is still a design decision, not a patch.
-Read 5.0 first, then section 8.
+**Status as of 2026-08-20 (superseded — see the banner above):** the override now
+works for the case it was built for. The blocker was **not** the override plumbing
+— it was the credential gate, which recognised only OpenAI-shaped credentials and
+so rejected an OpenRouter home before dispatch. See **5.0**, which is the fix and
+the reproduction. 5.1 and 5.7 are fixed too; 5.2 through 5.6 are still open, and
+5.6 is still a design decision, not a patch. Read 5.0 first, then section 8.
+
+**Status as of 2026-08-31:** retired. Gaps 5.2 through 5.6 were never closed, and
+v6 resolved them by removing the feature rather than the gaps — every one of them
+was a way the override could be silently ignored or applied to the wrong home.
+The "FIXED" markers below refer to code that has since been deleted.
 
 The original one-line requirement, verbatim from `Codex_Home.md` on the
 `W2-v2026.817.0a-CODEX` branch:

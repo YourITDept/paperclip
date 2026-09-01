@@ -289,12 +289,155 @@ invalid binding fails with *"adapterConfig.env must be a map of valid env
 bindings"*. `desiredSkills` is accepted here too, so an agent can get its skills
 in the same call instead of a later `skills:sync`.
 
-> **Why bind rather than rely on the host environment.** Resolved adapter env is
-> merged into the launch environment *after* the ACPX host-env projection and is
-> deliberately not filtered by it. A host-exported `OPENROUTER_API_KEY` is
-> filtered unless the fork's allowlist entry (§4 change set 9) is present; a
-> secret-bound one is not, ever. **Binding per agent is structurally immune to
-> the class of failure that broke OpenRouter in Session 12.**
+### Adding a second agent later — use `--add-agent`
+
+Re-running the full script to get one more agent is the wrong tool, and not
+harmlessly so. **A normal run re-locks instance ownership on every pass, which
+revokes every live bootstrap invite as a side effect** — correct exactly once, at
+handover; destructive on the fifth agent. It would also mint another set of
+invite links and, on a mistyped `--company`, create a *second* company and put
+the agent in it, which looks like success.
+
+```bash
+./onboard-paperclip-2.sh --add-agent \
+  --owner-email admin@example.com \
+  --company "Bring your AI to Life" \
+  --agent-name "OpenRouter Deepseek Agent" \
+  --codex-home /sysops/llm/openrouter/deepseek-v4-flash-0731 \
+  --model deepseek/deepseek-v4-flash-0731 \
+  --can-create-agents \
+  --task-title "..." --task-prompt "..."
+```
+
+`--add-agent` implies `--only agent,task`: no company is created, no invite is
+minted, ownership is untouched, and the company's existing OpenRouter secret is
+looked up and reused — so rotating that one secret moves every agent bound to
+it. The company must already exist; if the name does not match, the error lists
+the companies that do, with their ids. `--company-id <uuid>` targets one exactly
+and wins over `--company`.
+
+`--owner-email` is still needed, but **only as the identity this run's board API
+key is minted as** — it does not reassign ownership in this mode. Export
+`PAPERCLIP_API_KEY` beforehand and you can drop it entirely.
+
+Each agent gets its own vault via `--codex-home`, which is what makes a
+side-by-side model comparison possible: the vault's `config.toml` picks the
+provider, `--model` picks the model within it. Note the vault paths live under
+`/sysops/llm/openrouter/<name>` — a bare `/sysops/llm/<name>` does not exist and
+fails at run time, not at create time.
+
+#### Giving the new agent its own OpenRouter key
+
+**Four things carry a name here, and none of the three `--secret-*` flags takes
+the credential.** Confusing them is the main way to produce an agent that looks
+configured and 401s on first run — or to write a live API key into a plaintext
+column, which is what happened before these were separated:
+
+| Flag | What it names | Matched on by |
+| --- | --- | --- |
+| `--secret-identity` | what Paperclip **files the secret under** | every lookup in this script |
+| `--secret-name` | a display **label** | nothing |
+| `--secret-env` | the env var the secret binds to **inside the agent process** | the vault's `config.toml` auth command |
+| *(none of the above)* | the **credential** — `--openrouter-api-key-file`, `--openrouter-api-key`, or ambient `$OPENROUTER_API_KEY` | — |
+
+> **Why `--secret-identity` and not `--secret-key`.** Paperclip's own UI, API and
+> CLI call this field **"Key"**, and the script's flag was named to match. But
+> "key" reads as *the credential* to almost everyone, and that ambiguity put a
+> live OpenRouter token into the plaintext identity column of a real instance.
+> `--secret-key` is now **refused outright** rather than aliased to either
+> meaning: aliasing it to the identity would keep the trap, and aliasing it to
+> the credential would silently turn an older, correct
+> `--secret-key openrouter_api_key_deepseek` into a run that stores that literal
+> string as the API key. `ONBOARD_SECRET_KEY` is refused the same way; the new
+> variable is `ONBOARD_SECRET_IDENTITY`. When you read `Key` in the UI or `key=`
+> in `secrets list`, that is this field.
+
+`--secret-env` defaults to `OPENROUTER_API_KEY` because that is what the stock
+vaults read:
+
+```toml
+[model_providers.openrouter.auth]
+command = "sh"
+args = ["-c", 'printf %s "$OPENROUTER_API_KEY"']
+```
+
+So you normally leave it alone. Change it only when a vault reads something
+else — otherwise the secret is bound to a name nothing looks at, which is
+indistinguishable from a correct agent until its first real run. It is validated
+as a shell variable name, since it becomes both an `env` assignment in the probe
+and a JSON object key in `adapterConfig.env`.
+
+**`--secret-identity` and `--secret-env` are independent.** Two agents can hold
+different credentials under different `--secret-identity` values and still bind both
+to the same `--secret-env`, because each vault reads that one variable from its
+own process. That is the normal arrangement for a second OpenRouter key.
+
+Every lookup matches on the key, and the agent binds to whichever secret carries
+it. Three consequences that are easy to get wrong:
+
+- **`--secret-identity` is an identifier, never the credential.** Passing the API key
+  value there writes it into `company_secrets.key` — a plaintext column that
+  `secrets list` prints in full — while the encrypted value column silently
+  takes whatever was in `$OPENROUTER_API_KEY`. The API validator
+  (`/^[a-zA-Z0-9_.-]{1,120}$/`) accepts an OpenRouter token, so nothing errors
+  and the agent works. The script now refuses a `--secret-identity` that looks like a
+  credential; if an older run already did this, **rotate the key at the provider**
+  — deleting the secret does not un-disclose it.
+- Changing **only** `--secret-name` gets you nothing. Nothing matches on the
+  name, so the existing secret is found by key and the label is ignored. The run
+  now says so rather than reporting success; relabel with
+  `paperclipai secrets update <id> --payload-json '{"name":"..."}'`.
+- Reusing the **same** `--secret-identity` with a different value **rotates the
+  existing secret in place**, re-credentialling every agent already bound to it.
+  That is the documented behaviour of a normal run — one tenant, one credential —
+  and it is almost never what you want while adding an agent.
+
+So `--add-agent` refuses to rotate an existing secret and tells you the two
+things you might have meant. For a genuinely separate credential:
+
+```bash
+./onboard-paperclip-2.sh --add-agent \
+  --owner-email admin@example.com --company "Bring your AI to Life" \
+  --agent-name "OpenRouter Deepseek Agent" \
+  --secret-identity openrouter_api_key_deepseek \
+  --secret-name "OpenRouter (deepseek)" \
+  --openrouter-api-key-file /run/secrets/or-key-2 \
+  --codex-home /sysops/llm/openrouter/deepseek-v4-flash-0731 \
+  --model deepseek/deepseek-v4-flash-0731
+```
+
+Passing `--secret-identity` switches the secrets phase back on — it is the only phase
+that creates a secret, and `--add-agent` otherwise skips it. The new secret is
+created and the new agent binds to *that*; existing agents keep theirs.
+
+Both agents still bind their secret to the same **environment variable**,
+`OPENROUTER_API_KEY`, because that is the name each vault's `config.toml` auth
+command reads. The secret key distinguishes the credentials inside Paperclip;
+the env var name is set by the vault, and `--secret-env` is how you tell the
+script when a vault uses a different one.
+
+To deliberately re-credential every agent bound to one key, do it as its own
+operation rather than as a side effect of adding an agent:
+
+```bash
+./onboard-paperclip-2.sh --only secrets --company "Bring your AI to Life" \
+  --secret-identity openrouter_api_key --openrouter-api-key-file /run/secrets/new-key
+```
+
+> **Why bind rather than rely on the host environment — this is now mandatory,
+> not merely safer.** Resolved adapter env is merged into the launch environment
+> *after* the ACPX host-env projection and is deliberately not filtered by it. A
+> host-exported `OPENROUTER_API_KEY` **is** filtered: v6 retired the fork's
+> allowlist entry for it (change set 9, now `Review and Test Changes.md` §4.2),
+> so the `codex` lane no longer inherits that key from the server environment at
+> all. `pi` still does; `codex` does not.
+>
+> A secret-bound key is never filtered. So an agent created without this binding
+> gets an empty auth token and a 401 on its first real run — and since v6 also
+> removed the regression guard, no test will tell you. **Every Codex agent must
+> carry `OPENROUTER_API_KEY` as a `secret_ref`.** Binding per agent is
+> structurally immune to the class of failure that broke OpenRouter in Session
+> 12, which is why v6 could drop the allowlist patch.
 
 ---
 
@@ -346,15 +489,44 @@ paperclipai invite list -C "$COMPANY_ID" --json
 
 **Verify the provider credential end to end, not just that the secret exists.**
 The failure mode is an agent that looks perfectly configured and gets a 401 on
-first run:
+first run.
+
+**`onboard-paperclip-2.sh` now does this itself** in phase 6 and reports the
+verdict on a `codex:` line beside the other counts:
+
+```
+  codex:    PONG — provider: openrouter
+```
+
+A failure prints the provider's own error, sets the verify status, and exits
+non-zero, so a chained caller stops rather than proceeding with an agent that
+cannot authenticate. `--skip-credential-check` (or
+`ONBOARD_SKIP_CREDENTIAL_CHECK=true`) suppresses it when a live provider call is
+unwanted. It is skipped automatically, with the reason stated, when there is no
+`--codex-home` (the agent uses the managed home, which this host cannot stand in
+for), when the shell has no `OPENROUTER_API_KEY` to probe with, or when no
+`codex` binary can be found.
+
+To run the same probe by hand:
 
 ```bash
 CODEX_HOME=/sysops/llm/openrouter/default \
-  codex exec --skip-git-repo-check "Reply with exactly: PONG"
+  codex exec --skip-git-repo-check "Reply with exactly: PONG" < /dev/null
 ```
 
 Expect `provider: openrouter` and `PONG`. Without the key reaching the child you
 get `provider auth command 'sh' produced an empty token` and a `401`.
+
+> `< /dev/null` matters. `codex exec` appends stdin to the prompt and waits for
+> EOF, so run it from an interactive shell without redirecting and it sits on
+> "Reading additional input from stdin..." until you press Ctrl-D — which reads
+> exactly like a hung provider call.
+
+**What this proves and what it does not.** It proves the vault's `config.toml`
+selects a provider and its auth command yields a usable token. It does *not*
+prove the agent's bound `OPENROUTER_API_KEY` secret_ref resolves server-side —
+that is the heartbeat's binding-resolution path, and only a real run exercises
+it. `secrets doctor` is the check for the binding.
 
 ---
 

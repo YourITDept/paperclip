@@ -250,39 +250,81 @@ Upstream does not have any of this. An upstream change can silently undo it, and
 most of it fails *quietly*: no type error, no crash, just wrong behaviour. This
 is the list to check against every incoming change.
 
+**Three change sets were retired by the operator in v6 (`88bca7b78`) and are no
+longer carried.** They are kept in the table with their original numbers, marked
+RETIRED, so the numbered references throughout §8 still resolve. Do not
+"restore" them when a merge shows them absent — that is the intended state.
+§4.2 says what replaced them.
+
 | # | Change set | Its document | Principal files |
 | --- | --- | --- | --- |
 | 1 | **Reverse-proxy / forward-auth** — a `proxy_header` actor source resolved from `X-Forwarded-User`, off unless `PAPERCLIP_PROXY_AUTH_ENABLED=true` | [`ReverseProxyCustomChanges.md`](CustomCodeDoc/ReverseProxyCustomChanges.md), [`doc/REVERSE-PROXY-AUTH.md`](doc/REVERSE-PROXY-AUTH.md) | `server/src/auth/proxy-header-auth.ts`, `server/src/middleware/auth.ts`, `server/src/types/express.d.ts`, `server/src/services/authorization.ts`, `server/src/routes/authz.ts`, `server/src/realtime/live-events-ws.ts` |
-| 2 | **`PAPERCLIP_CODEX_HOME`** — relocates the Paperclip-*managed* Codex home without opting out of management | [`Codex-changes-instructions.md`](CustomCodeDoc/Codex-changes-instructions.md) | `packages/adapter-utils/src/server-utils.ts`, `packages/adapter-utils/src/acpx-engine/execute.ts`, `packages/adapters/codex-local/src/server/{execute,codex-home,acp,test}.ts` |
+| 2 | ~~**`PAPERCLIP_CODEX_HOME`** — relocates the Paperclip-*managed* Codex home without opting out of management~~ **RETIRED in v6 — see §4.2** | [`Codex-changes-instructions.md`](CustomCodeDoc/Codex-changes-instructions.md) (historical) | none — removed from `packages/adapter-utils/src/server-utils.ts`, `packages/adapter-utils/src/acpx-engine/execute.ts`, `packages/adapters/codex-local/src/server/{execute,codex-home,acp,test}.ts` |
 | 3 | **Codex credential vaults** — provision `/sysops/llm/codex/<name>`, sign in, sign out, delete, from Settings | [`Codex device login web service.md`](CustomCodeDoc/Codex%20device%20login%20web%20service.md) | `server/src/services/codex-vault-login-service.ts`, `server/src/routes/codex-vaults.ts`, `ui/src/pages/InstanceCodexVaults.tsx`, `ui/src/api/codexVaults.ts`, `packages/adapters/codex-local/src/server/{codex-vault,host-login-pty}.ts` |
 | 4 | **Claude credential vaults** — the sibling feature, `/sysops/llm/claude/<name>` and `CLAUDE_CONFIG_DIR` | [`Claude device login web service.md`](CustomCodeDoc/Claude%20device%20login%20web%20service.md) | `server/src/services/claude-vault-login-service.ts`, `server/src/routes/claude-vaults.ts`, `ui/src/pages/InstanceClaudeVaults.tsx`, `ui/src/api/claudeVaults.ts`, `packages/adapters/claude-local/src/server/{claude-vault,claude-host-login-pty}.ts` |
 | 5 | **Create agent from a login vault** — a button that opens New Agent with the runtime and the vault directory prefilled | [`Create agent from a login vault.md`](CustomCodeDoc/Create%20agent%20from%20a%20login%20vault.md) | `ui/src/lib/new-agent-preset.ts`, `ui/src/components/CreateAgentFromLoginButton.tsx`, `ui/src/pages/NewAgent.tsx` |
 | 6 | **Invite auto-accept guard** — `Boolean(invite) &&` as the first term of `shouldAutoAcceptHumanInvite` | [`Reviewing onboarding process and error messages.md`](CustomCodeDoc/Reviewing%20onboarding%20process%20and%20error%20messages.md), and `ReverseProxyCustomChanges.md` §0.1 #1 | `ui/src/pages/InviteLanding.tsx` |
-| 7 | **Startup banner** | — | `server/src/startup-banner.ts` |
+| 7 | ~~**Startup banner** — the Codex Home and OpenRouter rows~~ **RETIRED in v6 — see §4.2** | — | none — rows and helpers removed from `server/src/startup-banner.ts`; `startup-banner.test.ts` deleted |
 | 8 | **Local packaging scripts** | [`builds paperclip.md`](CustomCodeDoc/builds%20paperclip.md) | `scripts/pack-local.sh`, `scripts/reset-local.sh`, `releases/` |
-| 9 | **`OPENROUTER_API_KEY` in the ACPX `codex` host-env allowlist** — without it an OpenRouter-backed Codex vault gets an empty auth token and a 401 | §8 Session 12, Finding 2 | `packages/adapter-utils/src/acpx-engine/execute.ts` (`ACPX_INHERITED_PROVIDER_ENV_KEYS`), `packages/adapter-utils/src/acpx-engine/execute-identity.test.ts` |
+| 9 | ~~**`OPENROUTER_API_KEY` in the ACPX `codex` host-env allowlist**~~ **RETIRED in v6 — see §4.2.** The key is now bound per-agent instead of inherited from the host | §8 Session 12, Finding 2 (historical) | none — entry removed from `ACPX_INHERITED_PROVIDER_ENV_KEYS` in `packages/adapter-utils/src/acpx-engine/execute.ts`; guard removed from `execute-identity.test.ts` |
 
-### 4.1 The three files where fork and upstream both edit
+### 4.1 The files where fork and upstream both edit
 
 These are the collision points. A merge conflict here is normal and both sides
 are almost always kept:
 
 - `server/src/app.ts` — the fork's vault route imports and `api.use(...)` mounts.
-- `packages/adapter-utils/src/acpx-engine/execute.ts` — the fork's
-  `PAPERCLIP_CODEX_HOME` resolution and its provenance log line.
-- `packages/adapters/codex-local/src/server/execute.ts` — the same override on
-  the Codex CLI lane.
+- `server/src/__tests__/openapi-routes.test.ts` — the fork's `codex-vaults.ts`
+  and `claude-vaults.ts` entries in `explicitOpenApiCoverageExclusions`. Added
+  as a collision point in Session 12. An upstream rewrite of that set drops them
+  silently and the suite goes red naming both files.
 
-A fourth collision point was added in Session 12:
-`server/src/__tests__/openapi-routes.test.ts` — the fork's `codex-vaults.ts` and
-`claude-vaults.ts` entries in `explicitOpenApiCoverageExclusions`. An upstream
-rewrite of that set drops them silently and the suite goes red naming both files.
+**v6 removed two of the four.** `packages/adapter-utils/src/acpx-engine/execute.ts`
+and `packages/adapters/codex-local/src/server/execute.ts` were collision points
+only because change sets 2 and 9 lived in them. With both retired the fork now
+carries nothing in either file, so an upstream change to `ACPX_INHERITED_PROVIDER_ENV_KEYS`
+or to Codex home resolution is upstream's business alone — take it as-is.
 
-Change set 9 lives in the first of these too: the fork's `OPENROUTER_API_KEY`
-entry sits inside upstream's `ACPX_INHERITED_PROVIDER_ENV_KEYS` table, so an
-upstream edit to that table is a likely conflict — and, worse, a *silent* loss if
-upstream rewrites the table wholesale. The regression guard in
-`execute-identity.test.ts` is what turns that into a red test instead of a 401.
+### 4.2 What v6 retired, and what replaced it
+
+Commit `88bca7b78` ("Looks like we fixed everything… We are now in v6") is a
+single-parent commit on the fork branch, not a merge resolution. It deliberately
+removed change sets 2, 7, and 9 and rewrote `onboard-paperclip-2.sh` in the same
+commit to replace them. The thesis: **bind Codex credentials per-agent instead of
+carrying fork patches that make host-level configuration work.**
+
+What that means concretely:
+
+- **A Codex vault is now handed off with a plain `CODEX_HOME`**, the escape hatch
+  upstream already supports. Paperclip treats the home as self-managed — it does
+  not seed auth, inject skills, merge `PAPERCLIP_CODEX_PROVIDERS`, or rewrite
+  `config.toml` — so the vault's own `config.toml` is authoritative for the
+  provider. `--model` layers on top as a CLI flag. This is the hand-off that
+  change set 2 existed to avoid, now accepted on purpose.
+- **`OPENROUTER_API_KEY` is bound as a per-agent `secret_ref`**, not inherited
+  from the server environment. Resolved adapter env is merged *after* the ACPX
+  host-env projection and is not filtered by it, so a bound key always reaches
+  the child process. That is what makes the change set 9 allowlist entry
+  unnecessary — and it is stated in `onboard-paperclip-2.sh` at the `ENV_JSON`
+  block, which is the authority for this behaviour.
+- **The banner rows went with them**, having nothing left to report.
+
+**The one thing this does not cover.** A Codex agent whose OpenRouter key comes
+*only* from the host environment — created through the UI, or predating the
+script rewrite — now gets an empty auth token and a 401, with no test to catch
+it. `pi` still carries `OPENROUTER_API_KEY` in the allowlist; `codex` no longer
+does. Every Codex agent must therefore be created by `onboard-paperclip-2.sh`,
+or have the key bound to it by hand. Treat a 401 with
+`provider auth command 'sh' produced an empty token` as this diagnosis until
+proven otherwise.
+
+A second consequence, narrower: the pre-dispatch credential gate in
+`heartbeat.ts` lost its provider-aware branch, so a *managed* home routed at a
+non-OpenAI provider through `PAPERCLIP_CODEX_PROVIDERS` is now blocked for a
+missing `OPENAI_API_KEY` before it ever reaches the merge that would have
+configured it. `runtime-config.ts` still performs that merge, so the capability
+exists but is unreachable on the managed path. Harmless while every Codex agent
+uses an explicit `CODEX_HOME` vault; a dead end if one does not.
 
 ---
 
@@ -441,9 +483,13 @@ For each incoming commit, ask the three questions in order:
 ### 6.5 Verify the merge kept both sides in the §4.1 collision files
 
 ```bash
-grep -n "managedCodexHomeOverride\|PAPERCLIP_CODEX_HOME" packages/adapter-utils/src/acpx-engine/execute.ts
 grep -n "codexVault\|claudeVault" server/src/app.ts server/src/routes/index.ts
+grep -n "codex-vaults\|claude-vaults" server/src/__tests__/openapi-routes.test.ts
 ```
+
+The two `execute.ts` greps that used to live here were dropped in v6 along with
+change sets 2 and 9 (§4.2). If you find yourself reaching for them, the answer
+you want is "nothing fork-carried is in those files any more."
 
 ---
 
@@ -588,7 +634,8 @@ corepack pnpm exec vitest run server/src/__tests__/codex-vault-login-service.tes
   packages/adapters/codex-local/src/server/codex-vault.test.ts \
   packages/adapters/claude-local/src/server/claude-vault.test.ts
 
-# change set 2 — PAPERCLIP_CODEX_HOME
+# change set 2 — RETIRED in v6 (§4.2). These two suites still exist and still
+# pass, but they now cover upstream's Codex home behaviour, not a fork patch.
 corepack pnpm exec vitest run packages/adapters/codex-local/src/server/codex-home.test.ts \
   packages/adapter-utils/src/server-utils.test.ts
 
@@ -598,13 +645,16 @@ corepack pnpm exec vitest run ui/src/lib/new-agent-preset.test.ts ui/src/pages/N
 # change set 6 — invite auto-accept guard (18/18 expected)
 corepack pnpm exec vitest run ui/src/pages/InviteLanding.test.tsx
 
-# change set 9 — OPENROUTER_API_KEY reaches the codex launch env (9/9 expected)
+# change set 9 — RETIRED in v6 (§4.2). The suite remains; the OPENROUTER_API_KEY
+# guard inside it is gone, so it no longer proves anything about the Codex lane.
 corepack pnpm exec vitest run \
   packages/adapter-utils/src/acpx-engine/execute-identity.test.ts
 ```
 
-**Change set 9 has an out-of-band check too**, because the failure is a runtime
-401 rather than a type error. Against the real vault:
+**The out-of-band vault check is now the only check for the OpenRouter path**,
+because v6 removed the regression guard that made the failure a red test. The
+failure is a runtime 401 rather than a type error, so run this against the real
+vault whenever Codex credential wiring is in question:
 
 ```bash
 CODEX_HOME=/sysops/llm/openrouter/default \
@@ -613,8 +663,17 @@ CODEX_HOME=/sysops/llm/openrouter/default \
 ```
 
 Expect `provider: openrouter` and `PONG`. Re-run it with
-`env -u OPENROUTER_API_KEY` to see the failure mode the allowlist entry prevents:
-`provider auth command 'sh' produced an empty token`, then `401 Unauthorized`.
+`env -u OPENROUTER_API_KEY` to see the failure mode: `provider auth command 'sh'
+produced an empty token`, then `401 Unauthorized`. Under v6 that is also what an
+agent looks like when its key was never bound as a `secret_ref` — the host
+environment no longer supplies it. Confirm the binding with:
+
+```bash
+paperclipai agent get <agent-id> --json | jq '.adapterConfig.env'
+```
+
+Expect `CODEX_HOME` as a `plain` value and `OPENROUTER_API_KEY` as a
+`secret_ref`. An agent missing the second one will 401 on its first real run.
 
 ### 7.3 Typecheck
 
@@ -674,19 +733,30 @@ They report **`(0 test)`**, not assertion failures — that is the signature.
 #### 2. The deployment's own `PAPERCLIP_*` env leaks into the tests
 
 ```bash
-env -u PAPERCLIP_CODEX_HOME corepack pnpm run test:run
+env -u PAPERCLIP_PUBLIC_URL -u PAPERCLIP_TELEMETRY_DISABLED corepack pnpm run test:run
 ```
 
-**This is the most important line in this document.** The container exports
+**The class is the important part of this section; keep reading to 2c.** The
+container exports ~24 `PAPERCLIP_*` variables for the live deployment and the
+suite assumes a clean environment.
+
+> **The original case here — `PAPERCLIP_CODEX_HOME` — can no longer fire.** v6
+> removed every reader of that variable (§4.2); `grep -rn PAPERCLIP_CODEX_HOME`
+> over `server/src ui/src cli/src packages scripts` returns nothing. Unsetting it
+> is now harmless but pointless. The account below is kept because it is the
+> clearest worked example of the class, and because the *contamination it caused*
+> is real and may still be on disk — see the forensic tell at the end.
+
+The container exports
 `PAPERCLIP_CODEX_HOME=/sysops/llm/openrouter/default` for the running
 deployment. `server/src/__tests__/codex-local-execute.test.ts` builds a hermetic
 sandbox — it redirects `HOME`, `PAPERCLIP_HOME`, `CODEX_HOME`, and deletes
-`PAPERCLIP_INSTANCE_ID` and `PAPERCLIP_IN_WORKTREE` — but it **never touches
-`PAPERCLIP_CODEX_HOME`**, because that variable does not exist upstream. It is
+`PAPERCLIP_INSTANCE_ID` and `PAPERCLIP_IN_WORKTREE` — but it **never touched
+`PAPERCLIP_CODEX_HOME`**, because that variable did not exist upstream. It was
 ours.
 
-So the fork's override does its job and redirects the "managed home" *out of the
-sandbox and onto the real vault*. What then happens to `/sysops/llm/openrouter/default`:
+So the fork's override did its job and redirected the "managed home" *out of the
+sandbox and onto the real vault*. What then happened to `/sysops/llm/openrouter/default`:
 
 | Artifact | Where it comes from |
 | --- | --- |
@@ -749,8 +819,9 @@ Verified: with the variable cleared, both cases pass.
 
 The container exports ~24 `PAPERCLIP_*` variables for the live deployment and the
 suite assumes a clean environment. **Three have bitten so far** —
-`PAPERCLIP_CODEX_HOME`, `PAPERCLIP_PUBLIC_URL`, and now
-`PAPERCLIP_TELEMETRY_DISABLED`. `PAPERCLIP_DEPLOYMENT_MODE=authenticated`,
+`PAPERCLIP_CODEX_HOME` (retired in v6, no longer reachable),
+`PAPERCLIP_PUBLIC_URL`, and `PAPERCLIP_TELEMETRY_DISABLED`, leaving two live.
+`PAPERCLIP_DEPLOYMENT_MODE=authenticated`,
 `PAPERCLIP_PROXY_AUTH_ENABLED=true`, `PAPERCLIP_ALLOWED_HOSTNAMES` and
 `PAPERCLIP_CONFIG` remain plausible next candidates.
 
@@ -818,6 +889,195 @@ files. Re-run a suspect suite alone before classifying it.
 > **Numbering note.** The header at the top of this file calls the session log
 > "§7". It is this section, **§8** — §7 is the test procedure. Kept as-is so old
 > cross-references still resolve; read "§7 session log" as this section.
+
+### 2026-09-01 — Session 14: v6 retirement review on `W6-20260831a` (upstream merge #38)
+
+**Who:** Claude (Opus 5) with chris@anderson-family.com
+**Branch:** `W6-20260831a` @ `21f2ed861`. Upstream merge #38 was a lockfile
+refresh only (`9f9a950d0`); all source change came from the fork's own
+`88bca7b78`, a single-parent commit, not a merge resolution.
+**Scope:** full documentation review, full four-group suite, §4 register audit.
+
+**Outcome: three change sets were retired on purpose, six survive intact, and
+the suite is green apart from the standing environmental set plus one new
+fork-caused failure that v6 introduced.**
+
+**The retirement.** Change sets 2, 7 and 9 are gone, removed deliberately by
+`88bca7b78`, which rewrote `onboard-paperclip-2.sh` in the same commit to
+replace them with a `CODEX_HOME` hand-off plus per-agent `secret_ref` binding.
+Confirmed operator intent this session. Recorded in §4.2; §4.1, §6.5, §7.2 and
+§7.5 #2 updated to match; `Codex-changes-instructions.md` marked historical.
+The removal is clean — every removed symbol greps to zero references.
+
+Change sets 1, 3, 4, 5, 6 and 8 were verified present file by file: vault
+services and routes, both vault UI pages, `new-agent-preset.ts`,
+`CreateAgentFromLoginButton.tsx`, the `proxy_header` actor source, the
+`Boolean(invite) &&` guard at `InviteLanding.tsx:307`, both `app.ts` mounts,
+and both `openapi-routes.test.ts` exclusions.
+
+**Test results** (four groups, per §7.1, with the §7.5 #1 SDK build and the
+`CLEAN` env):
+
+| Group | Result |
+| --- | --- |
+| `general-server` | 39 failed / 5436 passed / 9 skipped — 7 files |
+| `general-workspaces-a` | 504 passed + 59 passed — **two blocks, so the §7.1 truncation did not bite** |
+| `general-workspaces-b` | 12 blocks, all passed |
+| `serialized` | 142 files, all passed |
+
+**Failure classification (§7.4).** Six of the seven failing files are
+**environmental**, all named in §7.5 #4: `workspace-runtime.test.ts`,
+`workspace-runtime-exposure-reservation.test.ts`,
+`services/workspace-runtime-exposure.test.ts`, `local-service-supervisor.test.ts`,
+and the two `cursor-local-*` files, which fail with exit **127** exactly as
+documented because `cursor-agent` is not installed in the image.
+
+The seventh is **fork-caused and new in v6**:
+`cli-invocation-safety.test.ts` → *"allows only exact-allowlist pnpm paperclipai
+commands on every guidance surface"*. Three comment lines added by `88bca7b78`
+describe the new `--pnpm` flag and mention `pnpm paperclipai` followed by
+trailing prose:
+
+```
+CustomCodeDoc/onboard-paperclip-1.sh:18:  (pnpm paperclipai, via tsx)
+CustomCodeDoc/onboard-paperclip-1.sh:100: `pnpm paperclipai` -> tsx over
+CustomCodeDoc/onboard-paperclip-2.sh:103: (pnpm paperclipai,
+```
+
+The bare phrase `pnpm paperclipai` is already in the guard's `DOC_PHRASES`, so
+prose mentions are fine in principle. The trip is the *trailing text*: for `.sh`
+files the guard deliberately extracts to the logical line end and refuses to
+treat a quote, backtick or paren as a boundary, so the whole tail becomes the
+"command" and fails the allowlist.
+
+**Recommended fix — reword the three comments so the phrase ends the line.** Do
+not add these to `DOC_PHRASES` and do not relax the extraction: that is an
+upstream test file, editing it creates a new fork-carried change in a file §4
+does not list, and it would weaken a fail-closed guard to accommodate a comment.
+Left unfixed this session pending the operator's call.
+
+**Change made this session: `onboard-paperclip-2.sh` verifies the credential
+itself.** The script previously ended by printing a `codex exec … PONG` command
+for the operator to run later — the one check that catches an agent which looks
+configured and 401s on its first real task, left as homework. It now runs that
+probe in phase 6, reports `codex: PONG — provider: openrouter` beside the other
+counts, and on failure prints the provider's own error, sets the verify status
+and exits non-zero. Skippable with `--skip-credential-check`; skipped
+automatically with a stated reason when there is no `--codex-home`, no
+`OPENROUTER_API_KEY` in the shell, or no `codex` binary.
+
+Writing it surfaced a latent bug worth knowing independently: **`codex exec`
+appends stdin to the prompt and blocks until EOF.** Run without redirecting
+stdin it hangs on "Reading additional input from stdin..." for the full timeout
+— which is what an operator running the documented command from an interactive
+SSH session would hit, and it looks exactly like a hung provider call. The probe
+redirects `< /dev/null`; the by-hand form in `Paperclip Onboarding Steps.md` now
+does too. All five paths were exercised: happy path against the real vault, a
+forced 401 with a bogus key, and the three skip conditions.
+
+**Second change: `--add-agent`, for adding an agent to an existing company.**
+There was no way to do this except re-running the whole script, which re-locks
+instance ownership on every pass — revoking every live bootstrap invite as a
+side effect of adding an agent — mints another set of invite links, and on a
+mistyped `--company` creates a second company and puts the agent in it.
+`--add-agent` implies `--only agent,task`, never touches ownership or invites,
+refuses to create a company (listing the ones that do exist, with ids, when the
+name misses), and reuses the company's existing OpenRouter secret. Added
+`--company-id <uuid>` alongside it, which resolves ahead of the phase gate
+because an id is an instruction to use *that* company. `--owner-email` is still
+required to mint the run's key, and the error now says plainly that in this mode
+it does not reassign ownership.
+
+**Third change: `--secret-identity` / `--secret-name`, and a guard on rotation.** The
+secret name and key were env-only (`ONBOARD_SECRET_*`) and undocumented in
+`--help`, so there was no way to give a second agent its own OpenRouter
+credential. Both are flags now. The trap they expose is worth stating plainly:
+**every lookup matches on the secret KEY, never the name**, so changing only the
+name is a no-op, and reusing the same key with a different value *rotates the
+existing secret in place* and re-credentials every agent already bound to it.
+Correct for a tenant standing up; silently destructive while adding an agent. So
+`--add-agent` now refuses to rotate any existing secret and names both
+alternatives — a new `--secret-identity` for a separate credential, or an explicit
+`--only secrets` run without `--add-agent` for a real rotation. Passing
+`--secret-identity` under `--add-agent` switches the secrets phase back on, since
+that phase is the only thing that creates one.
+
+`--secret-env` completes the set: the env var the secret binds to in
+`adapterConfig.env` was hardcoded to `OPENROUTER_API_KEY`, so a vault whose auth
+command read anything else would get a secret bound to a name nothing looks at —
+configured-looking, 401 on first run. It is now a flag, defaulting to the old
+literal, validated as a shell variable name (it becomes both an `env`
+assignment in the probe and a JSON object key), and the probe supplies the key
+under that same name instead of relying on an ambient `OPENROUTER_API_KEY`.
+The three are independent and worth stating together, because confusing them is
+the failure mode: **name** is a label matched on by nothing, **key** is the
+identity inside Paperclip, **env** is the variable inside the agent process.
+
+**Incident found while testing the above: a live OpenRouter key is stored in a
+plaintext identity column.** An operator run passed the credential *value* to
+`--secret-identity`, which takes an identifier. Nothing caught it — the API's own
+validator is `/^[a-zA-Z0-9_.-]{1,120}$/` and an OpenRouter token satisfies it —
+so the key landed in `company_secrets.key`, which `secrets list` prints in full,
+while the encrypted value column took whatever was in the ambient environment.
+No error, and the agents work, so the leak is silent. It also put the key in
+argv, readable by any process on the host via `ps`.
+
+State on `Bring your AI to Life` (`e9403aa6`) at the time of writing: secret
+`fe0d751a` "OpenRouterDeepseekKey" carries the token as its key, and
+`OpenRouter Deepseek Agent 2` and `3` are bound to it. `7b272dd2`
+"OpenRouter" (key `openrouter_api_key`) is correct and carries the other two
+agents. **The disclosed key needs rotating at OpenRouter, not just deleting
+here** — deleting the secret does not un-disclose it, and the same token is the
+one in `/sysops/llm/openrouter/*/config.toml` auth commands and the container
+environment.
+
+Two guards added. `--secret-identity` now refuses a value that looks like a
+credential — a known token prefix (`sk-`, `pk-`, `ghp_`, `xoxb-`), a
+byte-for-byte match against `$OPENROUTER_API_KEY`, or 60+ characters with no
+underscore — and names where the credential actually goes. Separately, when a
+secret is found by key and `--secret-name` differs from its stored name, the run
+now says the name was ignored and gives the `secrets update --payload-json`
+command to relabel it; that silence was the operator-visible symptom that
+surfaced the whole thing.
+
+**Follow-on: `--secret-key` renamed to `--secret-identity` and the old spelling
+refused.** The operator's read — that "key" names the credential, not the
+identity — is the same read that caused the leak above, so the flag was the
+defect rather than the operator. Paperclip's own UI, API, CLI and DB column all
+call this field **"Key"**, which is why the script matched it; the script now
+deliberately diverges and says which platform field it means.
+
+`--secret-key` and `ONBOARD_SECRET_KEY` are **errors**, not aliases, and that is
+the load-bearing decision. Aliasing to the identity would preserve the trap.
+Aliasing to the credential — the intuitive reading — would silently turn an
+older, correct `--secret-key openrouter_api_key_deepseek` into a run storing
+that literal string as the API key: the same failure mode, inverted, and equally
+silent. Refusing is the only mapping that cannot corrupt something quietly. The
+error names both destinations, so either intent lands in one step.
+
+Two placement bugs surfaced while doing it, both the same shape as the earlier
+`credential_check` one: guards written into the argument loop, which runs before
+`die()` and the other helpers are defined. The flag case now reports the way the
+loop's own unknown-argument branch does; the env-var guard moved below the
+helpers. Worth noting as a pattern in this script — anything validating an
+argument must sit after the helper block, not beside the parser.
+
+Both vaults were probed directly and answer `PONG`:
+`/sysops/llm/openrouter/default` (`openai/gpt-5.6-luna`) and
+`/sysops/llm/openrouter/deepseek-v4-flash-0731`
+(`deepseek/deepseek-v4-flash-0731`). Worth recording because the vault paths are
+under `/sysops/llm/openrouter/<name>` — a bare `/sysops/llm/<name>` does not
+exist, and Codex fails on it at run time rather than at agent-create time.
+
+**Also found: live contamination in the OpenRouter vault.**
+`/sysops/llm/openrouter/default/auth.json` is a dangling symlink into
+`/tmp/pcvt-126226-1-SZOm9T/...`, dated 2026-08-31 00:21 — the §7.5 #2 artifact,
+created before v6 by a test run. `config.toml` is intact and correct and
+`skills/` are real directories, so that symlink is the only damage. It cannot
+recur now that nothing reads `PAPERCLIP_CODEX_HOME`. Left in place, unfixed,
+pending the operator's call.
+
+---
 
 ### 2026-08-31 — Session 13: verify the fork on `W5-20260830a` (upstream merge #36)
 

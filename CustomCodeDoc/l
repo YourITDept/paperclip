@@ -1,0 +1,10 @@
+./onboard-paperclip-2.sh --pnpm \
+  --add-agent --pnpm \
+  --company "Bring your AI to Life" \
+  --owner-email admin@bringyouraito.life \
+  --agent-name "OpenRouter Deepseek Agent 7" \
+  --secret-identity openrouter_api_key_deepseek7 \
+  --secret-name "OpenRouter7" \
+  --openrouter-api-key "${OPENROUTER_API_KEY}" \
+  --codex-home /sysops/llm/openrouter/deepseek-v4-flash-0731 \
+  --model deepseek/deepseek-v4-flash-0731
