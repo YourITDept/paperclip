@@ -46,13 +46,19 @@ const mockProjectsApi = vi.hoisted(() => ({ list: vi.fn() }));
 const mockAssetsApi = vi.hoisted(() => ({ uploadImage: vi.fn() }));
 const mockClipboard = vi.hoisted(() => ({ copyTextToClipboard: vi.fn() }));
 const navigateMock = vi.hoisted(() => vi.fn());
+const mockAdapterAvailability = vi.hoisted(() => ({
+  disabled: new Set<string>(),
+  loaded: true,
+}));
 // The page reads its preset out of the query string. Held in a ref so a test can
-// render the page as the Claude/Codex login settings page navigates to it.
-const routerSearch = vi.hoisted(() => ({ current: "" }));
+// render the page as the Claude/Codex login settings page navigates to it. The
+// fork's `routerSearch` ref was merged into this upstream equivalent — one
+// `vi.mock` factory can only supply one `useSearchParams`.
+const mockSearchParams = vi.hoisted(() => ({ value: new URLSearchParams() }));
 
 vi.mock("@/lib/router", () => ({
   useNavigate: () => navigateMock,
-  useSearchParams: () => [new URLSearchParams(routerSearch.current), vi.fn()],
+  useSearchParams: () => [mockSearchParams.value, vi.fn()],
 }));
 
 vi.mock("../context/CompanyContext", () => ({
@@ -76,7 +82,8 @@ vi.mock("../lib/clipboard", () => ({
 }));
 
 vi.mock("../adapters/use-disabled-adapters", () => ({
-  useDisabledAdaptersSync: () => new Set<string>(),
+  useDisabledAdaptersSync: () => mockAdapterAvailability.disabled,
+  useAdapterRegistryLoaded: () => mockAdapterAvailability.loaded,
 }));
 
 // The form reads the projected adapter login capability to pick the login flow
@@ -309,7 +316,9 @@ describe("NewAgent Claude subscription login", () => {
   let roots: Root[] = [];
 
   beforeEach(() => {
-    routerSearch.current = "";
+    mockAdapterAvailability.disabled = new Set<string>();
+    mockAdapterAvailability.loaded = true;
+    mockSearchParams.value = new URLSearchParams();
     primeApiMocks();
   });
 
@@ -414,6 +423,26 @@ describe("NewAgent Claude subscription login", () => {
       },
     });
   });
+
+  it("ignores a native-runner URL preset while the experimental adapter is disabled", async () => {
+    mockSearchParams.value = new URLSearchParams("adapterType=paperclip_runner");
+    mockAdapterAvailability.disabled = new Set(["paperclip_runner"]);
+
+    const result = await renderNewAgent();
+    roots.push(result.root);
+
+    expect(result.container.textContent).not.toContain("Paperclip Runner");
+    expect(result.container.textContent).toContain("Claude Code");
+  });
+
+  it("accepts a native-runner URL preset after the experimental adapter is enabled", async () => {
+    mockSearchParams.value = new URLSearchParams("adapterType=paperclip_runner");
+
+    const result = await renderNewAgent();
+    roots.push(result.root);
+
+    expect(result.container.textContent).toContain("Paperclip Runner");
+  });
 });
 
 // The Claude and Codex login settings pages hand this page a preset in the query
@@ -424,7 +453,9 @@ describe("NewAgent login-vault preset", () => {
   let roots: Root[] = [];
 
   beforeEach(() => {
-    routerSearch.current = "";
+    mockAdapterAvailability.disabled = new Set<string>();
+    mockAdapterAvailability.loaded = true;
+    mockSearchParams.value = new URLSearchParams();
     primeApiMocks();
   });
 
@@ -441,7 +472,9 @@ describe("NewAgent login-vault preset", () => {
 
   it("preselects the runtime and prefills the vault directory into the create request", async () => {
     const dir = "/sysops/llm/codex/codex_device";
-    routerSearch.current = `adapterType=codex_local&env=CODEX_HOME%3D${encodeURIComponent(dir)}`;
+    mockSearchParams.value = new URLSearchParams(
+      `adapterType=codex_local&env=CODEX_HOME%3D${encodeURIComponent(dir)}`,
+    );
 
     const result = await renderNewAgent();
     roots.push(result.root);
@@ -462,8 +495,9 @@ describe("NewAgent login-vault preset", () => {
   });
 
   it("ignores a preset variable a crafted link should not be able to set", async () => {
-    routerSearch.current =
-      "adapterType=claude_local&env=PAPERCLIP_API_URL%3Dhttp%3A%2F%2Fevil.test";
+    mockSearchParams.value = new URLSearchParams(
+      "adapterType=claude_local&env=PAPERCLIP_API_URL%3Dhttp%3A%2F%2Fevil.test",
+    );
 
     const result = await renderNewAgent();
     roots.push(result.root);

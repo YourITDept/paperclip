@@ -30,8 +30,11 @@ import {
 import { defaultCreateValues } from "../components/agent-config-defaults";
 import { buildFixedClaudeOAuthBinding } from "../components/environment-variables-editor/model";
 import type { EnvBinding } from "@paperclipai/shared";
-import { getUIAdapter, listUIAdapters } from "../adapters";
-import { useDisabledAdaptersSync } from "../adapters/use-disabled-adapters";
+import { getUIAdapter } from "../adapters";
+import {
+  useAdapterRegistryLoaded,
+  useDisabledAdaptersSync,
+} from "../adapters/use-disabled-adapters";
 import { isValidAdapterType } from "../adapters/metadata";
 import { ReportsToPicker } from "../components/ReportsToPicker";
 import { buildNewAgentHirePayload } from "../lib/new-agent-hire-payload";
@@ -128,6 +131,8 @@ export function NewAgent() {
     result: null,
     login: null,
   });
+  const disabledTypes = useDisabledAdaptersSync();
+  const adapterRegistryLoaded = useAdapterRegistryLoaded();
 
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
@@ -177,12 +182,17 @@ export function NewAgent() {
   useEffect(() => {
     const requested = presetAdapterType;
     if (!requested) return;
+    if (!adapterRegistryLoaded || disabledTypes.has(requested)) return;
     if (!isValidAdapterType(requested)) return;
     setConfigValues((prev) => {
       if (prev.adapterType === requested) return prev;
       return applyNewAgentPreset(requested, presetEnvBindings);
     });
-  }, [presetAdapterType, presetEnvBindings]);
+  // Both sides of the merge added deps here: upstream's registry guard reads
+  // `adapterRegistryLoaded`/`disabledTypes`, the fork's preset reads
+  // `presetEnvBindings` (memoised on the query string). The effect body reads
+  // all four, so the union is the exhaustive-deps-correct array.
+  }, [adapterRegistryLoaded, disabledTypes, presetAdapterType, presetEnvBindings]);
 
   const createAgent = useMutation({
     mutationFn: (data: Record<string, unknown>) =>
