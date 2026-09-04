@@ -10,51 +10,36 @@ It is the one file in this directory that is not append-only.
 
 ---
 
-## Current state — updated 2026-09-04 17:05
+## Current state — updated 2026-09-04 17:25
 
 | | |
 | --- | --- |
 | **Branch** | `W7-20260904a` |
-| **HEAD** | `2f5a2153c` — *Merge pull request #40 from paperclipai/master* |
+| **HEAD** | `eb8197ffb` — *docs(fork): register change set 10, and adopt a disconnection convention* |
 | **Upstream tip merged** | `af3023f1e` (via `origin/FORK-20260904a`) |
-| **Working tree** | **DIRTY — 5 files, uncommitted, intentionally** |
+| **Working tree** | **clean** |
+| **Pushed?** | **No — both commits are local only.** `origin/W7-20260904a` is still at `2f5a2153c`. |
 | **Active work item** | Change set 10 — duplicate agent "Validation error" |
 | **Its document** | [`Duplicate agent fix.md`](CustomCodeDoc/Duplicate%20agent%20fix.md) |
-| **State** | Code complete · unit-tested green · typecheck clean · **no blocking open items** · **not committed, not live-verified** |
+| **State** | Committed · unit-tested green · typecheck clean · no blocking open items · **not live-verified** |
 
-### The uncommitted files, and why each is dirty
-
-```
-M packages/shared/src/validators/agent.ts                 duplicateFromAgentId on createAgentSchema
-M server/src/routes/agents.ts                             restoreDuplicateSourceEnv + wired into create & hire; PATCH strips duplicateFromAgentId (O-1)
-M server/src/__tests__/agent-permissions-routes.test.ts   6 new server tests (4 duplicate-restore, 2 for O-1)
-M ui/src/lib/duplicate-agent-payload.ts                   drop modelProfiles; send duplicateFromAgentId
-M ui/src/lib/duplicate-agent-payload.test.ts              3 new UI tests
-```
-
-**Do not `git checkout` or stash these without reading
-[`Duplicate agent fix.md`](CustomCodeDoc/Duplicate%20agent%20fix.md) first.** They are
-held uncommitted on purpose, under RULE 0 (§5.4 of
-[`Review and Test Changes.md`](CustomCodeDoc/Review%20and%20Test%20Changes.md)):
-*the operator reviews and commits.*
-
-Documentation, also uncommitted (new files unless marked):
+### The two commits
 
 ```
-M  CustomCodeDoc/Review and Test Changes.md   change set 10 in §4/§4.1, §7.2 suites,
-                                              §7.5 trap 6, §0/§0.1/§1.2, Session 17 log
-?? CustomCodeDoc/Duplicate agent fix.md       change set 10 — the reasoning and open items
-?? CustomCodeDoc/CHANGELOG.md                 this convention's running log
-?? CustomCodeDoc/SESSION-RESUME.md            this file
+eb8197ffb  docs(fork): register change set 10, and adopt a disconnection convention
+           CustomCodeDoc/ — 4 files, +945
+ec0931e0d  fix(agents): repair agent duplication and restore its redacted env
+           5 files, +406 -3
 ```
+
+Split deliberately: the code commit touches no fork-only file and could be
+offered upstream as-is; the docs commit is fork-only and never should be.
 
 ### The very next action
 
-**Live-verify §7 of [`Duplicate agent fix.md`](CustomCodeDoc/Duplicate%20agent%20fix.md),
-then review and commit.** O-1 is closed; nothing else blocks.
-
-The live checks, in order — the second one matters most, because a green create
-does *not* prove it:
+**Live-verify §7 of [`Duplicate agent fix.md`](CustomCodeDoc/Duplicate%20agent%20fix.md).**
+Nothing else blocks. The checks, in order — the second matters most, because a
+green create does *not* prove it:
 
 1. Duplicate an agent whose `runtimeConfig` contains `modelProfiles`
    (`SELECT id, name FROM agents WHERE runtime_config ? 'modelProfiles';`).
@@ -63,7 +48,9 @@ does *not* prove it:
 3. Duplicate an agent with no vault env, to confirm the opt-in restore left the
    ordinary case alone.
 
-### Verified green as of the timestamp above
+Then decide whether to push, and whether the code commit goes upstream.
+
+### Verified green at `ec0931e0d`
 
 ```
 npx vitest run ui/src/lib/duplicate-agent-payload.test.ts             5/5
@@ -74,7 +61,19 @@ cd ui           && npx tsc -b                                         clean
 cd server       && NODE_OPTIONS=--max-old-space-size=4096 npx tsc --noEmit   clean
 ```
 
-### Open items carried, not fixed
+**Unit-tested is not live-verified.** Nothing here has been watched to work on a
+running instance.
+
+### Outstanding against the environment
+
+The operator reported adding changes upstream on 2026-09-04. **As of the fetch at
+17:20 they are not in this clone:** `git fetch origin` succeeded and moved
+nothing — local HEAD, `origin/W7-20260904a` and the last-known tip were all
+`2f5a2153c`, and no `origin` ref carried a newer commit than `af3023f1e`. Re-fetch
+before assuming otherwise, and see whether the vault-root documentation (O-4)
+landed.
+
+### Open items carried
 
 **None are blocking.** All live in §8 of
 [`Duplicate agent fix.md`](CustomCodeDoc/Duplicate%20agent%20fix.md).
