@@ -90,6 +90,7 @@ import {
   parseAdapterRegistryEnv,
   reconcileAdapterAvailability,
 } from "./services/adapter-registry-bootstrap.js";
+import { startProvisioningWorker } from "./provisioning/index.js";
 import { createFeedbackTraceShareClientFromConfig } from "./services/feedback-share-client.js";
 import { buildRuntimeApiCandidateUrls, choosePrimaryRuntimeApiUrl } from "./runtime-api.js";
 import { isLoopbackHost, rewriteLoopbackUrlPort } from "./url-utils.js";
@@ -1776,6 +1777,10 @@ export async function startServer(): Promise<StartedServer> {
     );
   }
   
+  // Outseta provisioning. Inert unless PAPERCLIP_PROVISIONING_WORKER_ENABLED
+  // is set: no timer, no query, no connection. See server/src/provisioning/.
+  const provisioningWorker = startProvisioningWorker(db as any);
+
   {
     const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
       await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
@@ -1784,6 +1789,7 @@ export async function startServer(): Promise<StartedServer> {
         clearInterval(heartbeatSchedulerInterval);
         heartbeatSchedulerInterval = null;
       }
+      await provisioningWorker.stop();
 
       const heartbeatShutdown = await coordinateHeartbeatSchedulerShutdown({
         signal,
