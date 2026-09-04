@@ -382,3 +382,63 @@ is pinned at `node-version: 24` and is the authoritative environment.
    whose directories are absent, verified by replaying the stage's exact file
    layout. Do not "fix" this by adding COPY lines; it is not the cause of an
    `ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND`.
+6. **`paperclipai --version` tells you which commit you are actually running —
+   decode it before debugging anything else.** Added 2026-09-04, after an hour
+   was spent on a bug that had already been fixed.
+
+   `pack-local.sh` defaults the stamp to the commit HEAD was on at pack time
+   ([line 63](scripts/pack-local.sh#L63)):
+
+   ```bash
+   VERSION="${VERSION:-0.0.0-local.$(git rev-parse --short HEAD)}"
+   ```
+
+   So `0.0.0-local.a32055fd` is not an opaque build id — it is a commit, and
+   `git log -1 <sha>` dates the binary in one command:
+
+   ```bash
+   paperclipai --version                  # 0.0.0-local.a32055fd
+   git log -1 --format='%h %ad %s' --date=short a32055fd
+   #   a32055fd3 2026-08-30 Merge pull request #35 from paperclipai/master
+   ```
+
+   **Make this the first step whenever a fix "does not work".** On 2026-09-04 the
+   installed binary was five days and 185 commits behind the fix being tested,
+   and the whole investigation could have started and ended here.
+
+   **Prefer the sha default over a hand-typed `--version`.** A stamp like
+   `2026.904.1` is readable but tells you nothing about provenance; the sha is
+   what makes the check above possible. If both are wanted, combine them:
+   `--version 2026.904.1+a32055fd`.
+
+7. **A failed pack leaves a partial bundle behind, and it looks like a complete
+   one.** Same session. Step `[6/7] Packing tarballs` begins by deleting
+   `*.tgz`, `package.json` and `install.sh` from the output directory, then
+   repacks. If it dies midway the directory is left holding *some* tarballs and
+   none of the wiring — which is easy to mistake for a finished build:
+
+   ```
+   releases/local/    14 tarballs, all adapters + db + plugin-sdk
+                      MISSING: the paperclipai CLI tarball, server, shared,
+                               skills-catalog, package.json, install.sh
+   ```
+
+   **The check is the CLI tarball and `install.sh`, not the tarball count:**
+
+   ```bash
+   ls releases/local/paperclipai-0.0.0-local.*.tgz releases/local/install.sh
+   ```
+
+   Both present and the pack finished; either missing and there was nothing
+   installable, so whatever is on the host is still the previous build. The
+   script does guard this (`[ -n "$CLI_TARBALL" ] || die "the CLI tarball was not
+   produced"`), but the guard fires *after* the loop, so a failure earlier in
+   step 6 exits before reaching it.
+
+   Note also that `releases/paperclip-bundle.tar.gz` is a **tracked file** — it
+   is whatever was last committed, not whatever was last built. Do not read its
+   timestamp as a build date; read the version stamps inside it:
+
+   ```bash
+   tar tzf releases/paperclip-bundle.tar.gz | head -3
+   ```
