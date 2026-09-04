@@ -10,81 +10,82 @@ It is the one file in this directory that is not append-only.
 
 ---
 
-## Current state — updated 2026-09-04 17:25
+## Current state — updated 2026-09-04 17:55
 
 | | |
 | --- | --- |
 | **Branch** | `W7-20260904a` |
-| **HEAD** | `eb8197ffb` — *docs(fork): register change set 10, and adopt a disconnection convention* |
-| **Upstream tip merged** | `af3023f1e` (via `origin/FORK-20260904a`) |
-| **Working tree** | **clean** |
-| **Pushed?** | **No — both commits are local only.** `origin/W7-20260904a` is still at `2f5a2153c`. |
+| **HEAD** | `df401863f` (this clone) · the build clone `/Projects/W7-20260904a` is one ahead at `0a3040984`, its packaging commit |
+| **Working tree** | **DIRTY — 6 files, uncommitted. The operator is checking these in.** |
 | **Active work item** | Change set 10 — duplicate agent "Validation error" |
 | **Its document** | [`Duplicate agent fix.md`](CustomCodeDoc/Duplicate%20agent%20fix.md) |
-| **State** | Committed · unit-tested green · typecheck clean · no blocking open items · **not live-verified** |
+| **State** | Change set 10 committed and pushed · **root cause still unconfirmed** — see below |
 
-### The two commits
+### Uncommitted, and what each is
 
 ```
-eb8197ffb  docs(fork): register change set 10, and adopt a disconnection convention
-           CustomCodeDoc/ — 4 files, +945
-ec0931e0d  fix(agents): repair agent duplication and restore its redacted env
-           5 files, +406 -3
+?? ui/src/lib/validation-error-message.ts       O-2 fix: extract Zod details from ApiError.body
+?? ui/src/lib/validation-error-message.test.ts  5 tests
+M  ui/src/components/AgentActionButtons.tsx     duplicate toast uses apiErrorMessage()
+M  CustomCodeDoc/Review and Test Changes.md     RULE 0 rewritten (§5.4, §0.1 rule 2)
+M  CustomCodeDoc/SESSION-RESUME.md              this file
+M  CustomCodeDoc/builds paperclip.md            traps 6 and 7 — decode --version; partial packs
 ```
 
-Split deliberately: the code commit touches no fork-only file and could be
-offered upstream as-is; the docs commit is fork-only and never should be.
+**The O-2 fix must be in the next build to be useful** — it is the thing that will
+finally name the failing field.
+
+Verified: `ui/src/lib/validation-error-message.test.ts` 5/5, affected UI suites
+17/17, `cd ui && npx tsc -b` clean.
 
 ### The very next action
 
-**Live-verify §7 of [`Duplicate agent fix.md`](CustomCodeDoc/Duplicate%20agent%20fix.md).**
-Nothing else blocks. The checks, in order — the second matters most, because a
-green create does *not* prove it:
+**Re-pack, install, and read the new toast.**
 
-1. Duplicate an agent whose `runtimeConfig` contains `modelProfiles`
-   (`SELECT id, name FROM agents WHERE runtime_config ? 'modelProfiles';`).
-2. Open the copy and confirm `adapterConfig.env` holds the **real** vault
-   directory, not `***REDACTED***`.
-3. Duplicate an agent with no vault env, to confirm the opt-in restore left the
-   ordinary case alone.
-
-Then decide whether to push, and whether the code commit goes upstream.
-
-### Verified green at `ec0931e0d`
-
-```
-npx vitest run ui/src/lib/duplicate-agent-payload.test.ts             5/5
-npx vitest run server/src/__tests__/agent-permissions-routes.test.ts  69/69
-npx vitest run server/src/__tests__/openapi-routes.test.ts            5/5
-cd packages/shared && npx tsc --noEmit                                clean
-cd ui           && npx tsc -b                                         clean
-cd server       && NODE_OPTIONS=--max-old-space-size=4096 npx tsc --noEmit   clean
+```bash
+cd /Projects/W7-20260904a
+./scripts/pack-local.sh 2>&1 | tee /tmp/pack.log
+ls releases/local/paperclipai-0.0.0-local.*.tgz releases/local/install.sh   # both must exist
+# install from that bundle, restart the server, then:
+paperclipai --version    # must NOT be 0.0.0-local.a32055fd
 ```
 
-**Unit-tested is not live-verified.** Nothing here has been watched to work on a
-running instance.
+Then duplicate the agent. The toast will read
+`Validation error: <field> — <reason>` instead of the bare string.
 
-### Outstanding against the environment
+### What is still unknown — do not skip this
 
-The operator reported adding changes upstream on 2026-09-04. **As of the fetch at
-17:20 they are not in this clone:** `git fetch origin` succeeded and moved
-nothing — local HEAD, `origin/W7-20260904a` and the last-known tip were all
-`2f5a2153c`, and no `origin` ref carried a newer commit than `af3023f1e`. Re-fetch
-before assuming otherwise, and see whether the vault-root documentation (O-4)
-landed.
+**The root cause of the reported bug was never confirmed.** `runtimeConfig.modelProfiles`
+was diagnosed by reading schema source, and the fix for it is correct and shipped
+— but the failure reproduced on a binary that never contained the fix
+(`0.0.0-local.a32055fd`, 2026-08-30, 185 commits behind), so **the report has
+still not been tested against the fix.** Two outcomes are open:
+
+1. The duplicate now succeeds → `modelProfiles` was the cause, and §7 of the
+   change-set document can finally be ticked.
+2. It still fails → the new toast names the real field. `icon` and `role` are the
+   likely candidates: both are `z.enum(...)` in `createAgentSchema`, so a stored
+   value retired upstream fails in exactly the same way `modelProfiles` did. The
+   fix would follow the same shape.
+
+### Why an hour went missing, in one line
+
+The installed binary was five days old, and nothing in the UI said so. **Decode
+`paperclipai --version` first** — trap 6 of
+[`builds paperclip.md`](CustomCodeDoc/builds%20paperclip.md).
 
 ### Open items carried
 
-**None are blocking.** All live in §8 of
+**None blocking.** All in §8 of
 [`Duplicate agent fix.md`](CustomCodeDoc/Duplicate%20agent%20fix.md).
 
 | Id | Owner | One line |
 | --- | --- | --- |
-| ~~O-1~~ | change set 10 | ~~`duplicateFromAgentId` not stripped by the PATCH route~~ **FIXED 2026-09-04**, two tests, both proved to be real guards. |
-| O-2 | its own change set | The UI drops Zod `details` on every API error, so all schema failures read "Validation error". This is why the reported bug was diagnosed by reading source rather than the toast. |
-| O-3 | upstream, really | No migration strips `modelProfiles` from existing agent rows; each path sanitises for itself. Any fork path round-tripping a stored config through a create/update schema is exposed. |
-| O-4 | change sets 3 and 4 | `PAPERCLIP_CODEX_VAULT_ROOT` / `PAPERCLIP_CLAUDE_VAULT_ROOT` override the vault roots but appear in no markdown, `.env.example`, or `docker/`. Documentation fix, not code. |
-| O-5 | change set 3 | `/sysops/llm/openrouter/` is **not** a managed vault — just a directory beside the two real roots. §7.2 of `Review and Test Changes.md` now says so. |
+| ~~O-1~~ | change set 10 | ~~`duplicateFromAgentId` not stripped by the PATCH route~~ **FIXED**, two tests, both proved real guards. |
+| ~~O-2~~ | change set 10 | ~~UI discards Zod `details`~~ **FIXED 2026-09-04, uncommitted.** `apiErrorMessage()` in `ui/src/lib/validation-error-message.ts`. |
+| O-3 | upstream, really | No migration strips `modelProfiles` from existing rows; each path sanitises for itself. |
+| O-4 | change sets 3 and 4 | `PAPERCLIP_CODEX_VAULT_ROOT` / `PAPERCLIP_CLAUDE_VAULT_ROOT` override the vault roots but appear in no markdown, `.env.example`, or `docker/`. |
+| O-5 | change set 3 | `/sysops/llm/openrouter/` is **not** a managed vault — just a directory beside the two real roots. |
 
 ---
 
