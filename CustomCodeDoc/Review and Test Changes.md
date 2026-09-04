@@ -69,6 +69,19 @@ first.
 
 ## 0. The prompt to use — copy this at the start of every session
 
+> **Before the prompt below — and before any other reading — open
+> [`SESSION-RESUME.md`](CustomCodeDoc/SESSION-RESUME.md).** It is the one file in
+> this directory that describes *now* rather than history: the branch, the HEAD,
+> what is uncommitted and why, and the single next action. It also carries the
+> **disconnection protocol** (added 2026-09-04): when to checkpoint mid-work and
+> what to write down before a session ends. Sessions have been dropping; that file
+> is how the work resumes without re-deriving it. If its state table disagrees
+> with `git status`, **git wins and the file is stale** — say so, then fix it.
+>
+> This §0 prompt covers an *upstream merge review*. For a bug fix or a feature,
+> skip it: read `SESSION-RESUME.md`, open the work item's own document, and
+> continue at its **Resume point**.
+
 Paste this verbatim. Fill in only the branch name and, if known, the number of
 upstream changes merged.
 
@@ -87,7 +100,7 @@ upstream changes merged.
 
 That is the whole prompt. Everything below is what it relies on.
 
-### 0.1 The three things the assistant must not assume
+### 0.1 The four things the assistant must not assume
 
 1. **Do not re-apply anything by reflex.** The fork now *merges upstream into a
    long-lived working branch* rather than re-branching from upstream. In that
@@ -96,6 +109,11 @@ That is the whole prompt. Everything below is what it relies on.
 2. **Do not commit or push.** The operator commits. Say what changed and stop.
 3. **Do not trust a bare `pnpm -v`.** See §3.3 — the pnpm on `PATH` is *not* the
    pinned version. Use `corepack pnpm` for anything whose result is quoted.
+4. **Do not leave the reasoning until the end.** A diff survives a dropped
+   connection; *why* a cause was ruled out, what was tried and abandoned, and what
+   was deliberately left undone do not. Checkpoint into the work item's document
+   as you go — the rule and its triggers are in
+   [`SESSION-RESUME.md`](CustomCodeDoc/SESSION-RESUME.md).
 
 ---
 
@@ -129,6 +147,14 @@ merges arrive as GitHub pull requests from `paperclipai/paperclip` into it
 | [`doc/`](doc/) | **upstream's** | The codebase documentation for the project we forked — architecture, database, deployment modes, CLI, releasing, specs. Read this to understand *what an upstream change is doing*. |
 | [`docs/`](docs/) | upstream's | The published Mintlify documentation site source. |
 | [`CustomCodeDoc/`](CustomCodeDoc/) | **ours** | The fork's working documents — what the fork carries, why, and the running logs. Read this to understand *what an upstream change might break*. §4 is the index. |
+
+Two of the files in `CustomCodeDoc/` are navigation rather than content, and are
+the ones to open first:
+
+| File | Lifetime | What it answers |
+| --- | --- | --- |
+| [`SESSION-RESUME.md`](CustomCodeDoc/SESSION-RESUME.md) | **overwritten — the only non-append-only file here** | *Where am I right now?* Branch, HEAD, the uncommitted files and why, the single next action, and the standing disconnection protocol. |
+| [`CHANGELOG.md`](CustomCodeDoc/CHANGELOG.md) | append-only, newest first | *What has this fork changed, and what state is each change in?* One dated entry per work item, with a strict status vocabulary — note that `LIVE-VERIFIED` means watched to work on a running instance, and a green test suite does not earn it. |
 
 `AGENTS.md`, `CONTRIBUTING.md`, `DESIGN.md` and `ROADMAP.md` at the repo root are
 upstream's and describe upstream's own conventions.
@@ -267,6 +293,7 @@ RETIRED, so the numbered references throughout §8 still resolve. Do not
 | 7 | ~~**Startup banner** — the Codex Home and OpenRouter rows~~ **RETIRED in v6 — see §4.2** | — | none — rows and helpers removed from `server/src/startup-banner.ts`; `startup-banner.test.ts` deleted |
 | 8 | **Local packaging scripts** | [`builds paperclip.md`](CustomCodeDoc/builds%20paperclip.md) | `scripts/pack-local.sh`, `scripts/reset-local.sh`, `releases/` |
 | 9 | ~~**`OPENROUTER_API_KEY` in the ACPX `codex` host-env allowlist**~~ **RETIRED in v6 — see §4.2.** The key is now bound per-agent instead of inherited from the host | §8 Session 12, Finding 2 (historical) | none — entry removed from `ACPX_INHERITED_PROVIDER_ENV_KEYS` in `packages/adapter-utils/src/acpx-engine/execute.ts`; guard removed from `execute-identity.test.ts` |
+| 10 | **Duplicate agent — retired-key drop and redacted-env restore** — a duplicate drops `runtimeConfig.modelProfiles` (rejected since upstream #12683) and names its source via a new optional `duplicateFromAgentId` so the server can restore `adapterConfig.env` values the client only ever held redacted | [`Duplicate agent fix.md`](CustomCodeDoc/Duplicate%20agent%20fix.md) | `ui/src/lib/duplicate-agent-payload.ts`, `packages/shared/src/validators/agent.ts` (`createAgentSchema`), `server/src/routes/agents.ts` (`restoreDuplicateSourceEnv`, wired into the create **and** hire paths) |
 
 ### 4.1 The files where fork and upstream both edit
 
@@ -286,6 +313,18 @@ are almost always kept:
   [`Create agent from a login vault.md`](CustomCodeDoc/Create%20agent%20from%20a%20login%20vault.md) §8.
   The canary is upstream's own test, `"ignores a native-runner URL preset while
   the experimental adapter is disabled"` — it is load-bearing for the fork now.
+
+- `packages/shared/src/validators/agent.ts` — change set 10's
+  `duplicateFromAgentId` on `createAgentSchema`. Added as a collision point
+  2026-09-04. Upstream edits this file constantly; the field is one line and easy
+  to lose in a conflict resolution.
+- `server/src/routes/agents.ts` — change set 10's `restoreDuplicateSourceEnv` and
+  its two call sites. Added 2026-09-04. **This is the fork's first change in this
+  file**, which is one of upstream's largest and most-churned. The canary is the
+  four server tests named in §7.2: if a merge drops the `duplicateFromAgentId`
+  destructuring from either route, they go red naming it. Note the two call sites
+  are easy to half-resolve — the *hire* path is the one a conflict tends to drop,
+  and losing it is silent until a board-approval company duplicates an agent.
 
 **v6 removed two of the four.** `packages/adapter-utils/src/acpx-engine/execute.ts`
 and `packages/adapters/codex-local/src/server/execute.ts` were collision points
@@ -657,7 +696,23 @@ corepack pnpm exec vitest run ui/src/pages/InviteLanding.test.tsx
 # guard inside it is gone, so it no longer proves anything about the Codex lane.
 corepack pnpm exec vitest run \
   packages/adapter-utils/src/acpx-engine/execute-identity.test.ts
+
+# change set 10 — duplicate agent (added 2026-09-04)
+# 5/5 and 67/67 expected. The server suite is the §4.1 canary for the fork's
+# first change in server/src/routes/agents.ts.
+corepack pnpm exec vitest run ui/src/lib/duplicate-agent-payload.test.ts
+corepack pnpm exec vitest run \
+  server/src/__tests__/agent-permissions-routes.test.ts
+
+# change set 10 also adds a field to createAgentSchema, which feeds the generated
+# OpenAPI document. 5/5 expected.
+corepack pnpm exec vitest run server/src/__tests__/openapi-routes.test.ts
 ```
+
+> **`--reporter=basic` is gone in vitest 4.1.11** and fails with
+> `Failed to load url basic (resolved id: basic)`. That is a missing reporter, not
+> a broken suite — drop the flag and use the default reporter. Noted 2026-09-04
+> after it looked briefly like a test-infrastructure failure.
 
 **The out-of-band vault check is now the only check for the OpenRouter path**,
 because v6 removed the regression guard that made the failure a red test. The
@@ -669,6 +724,14 @@ CODEX_HOME=/sysops/llm/openrouter/default \
   /vhome/paperclip/node_modules/.bin/codex exec --skip-git-repo-check \
   "Reply with exactly: PONG"
 ```
+
+> **`/sysops/llm/openrouter/` is not a managed vault.** The vault service owns
+> `/sysops/llm/codex` and `/sysops/llm/claude` only (`DEFAULT_CODEX_VAULT_ROOT`,
+> `DEFAULT_CLAUDE_VAULT_ROOT` — each overridable with `PAPERCLIP_CODEX_VAULT_ROOT`
+> / `PAPERCLIP_CLAUDE_VAULT_ROOT`). The OpenRouter directory is an
+> operator-created Codex home that merely lives next door, so it will never appear
+> in the vault UI and is not created, validated or deleted by it. Noted 2026-09-04
+> as open item O-5 of [`Duplicate agent fix.md`](CustomCodeDoc/Duplicate%20agent%20fix.md).
 
 Expect `provider: openrouter` and `PONG`. Re-run it with
 `env -u OPENROUTER_API_KEY` to see the failure mode: `provider auth command 'sh'
@@ -955,6 +1018,33 @@ ps -eo pid,rss,etime,cmd --sort=-rss | head -12
 
 Run typecheck **alone**, before or after the suite, never beside it.
 
+#### 6. `--reporter=basic` was removed in vitest 4 — the error looks like broken infrastructure
+
+**Added Session 17.** The pin is now `vitest@4.1.11` (§3.1), and the `basic`
+reporter is gone from it. Passing the flag produces:
+
+```
+Error: Failed to load url basic (resolved id: basic). Does the file exist?
+    at prepareVitest (…/vitest/dist/chunks/cli-api.…js)
+```
+
+**Read that carefully: it is a missing *reporter module*, not a failing suite.**
+Nothing ran. The stack is entirely inside vitest's own CLI bootstrap — no test
+file is named anywhere in it — which is the tell. It is easy to lose several
+minutes here because the wording suggests a resolution problem in the project.
+
+**Fix: drop the flag.** The default reporter is what `basic` approximated:
+
+```bash
+corepack pnpm exec vitest run <path>          # right
+corepack pnpm exec vitest run <path> --reporter=basic   # fails, vitest 4
+```
+
+Checked 2026-09-04: **no script, config or CI workflow in this repo passes the
+flag**, so there is nothing to repair in-tree — it only bites when a flag is typed
+by hand, or copied from a pre-v4 note. `--reporter=verbose` and `--reporter=dot`
+both still exist if per-test output is wanted.
+
 ---
 
 ## 8. Session log — append only
@@ -963,6 +1053,131 @@ Run typecheck **alone**, before or after the suite, never beside it.
 > **Numbering note.** The header at the top of this file calls the session log
 > "§7". It is this section, **§8** — §7 is the test procedure. Kept as-is so old
 > cross-references still resolve; read "§7 session log" as this section.
+
+### 2026-09-04 — Session 17: duplicate agent "Validation error" on `W7-20260904a`
+
+**Who:** Claude (Opus 5) with chris@anderson-family.com
+**Branch:** `W7-20260904a` @ `2f5a2153c` (post-merge, upstream `af3023f1e`)
+**Scope:** a bug report, not a merge review — the first entry in this log that is.
+**Left uncommitted per RULE 0.**
+
+> **Numbering.** The 2026-09-04 upstream sync — Session 16 — is written up in
+> [`SYNC-2026-09-04.md`](CustomCodeDoc/SYNC-2026-09-04.md) rather than here, so
+> there is no Session 16 entry in this section. The gap is deliberate.
+
+#### The report
+
+Duplicating an agent toasted `Could not duplicate agent / Validation error`. No
+field named.
+
+#### Finding 1 — the toast is uninformative by construction, and it cost time
+
+The server *does* return the failing path: `validate.ts:45` throws
+`unprocessable("Validation error", err.issues)` and the error handler serialises
+it as `{ error, details }`. The UI keeps that body on `ApiError.body` but every
+toast on this path renders `err.message` alone — the top-level string. **So every
+schema rejection anywhere in this flow produces byte-identical output.** Diagnosis
+had to come from reading the schema rather than the error. Logged as open item
+O-2 in the change-set document; not fixed here because it is cross-cutting UI
+error rendering, not this bug.
+
+#### Finding 2 — an upstream retirement met an unmigrated row
+
+Upstream `4b6de5327` (#12683, 2026-09-01, which arrived in the 09-04 merge) added
+a `superRefine` to `agentRuntimeConfigSchema` that rejects `runtimeConfig.modelProfiles`
+by name. Nothing migrates the key out of existing agent rows, and duplicate copied
+`runtimeConfig` wholesale — so **any agent predating #12683 became
+un-duplicatable.** Upstream had already hit the same wall on its own copy path and
+answered it by dropping the key (`sanitizeImportedAgentRuntimeConfig`,
+`company-portability.ts:1318`); the fix follows that precedent rather than
+inventing one.
+
+**This is the shape to watch for in future merges:** upstream retires a config key
+with a validator rejection, not a migration. The rejection is instant and total;
+the rows change only when next written. Any fork path that round-trips a stored
+config through a create/update schema is exposed.
+
+#### Finding 3 — the fix, alone, would have produced a silently broken agent
+
+With `modelProfiles` dropped the create returns 201 — and writes an agent whose
+`adapterConfig.env` values are the literal string `***REDACTED***`, because that
+is what the client was given when it read the source. **For this fork that is a
+credential vault directory** (change sets 3 and 4), so the copy fails at run time,
+long after, with an error resembling nothing. The update path already solves this
+round trip against the row being updated; a create has no such row, so the caller
+now names one (`duplicateFromAgentId`) and the server restores server-side, gated
+on same-company and on the same permission as reading the source. Applied to the
+**hire** path as well — a board-approval company routes duplicates there, and
+missing it would mean approval materialises the broken agent.
+
+#### Results
+
+| Check | Result |
+| --- | --- |
+| `ui/src/lib/duplicate-agent-payload.test.ts` | 5/5 |
+| `server/src/__tests__/agent-permissions-routes.test.ts` | 69/69 (67 before the O-1 tests) |
+| `server/src/__tests__/openapi-routes.test.ts` | 5/5 |
+| typecheck — shared, ui, server | clean |
+
+**Not live-verified.** The bug was traced in code and never watched to fail or to
+be fixed on a running instance. The live checklist is §7 of
+[`Duplicate agent fix.md`](CustomCodeDoc/Duplicate%20agent%20fix.md).
+
+#### Carried forward — then closed the same session
+
+O-1 — adding the field to `createAgentSchema` also admits it on `updateAgentSchema`
+(derived via `.omit().partial()`), and the PATCH route does not strip it the way it
+strips its two sibling non-column flags. Low severity and fail-closed, but it
+should be decided before change set 10 is committed.
+
+> **Amendment, same session.** The operator directed the fix, and it was applied:
+> one `delete patchData.duplicateFromAgentId;` at `agents.ts:4683`, plus two tests
+> (69/69). **Both tests were proved to be real guards** by removing the fix and
+> watching them go red — and that run also answered the question the finding had
+> left open, printing `+ Received: "11111111-…"`, i.e. the field really was
+> reaching `svc.update`. Change set 10 now has no blocking open items.
+
+#### Finding 4 — a hardcoded-looking test fixture, and the real gap behind it
+
+The operator, reading the new tests, asked why
+`const vaultDirectory = "/sysops/llm/openrouter/default"` was hardcoded rather
+than configurable.
+
+**In the test, correctly so** — it is an opaque fixture and the assertions are
+"what went in came back out"; a test that read the value from the environment
+would stop being deterministic. It has been renamed to
+`/sysops/llm/codex/duplicate-source` and commented to say so, because the old
+value read as though the suite depended on a real host path.
+
+**But the question found a genuine gap.** Production does not hardcode these
+paths — `DEFAULT_CODEX_VAULT_ROOT` and `DEFAULT_CLAUDE_VAULT_ROOT` are already
+overridable with `PAPERCLIP_CODEX_VAULT_ROOT` and `PAPERCLIP_CLAUDE_VAULT_ROOT`,
+resolved through `resolveVaultRoot(env)` and deliberately never taken from a
+request. **Neither key appears in any markdown, in `.env.example`, or in
+`docker/`** (`grep -rn "VAULT_ROOT"` over all four: no matches). An operator
+wanting to relocate the vaults can only find the knob by reading adapter source —
+which is what just happened. Logged as O-4 against change sets 3 and 4, which own
+those files.
+
+A related misreading was fixed in §7.2 above: `/sysops/llm/openrouter/` sits
+beside the two vault roots but **is not a managed vault** — the service neither
+creates nor lists it. Logged as O-5.
+
+#### Finding 5 — `--reporter=basic` is gone in vitest 4
+
+Cost a few minutes looking like broken test infrastructure. Written up as trap 6
+in §7.5; nothing in-tree passes the flag, so there was nothing to repair.
+
+#### Also this session — the disconnection convention
+
+At the operator's request after repeated dropped connections: added
+[`SESSION-RESUME.md`](CustomCodeDoc/SESSION-RESUME.md) and
+[`CHANGELOG.md`](CustomCodeDoc/CHANGELOG.md), and wired both into §0, §0.1 and
+§1.2 above. The principle: **reasoning is the perishable part.** The diff survives
+a disconnection intact; why an approach was abandoned and what was deliberately
+left undone do not.
+
+---
 
 ### 2026-09-01 — Session 15: local upstream merge into `W6-20260901a` (14 commits)
 
