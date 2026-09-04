@@ -98,6 +98,20 @@ export const createAgentSchema = z.object({
   // round trip. The server permits the no-claim bind only for a user actor and
   // only when that owner already has a stored value. It carries no token.
   applyStoredClaudeLogin: z.boolean().optional(),
+  // The optional duplicate source. It is not an agent column: the server uses it
+  // to re-inject `adapterConfig.env` values the client could not send back.
+  //
+  // Every plain env binding leaves the server redacted (`redactAgentEnvBinding`),
+  // so a client duplicating an agent holds `***REDACTED***` where the real value
+  // — a credential vault directory, for instance — used to be. Without this the
+  // copy is created with the literal marker as its value. The update path solves
+  // the same round trip with `restoreRedactedAgentEnv` against the row being
+  // updated; a create has no such row, so the caller names one.
+  //
+  // The server restores only keys the client sent back as the redaction marker
+  // and which the source already has, and only for a caller allowed to read that
+  // agent's configuration. No value is ever returned to the client.
+  duplicateFromAgentId: z.string().guid().optional(),
 });
 
 export type CreateAgent = z.infer<typeof createAgentSchema>;

@@ -2857,6 +2857,43 @@ export function agentRoutes(
     return { ...requestedConfig, env: restoredEnv };
   }
 
+  // Re-inject the `adapterConfig.env` values a duplicate could not carry.
+  //
+  // Every plain binding leaves the server with its value replaced by the
+  // redaction marker (`redactAgentEnvBinding`), so a client that read an agent
+  // and posted it back as a copy holds `***REDACTED***` where the real value
+  // was — a credential vault directory, typically. Persisting that verbatim
+  // creates an agent pointing at a literal `***REDACTED***` path, which fails
+  // only later, at run time, and looks nothing like its cause.
+  //
+  // `restoreRedactedAgentEnv` already resolves this round trip for updates,
+  // against the row being updated. A create has no such row, so the caller names
+  // the agent it copied and the server restores from that instead.
+  //
+  // Gated on the same permission as reading the source agent's configuration:
+  // carrying a value into a copy must never be easier than reading the original.
+  async function restoreDuplicateSourceEnv(
+    req: Request,
+    companyId: string,
+    duplicateFromAgentId: unknown,
+    requestedConfig: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (typeof duplicateFromAgentId !== "string" || !duplicateFromAgentId) {
+      return requestedConfig;
+    }
+    const source = await svc.getById(duplicateFromAgentId);
+    // A cross-company id is refused the same way a missing one is, so the error
+    // cannot be used to probe for agent ids in companies the caller cannot see.
+    if (!source || source.companyId !== companyId) {
+      throw badRequest("duplicateFromAgentId must name an agent in this company");
+    }
+    await assertCanReadConfigurations(req, source.companyId);
+    return restoreRedactedAgentEnv(
+      requestedConfig,
+      (source.adapterConfig ?? {}) as Record<string, unknown>,
+    );
+  }
+
   function redactRevisionSnapshot(snapshot: unknown): Record<string, unknown> {
     if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return {};
     const record = snapshot as Record<string, unknown>;
@@ -3952,10 +3989,20 @@ export function agentRoutes(
       // The apply-existing flag is not an agent column. The server binds the
       // fixed reference to the owner stored value with no login round trip.
       applyStoredClaudeLogin: hireApplyStoredClaudeLogin,
+      // Not an agent column. A duplicate lands here whenever the company
+      // requires board approval for new agents, so the copy must restore its
+      // redacted env on this path too or approval would materialise an agent
+      // pointing at a literal `***REDACTED***` value.
+      duplicateFromAgentId: hireDuplicateFromAgentId,
       ...hireInput
     } = req.body;
     hireInput.adapterType = await assertSelectableAdapterType(hireInput.adapterType);
-    const rawHireAdapterConfig = (hireInput.adapterConfig ?? {}) as Record<string, unknown>;
+    const rawHireAdapterConfig = await restoreDuplicateSourceEnv(
+      req,
+      companyId,
+      hireDuplicateFromAgentId,
+      (hireInput.adapterConfig ?? {}) as Record<string, unknown>,
+    );
     assertProviderTraceSettingTransition(req, hireInput.runtimeConfig);
     await assertFreshPaperclipRunnerProvider(
       companyId,
@@ -4177,10 +4224,20 @@ export function agentRoutes(
       // The apply-existing flag is not an agent column. The server binds the
       // fixed reference to the owner stored value with no login round trip.
       applyStoredClaudeLogin: createApplyStoredClaudeLogin,
+      // Not an agent column: it names the agent this create is a copy of, so the
+      // server can restore env values the client only ever held redacted.
+      duplicateFromAgentId: createDuplicateFromAgentId,
       ...createInput
     } = req.body;
     createInput.adapterType = await assertSelectableAdapterType(createInput.adapterType);
-    const rawCreateAdapterConfig = (createInput.adapterConfig ?? {}) as Record<string, unknown>;
+    // Restored before the adapter-config asserts below, so every guard sees the
+    // values that will actually be persisted rather than the redaction marker.
+    const rawCreateAdapterConfig = await restoreDuplicateSourceEnv(
+      req,
+      companyId,
+      createDuplicateFromAgentId,
+      (createInput.adapterConfig ?? {}) as Record<string, unknown>,
+    );
     assertProviderTraceSettingTransition(req, createInput.runtimeConfig);
     await assertFreshPaperclipRunnerProvider(
       companyId,
@@ -4612,6 +4669,18 @@ export function agentRoutes(
     // from the patch so it never reaches the update values.
     const applyStoredClaudeLogin = patchData.applyStoredClaudeLogin === true;
     delete patchData.applyStoredClaudeLogin;
+    // Not an agent column either, and on an update it is meaningless: it is a
+    // create-time instruction naming the agent a copy was made from, so the
+    // server can restore env values the client only ever held redacted. An
+    // update restores from the row being updated instead
+    // (`restoreRedactedAgentEnv` below), so there is nothing here for it to do.
+    //
+    // It reaches this route only because `updateAgentSchema` is derived from
+    // `createAgentSchema`, which carries the field. Dropping it keeps the patch
+    // to real columns and keeps the `profileOnlyChange` check below honest —
+    // that check requires every key to be a profile field, so a stray key would
+    // silently push a profile-only edit onto the stricter gate.
+    delete patchData.duplicateFromAgentId;
     if (hasOwn(patchData, "adapterConfig")) {
       const adapterConfig = asRecord(patchData.adapterConfig);
       if (!adapterConfig) {

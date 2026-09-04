@@ -10,6 +10,18 @@ const INSTRUCTION_CONFIG_KEYS = [
   "bootstrapPromptTemplate",
 ] as const;
 
+// Runtime-config keys the create API rejects outright.
+//
+// `modelProfiles` was retired upstream (#12683) and `createAgentSchema` now
+// fails the whole request when it is present. An agent predating that change
+// still carries the key until its row is migrated, and a duplicate copies
+// `runtimeConfig` wholesale — so without this the copy is refused with a bare
+// "Validation error" naming a field the operator never set.
+//
+// Dropping the key is right on its own terms: a duplicate should not reintroduce
+// configuration the product has removed.
+const RETIRED_RUNTIME_CONFIG_KEYS = ["modelProfiles"] as const;
+
 export type DuplicateInstructionsBundle = {
   entryFile: string;
   files: Record<string, string>;
@@ -17,6 +29,7 @@ export type DuplicateInstructionsBundle = {
 
 type DuplicateAgentSource = Pick<
   AgentDetail,
+  | "id"
   | "name"
   | "role"
   | "title"
@@ -51,12 +64,23 @@ export function buildDuplicateAgentPayload(
     delete adapterConfig[key];
   }
 
+  const runtimeConfig = cloneRecord(agent.runtimeConfig);
+  for (const key of RETIRED_RUNTIME_CONFIG_KEYS) {
+    delete runtimeConfig[key];
+  }
+
   const payload: Record<string, unknown> = {
     name: duplicateAgentName(agent.name),
     role: agent.role,
     adapterType: agent.adapterType,
     adapterConfig,
-    runtimeConfig: cloneRecord(agent.runtimeConfig),
+    runtimeConfig,
+    // Names the agent being copied so the server can restore the
+    // `adapterConfig.env` values that reached this client redacted — a
+    // credential vault directory, typically. `adapterConfig` above still carries
+    // `***REDACTED***` for each of them; the client cannot do better, because it
+    // has never held the real value. See `restoreDuplicateSourceEnv`.
+    duplicateFromAgentId: agent.id,
     defaultEnvironmentId: agent.defaultEnvironmentId ?? null,
     budgetMonthlyCents: agent.budgetMonthlyCents ?? 0,
     permissions: {

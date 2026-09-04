@@ -651,6 +651,249 @@ describe.sequential("agent permission routes", () => {
     expect(JSON.stringify(updateCallArgs?.adapterConfig ?? {})).not.toContain("***REDACTED***");
   }, 20_000);
 
+  it("restores redacted env from the named duplicate source on create", async () => {
+    // Duplicating an agent reads it first, so the client only ever holds the
+    // redaction marker where a plain value — a credential vault directory, say —
+    // used to be. Without the restore the copy is created pointing at the
+    // literal `***REDACTED***`, which fails much later and looks unrelated.
+    // An arbitrary opaque fixture, not a path this test asserts anything about.
+    // It is shaped like a managed Codex vault directory only so the failure mode
+    // reads realistically; the production root is `DEFAULT_CODEX_VAULT_ROOT` and
+    // is overridable with `PAPERCLIP_CODEX_VAULT_ROOT`.
+    const vaultDirectory = "/sysops/llm/codex/duplicate-source";
+    mockAgentService.getById.mockResolvedValue({
+      ...baseAgent,
+      companyId,
+      adapterConfig: {
+        env: {
+          CODEX_HOME: { type: "plain", value: vaultDirectory },
+        },
+      },
+    });
+    mockAgentService.create.mockResolvedValue({ ...baseAgent, id: "44444444-4444-4444-8444-444444444444" });
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .post(`/api/companies/${companyId}/agents`)
+        .send({
+          name: "Vault Agent Copy",
+          adapterType: "process",
+          duplicateFromAgentId: agentId,
+          adapterConfig: {
+            env: { CODEX_HOME: { type: "plain", value: "***REDACTED***" } },
+          },
+        }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    const createCallArgs = mockAgentService.create.mock.calls[0]?.[1] as
+      | { adapterConfig?: Record<string, unknown> }
+      | undefined;
+    expect(createCallArgs?.adapterConfig?.env).toEqual({
+      CODEX_HOME: { type: "plain", value: vaultDirectory },
+    });
+    expect(JSON.stringify(createCallArgs?.adapterConfig ?? {})).not.toContain("***REDACTED***");
+    // The source id is a restore instruction, not an agent column.
+    expect(createCallArgs).not.toHaveProperty("duplicateFromAgentId");
+  }, 20_000);
+
+  it("restores redacted env on the hire path a duplicate falls back to", async () => {
+    // A company requiring board approval sends the duplicate to agent-hires
+    // instead. Approval must not materialise an agent holding the marker.
+    // Same opaque fixture as the create test above.
+    const vaultDirectory = "/sysops/llm/codex/duplicate-source";
+    mockAgentService.getById.mockResolvedValue({
+      ...baseAgent,
+      companyId,
+      adapterConfig: {
+        env: { CODEX_HOME: { type: "plain", value: vaultDirectory } },
+      },
+    });
+    mockAgentService.create.mockResolvedValue({ ...baseAgent, id: "44444444-4444-4444-8444-444444444444" });
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .post(`/api/companies/${companyId}/agent-hires`)
+        .send({
+          name: "Vault Agent Copy",
+          adapterType: "process",
+          duplicateFromAgentId: agentId,
+          adapterConfig: {
+            env: { CODEX_HOME: { type: "plain", value: "***REDACTED***" } },
+          },
+        }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    const createCallArgs = mockAgentService.create.mock.calls[0]?.[1] as
+      | { adapterConfig?: Record<string, unknown> }
+      | undefined;
+    expect(createCallArgs?.adapterConfig?.env).toEqual({
+      CODEX_HOME: { type: "plain", value: vaultDirectory },
+    });
+  }, 20_000);
+
+  it("refuses a duplicate source in another company", async () => {
+    // Restoring from a foreign agent would read a value across a tenant
+    // boundary. The refusal is the same shape as for an id that does not exist,
+    // so the response cannot be used to probe for agent ids elsewhere.
+    mockAgentService.getById.mockResolvedValue({
+      ...baseAgent,
+      companyId: "99999999-9999-4999-8999-999999999999",
+      adapterConfig: {
+        env: { CODEX_HOME: { type: "plain", value: "/other/company/vault" } },
+      },
+    });
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .post(`/api/companies/${companyId}/agents`)
+        .send({
+          name: "Cross Tenant Copy",
+          adapterType: "process",
+          duplicateFromAgentId: agentId,
+          adapterConfig: {
+            env: { CODEX_HOME: { type: "plain", value: "***REDACTED***" } },
+          },
+        }),
+    );
+
+    expect(res.status).toBe(400);
+    expect(mockAgentService.create).not.toHaveBeenCalled();
+    expect(JSON.stringify(res.body)).not.toContain("/other/company/vault");
+  }, 20_000);
+
+  it("leaves a create without a duplicate source untouched", async () => {
+    // The restore is opt-in. A plain create that happens to carry the marker as
+    // a literal value keeps it rather than reaching for some other agent's row.
+    mockAgentService.create.mockResolvedValue({ ...baseAgent, id: "44444444-4444-4444-8444-444444444444" });
+    mockAgentService.getById.mockResolvedValue(null);
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .post(`/api/companies/${companyId}/agents`)
+        .send({
+          name: "Plain Create",
+          adapterType: "process",
+          adapterConfig: {
+            env: { CODEX_HOME: { type: "plain", value: "***REDACTED***" } },
+          },
+        }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    const createCallArgs = mockAgentService.create.mock.calls[0]?.[1] as
+      | { adapterConfig?: Record<string, unknown> }
+      | undefined;
+    expect(createCallArgs?.adapterConfig?.env).toEqual({
+      CODEX_HOME: { type: "plain", value: "***REDACTED***" },
+    });
+  }, 20_000);
+
+  it("drops duplicateFromAgentId from an update instead of writing it as a column", async () => {
+    // `updateAgentSchema` is derived from `createAgentSchema`, so the field is
+    // accepted here even though it means nothing on an update — an update
+    // restores redacted env from the row being updated, not from a named source.
+    // It must not reach the service as if it were an agent column.
+    mockAgentService.getById.mockResolvedValue({
+      ...baseAgent,
+      companyId,
+      adapterConfig: { env: {} },
+    });
+    mockAgentService.update.mockResolvedValue(baseAgent);
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).patch(`/api/agents/${agentId}`).send({
+        title: "Renamed with a stray duplicate source",
+        duplicateFromAgentId: agentId,
+      }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const updateCallArgs = mockAgentService.update.mock.calls[0]?.[1] as
+      | Record<string, unknown>
+      | undefined;
+    expect(updateCallArgs).not.toHaveProperty("duplicateFromAgentId");
+    expect(updateCallArgs).toMatchObject({ title: "Renamed with a stray duplicate source" });
+  }, 20_000);
+
+  it("keeps a profile-only update on the profile gate when duplicateFromAgentId rides along", async () => {
+    // `profileOnlyChange` requires EVERY key in the patch to be one of
+    // AGENT_PROFILE_CHANGE_CONSENT_FIELDS ("name", "role", "title",
+    // "capabilities"). A stray key makes that false and silently routes a
+    // profile-only edit to the stricter agent-update gate. Stripping the field
+    // before that check is what keeps the two paths in agreement.
+    mockAgentService.getById.mockResolvedValue({
+      ...baseAgent,
+      companyId,
+      adapterConfig: { env: {} },
+    });
+    mockAgentService.update.mockResolvedValue(baseAgent);
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).patch(`/api/agents/${agentId}`).send({
+        title: "Profile only",
+        duplicateFromAgentId: agentId,
+      }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const updateCallArgs = mockAgentService.update.mock.calls[0]?.[1] as
+      | Record<string, unknown>
+      | undefined;
+    // Only the profile field survives, so the patch is indistinguishable from
+    // one the operator sent without the stray key.
+    expect(Object.keys(updateCallArgs ?? {})).toEqual(["title"]);
+  }, 20_000);
+
   it("redacts company agent list for authenticated company members without agent admin permission", async () => {
     mockAccessService.canUser.mockResolvedValue(false);
     mockAccessService.decide.mockImplementation(async (input: { action?: string }) => ({
