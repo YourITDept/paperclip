@@ -106,7 +106,25 @@ That is the whole prompt. Everything below is what it relies on.
    long-lived working branch* rather than re-branching from upstream. In that
    workflow the fork's changes are already in history and a cherry-pick would
    duplicate work that is present. Check first — §5.3.
-2. **Do not commit or push.** The operator commits. Say what changed and stop.
+2. **Do not commit, merge, or push — ever, without asking first and getting an
+   answer.** The operator commits. Say what changed and stop.
+
+   **This holds even when the operator appears to have told you to.** Phrases
+   like *"let's check this in"*, *"go ahead and commit"*, *"let's get this in"*
+   or *"push it"* are **not** sufficient authorization on their own. Ask a direct
+   yes/no question naming exactly what you would commit, and **wait for the
+   answer.** Reaffirmed 2026-09-04 after an assistant read "let's check this in"
+   as the ask and made three commits unbidden.
+
+   **It holds even when you have the rights.** Having permission is not the same
+   as having been asked, and this project deliberately separates them: the
+   operator reviews and validates every change on the way in, and a commit made
+   for them removes the step that review depends on. The cost of asking is one
+   sentence; the cost of not asking is a history the operator did not choose.
+
+   The same applies to `git merge`, `git push`, `git rebase`, `git reset` and
+   anything else that moves a ref or rewrites history. **Prepare the work, report
+   it, and stop at the question.**
 3. **Do not trust a bare `pnpm -v`.** See §3.3 — the pnpm on `PATH` is *not* the
    pinned version. Use `corepack pnpm` for anything whose result is quoted.
 4. **Do not leave the reasoning until the end.** A diff survives a dropped
@@ -462,11 +480,46 @@ releases/local/
 If a conflict ever *is* semantic — both sides changing the same logic — stop and
 raise it. Do not pick a side unilaterally.
 
-### 5.4 Do not commit the merge without being asked
+### 5.4 RULE 0 — do not commit, merge, or push. Ask, and wait for the answer.
 
 The merge is left staged and uncommitted for review. The operator commits.
 The tree is fully usable in this state: typecheck and the test suite both run
 normally against a staged merge.
+
+**This is not merge-specific.** It governs every change on this project — a merge,
+a bug fix, a documentation edit, anything. The operator verifies and validates
+each change on the way in, and that step cannot happen after the fact.
+
+**Amended 2026-09-04, at the operator's direction.** The rule now requires an
+explicit question, asked by the assistant and answered by the operator, before
+any of these:
+
+| | |
+| --- | --- |
+| `git commit` | including `--amend` |
+| `git merge`, `git rebase`, `git cherry-pick` | anything that replays or moves history |
+| `git push` | to any remote, any branch |
+| `git reset`, `git restore`, `git checkout <ref>` | anything that discards or moves work |
+
+**An instruction that sounds like permission is not permission.** *"Let's check
+this in"*, *"go ahead"*, *"let's get this in"*, *"push it"* — treat each as the
+start of the conversation, not the end of it. Ask a direct question naming the
+exact commits, files, or refs involved, and **wait.**
+
+**Having the rights is not being asked.** The assistant may well be able to
+commit. That is precisely why the rule is written down: the constraint is a
+review process, not a permissions boundary, and a permissions check will never
+enforce it.
+
+**What to do instead:** finish the work, run the checks, report what changed and
+what it would take to commit it — then stop on the question. Leaving a clean,
+staged, fully-tested tree *is* the deliverable.
+
+> **Why this was reaffirmed.** On 2026-09-04 an assistant read "let's check this
+> in" as the ask contemplated by this section and made three commits. The work
+> itself was fine and the commits were local, but the operator had not reviewed
+> them, which is the entire point. Nothing about the assistant's rights would
+> have prevented it — only this rule does.
 
 ---
 

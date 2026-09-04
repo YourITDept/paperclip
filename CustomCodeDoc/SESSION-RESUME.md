@@ -135,6 +135,22 @@ checkpoint after any one of these, whichever comes first:
 | Per-change-set docs | append-only | Root cause, reasoning, rejected alternatives, tests, open items |
 | [`Review and Test Changes.md`](CustomCodeDoc/Review%20and%20Test%20Changes.md) | append-only | The standing procedure and the §4 register of what the fork carries |
 
+### RULE 0 — never commit, merge or push without asking
+
+Prepare the work. Run the checks. Report what changed. **Then stop and ask a
+direct question, and wait for the answer.**
+
+This applies to `git commit`, `git merge`, `git rebase`, `git push`, `git reset`
+and anything else that moves a ref or rewrites history. It applies **even when the
+operator's own words sound like permission** — *"let's check this in"*, *"go
+ahead"*, *"push it"* — and **even when the assistant has the rights to do it.**
+The constraint is the operator's review process, not a permissions boundary, so
+nothing in the tooling will enforce it. Full text and the reason: §5.4 and §0.1
+rule 2 of [`Review and Test Changes.md`](CustomCodeDoc/Review%20and%20Test%20Changes.md).
+
+A clean, staged, fully-tested tree with a written-up next action **is** the
+finished deliverable. Handing it over uncommitted is not an unfinished job.
+
 ### The rule that matters most
 
 **Reasoning is the perishable part.** A diff survives a disconnection perfectly;

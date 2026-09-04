@@ -42,6 +42,7 @@ import {
   duplicateAgentName,
   type DuplicateInstructionsBundle,
 } from "../lib/duplicate-agent-payload";
+import { apiErrorMessage } from "../lib/validation-error-message";
 import type {
   Agent,
   AgentInstructionsBundle,
@@ -338,7 +339,10 @@ export function AgentActionButtons({
       navigate(`/agents/${agentRouteRef(createdAgent)}/dashboard`);
     },
     onError: (err) => {
-      const message = err instanceof Error ? err.message : "Failed to duplicate agent";
+      // Names the field the server rejected. Without this the toast reads a bare
+      // "Validation error" for every schema failure, which is what made the
+      // duplicate bug cost a source read instead of a glance.
+      const message = apiErrorMessage(err, "Failed to duplicate agent");
       onActionError?.(message);
       pushToast({ title: "Could not duplicate agent", body: message, tone: "error" });
     },
