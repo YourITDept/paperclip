@@ -442,3 +442,64 @@ is pinned at `node-version: 24` and is the authoritative environment.
    ```bash
    tar tzf releases/paperclip-bundle.tar.gz | head -3
    ```
+8. **`bundleDependencies` on `@paperclipai/server` broke `pack-local.sh`, and the
+   failure was silent.** Found 2026-09-04. This is the one that cost the most
+   time, because the symptom looked like a finished build.
+
+   **Symptom.** `pack-local.sh` exits 1 with no error message, leaving
+   `releases/local/` holding 14 tarballs — every adapter plus `db`,
+   `plugin-sdk`, `adapter-utils`, `hermes` — and **no** `server`, `shared`,
+   `skills-catalog`, CLI, `package.json` or `install.sh`. The cut is clean and
+   alphabetical because the packing loop iterates the closure sorted by name and
+   dies on the first `@paperclipai/s…` entry.
+
+   **Cause.** Upstream's 2026-09-04 merge added to `server/package.json`:
+
+   ```diff
+   +    "acpx": "0.13.1",
+   +  "bundleDependencies": [ "acpx" ]
+   ```
+
+   `pack-local.sh` branches on exactly that key:
+
+   | | before the merge | after |
+   | --- | --- | --- |
+   | `has_bundled_deps` | `no` | **`yes`** |
+   | branch taken | `pnpm pack`, run **in `server/`** | staged `npm pack`, run **in a temp dir** |
+   | `prepack` → `bash ../scripts/prepare-server-ui-dist.sh` | resolves | **ENOENT** |
+
+   `npm pack` runs the package's `prepack`. The server's is
+   `pnpm run prepare:ui-dist && pnpm run build`, whose first act is
+   `bash ../scripts/prepare-server-ui-dist.sh`. The staging directory has no
+   sibling `scripts/`, so it cannot resolve. **`prepack` has been in
+   `server/package.json` for months — what changed is which branch reaches it.**
+
+   **Why it was silent.** The branch had `2>/dev/null` on the pack call, so the
+   error was discarded and `set -e` exited with nothing printed.
+
+   **Fix (applied 2026-09-04):** add `--ignore-scripts` to the staged `npm pack`,
+   and stop suppressing stderr. Everything `prepack` would do — build, stage
+   `ui-dist`, stage `skills` — is already done by step `[3/7]` and
+   `prepare-bundled-package.mjs` *before* the stage exists, so running it there
+   is redundant as well as impossible.
+
+   **A trap within the trap: do not try to reproduce this by hand after a failed
+   run.** `restore_tree` runs on EXIT and deletes `server/ui-dist` and
+   `server/skills`. Running `prepare-bundled-package.mjs` afterwards therefore
+   fails on *those* missing paths and sends you chasing the wrong cause — it
+   happened twice during this investigation. Stage them first:
+
+   ```bash
+   export PAPERCLIP_RELEASE_REUSE_UI_DIST=1
+   bash scripts/prepare-server-ui-dist.sh
+   rm -rf server/skills && cp -r skills server/skills
+   node scripts/prepare-bundled-package.mjs "$PWD/server" "$(mktemp -d)"
+   ```
+
+   Then run the `npm pack` step in that stage **without** `2>/dev/null` to see
+   the real error. Clean up `server/ui-dist` and `server/skills` afterwards.
+
+   **The general lesson:** an upstream dependency change can reroute this script
+   without touching it. `pack-local.sh` is change set 8 and has no test, so
+   nothing catches this but a failed release. When a pack ends early, check
+   `releases/local/` for `install.sh` and the CLI tarball before believing it.

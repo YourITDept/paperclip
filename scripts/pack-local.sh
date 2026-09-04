@@ -217,7 +217,23 @@ while IFS=$'\t' read -r pkg_dir pkg_name; do
     # so stage them the way scripts/release.sh does and pack with npm.
     stage="$(mktemp -d "${TMPDIR:-/tmp}/paperclip-pack-local.XXXXXX")"
     node "$REPO_ROOT/scripts/prepare-bundled-package.mjs" "$REPO_ROOT/$pkg_dir" "$stage" > /dev/null
-    tarball="$(cd "$stage" && npx --yes "npm@$BUNDLED_NPM_PACK_VERSION" pack --pack-destination "$OUT" 2>/dev/null | tail -1)"
+    # --ignore-scripts is load-bearing. `npm pack` runs the package's `prepack`,
+    # and the server's is `pnpm run prepare:ui-dist && pnpm run build`, whose
+    # first step is `bash ../scripts/prepare-server-ui-dist.sh`. The stage is a
+    # temp directory with no sibling scripts/, so that path cannot resolve and
+    # the pack dies. Everything prepack would do — build, stage ui-dist, stage
+    # skills — is already done by step [3/7] and prepare-bundled-package.mjs
+    # before this stage exists, so running it here is redundant as well as
+    # impossible.
+    #
+    # This only started biting when upstream added `bundleDependencies` to
+    # server/package.json (the acpx bundle). Before that the server took the
+    # pnpm-pack branch below, which runs inside server/ where ../scripts/ does
+    # resolve — which is why this script worked until the 2026-09-04 merge.
+    #
+    # stderr is deliberately NOT suppressed: swallowing it turned a hard failure
+    # into a silent partial bundle that looked like a finished build.
+    tarball="$(cd "$stage" && npx --yes "npm@$BUNDLED_NPM_PACK_VERSION" pack --ignore-scripts --pack-destination "$OUT" | tail -1)"
     tarball="$(basename "$tarball")"
     rm -rf "$stage"
     OVERRIDE_LINES+=("$pkg_name=$tarball")
