@@ -41,3 +41,5 @@ export { instanceSettingsRoutes } from "./instance-settings.js";
 export { codexVaultRoutes } from "./codex-vaults.js";
 export { claudeVaultRoutes } from "./claude-vaults.js";
 export { instanceDatabaseBackupRoutes } from "./instance-database-backups.js";
+export { managedAgentProfileRoutes } from "./managed-agent-profiles.js";
+export { remoteAgentProfileRoutes } from "./remote-agent-profiles.js";
