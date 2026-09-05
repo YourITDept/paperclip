@@ -22,7 +22,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { and, countDistinct, eq, sql } from "drizzle-orm";
+import { and, count, countDistinct, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { authUsers, companies, companyMemberships } from "@paperclipai/db";
 import type { HumanCompanyMembershipRole } from "@paperclipai/shared";
@@ -101,6 +101,30 @@ function readInt(value: unknown): number | null {
   if (value === null || value === undefined) return null;
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
+}
+
+/**
+ * Normalise a requested issue prefix.
+ *
+ * `companies.issue_prefix` is plain text with a unique index — the `[A-Z]{1,3}`
+ * shape is what `deriveIssuePrefixBase` happens to produce, not a constraint —
+ * so a caller-supplied prefix can be longer and can carry digits. That is the
+ * point: an instance code like `dev92` becomes `DEV92`, which the derived form
+ * could never produce because it strips digits.
+ *
+ * Upper-cased because the UI resolves the URL segment with
+ * `issuePrefix.toUpperCase() === companyPrefix.toUpperCase()`, so storing it
+ * lower-case would work but display inconsistently.
+ *
+ * A hyphen is rejected outright: issue identifiers are `PREFIX-123`, and a
+ * prefix containing the separator makes them ambiguous to read back.
+ */
+export function readIssuePrefix(value: unknown): string | null {
+  const raw = readString(value);
+  if (!raw) return null;
+  const prefix = raw.toUpperCase();
+  if (!/^[A-Z0-9]{1,12}$/.test(prefix)) return null;
+  return prefix;
 }
 
 /**
@@ -188,29 +212,80 @@ export function provisioningHandlers(db: Db, store: ProvisioningStore) {
   }
 
   /**
-   * Resolve the company a membership job is addressed to.
+   * Resolve which company a job is addressed to.
    *
-   * The onboarding side sends `companyId: null` on purpose: it knows the
-   * people, and only Paperclip knows what companies exist inside an instance.
+   * Four ways to name one, most specific first. The onboarding side cannot know
+   * the uuid — Paperclip mints it — so the middle two exist to let a job target
+   * a company by something the caller already knows.
    *
-   *   exactly one active company -> that one
-   *   none yet                   -> PARK, not fail. On a brand-new instance the
-   *                                 owner's membership job arrives before any
-   *                                 company does; it waits for the owner to
-   *                                 sign in and create one, then lands.
-   *   more than one              -> permanent. Genuinely ambiguous, and
-   *                                 guessing which team somebody belongs to is
-   *                                 worse than stopping.
+   *   companyId      the uuid, when the caller has read one back
+   *   companyPrefix  the issue prefix: `companies.issue_prefix`, the code in
+   *                  the URI (`/PAP/...`) and in issue ids (`PAP-123`). It
+   *                  carries a unique index, so this is exact.
+   *   companyName    the name, matched exactly. NOT unique in the schema, so
+   *                  two companies sharing a name is ambiguous, not a pick.
+   *   none of them   the instance's single active company
+   *
+   * ON MORE THAN ONE COMPANY. A job that names none, on an instance that has
+   * several, is under-specified and no retry will fix it — so it fails
+   * permanently rather than parking, because parking would wait for a condition
+   * that never arrives. The answer is to name the company: once an instance has
+   * a second one, every job has to say which. `company.create` returns both the
+   * id and the prefix in its result for exactly that reason.
    */
-  async function resolveCompanyId(explicit: string | null): Promise<string> {
-    if (explicit) {
+  async function resolveCompanyId(payload: Record<string, unknown>): Promise<string> {
+    const explicitId = readString(payload.companyId);
+    if (explicitId) {
       const row = await db
         .select({ id: companies.id })
         .from(companies)
-        .where(eq(companies.id, explicit))
+        .where(eq(companies.id, explicitId))
         .then((rows) => rows[0] ?? null);
-      if (!row) throw new PermanentJobError(`company ${explicit} not found`, "company_not_found");
+      if (!row) throw new PermanentJobError(`company ${explicitId} not found`, "company_not_found");
       return row.id;
+    }
+
+    // Normalised through the same reader `company.create` uses, so the two
+    // agree on what a prefix is. A malformed one fails PERMANENTLY rather than
+    // parking: parking waits for a company that can never be created, because
+    // `company.create` would reject the same value — a job waiting for ever on
+    // an impossible condition is the quiet failure this design keeps avoiding.
+    if (payload.companyPrefix !== undefined) {
+      const prefix = readIssuePrefix(payload.companyPrefix);
+      if (!prefix) {
+        throw new PermanentJobError(
+          "companyPrefix must be 1-12 letters or digits and contain no hyphen",
+          "invalid_payload",
+        );
+      }
+      // Case-insensitive to match the UI, which resolves the URL segment with
+      // `issuePrefix.toUpperCase() === companyPrefix.toUpperCase()`.
+      const row = await db
+        .select({ id: companies.id })
+        .from(companies)
+        .where(sql`upper(${companies.issuePrefix}) = ${prefix}`)
+        .then((rows) => rows[0] ?? null);
+      if (!row) {
+        // Parked, not failed: a well-formed prefix is a real target that may
+        // simply not exist yet, because `company.create` has not run.
+        throw new ParkJobError(`waiting for a company with prefix ${prefix}`);
+      }
+      return row.id;
+    }
+
+    const name = readString(payload.companyName);
+    if (name) {
+      const rows = await db
+        .select({ id: companies.id })
+        .from(companies)
+        .where(eq(companies.name, name))
+        .limit(2);
+      if (rows.length === 1) return rows[0].id;
+      if (rows.length === 0) throw new ParkJobError(`waiting for a company named ${name}`);
+      throw new PermanentJobError(
+        `more than one company is named ${name}; address the job by companyPrefix or companyId`,
+        "ambiguous_company",
+      );
     }
 
     // LIMIT 2: enough to tell "one" from "more than one" without reading the
@@ -226,7 +301,8 @@ export function provisioningHandlers(db: Db, store: ProvisioningStore) {
       throw new ParkJobError("waiting for a company to exist in this instance");
     }
     throw new PermanentJobError(
-      "instance has more than one active company; the job must name one",
+      "this instance has more than one active company and the job names none; " +
+        "re-queue it with companyPrefix or companyId",
       "ambiguous_company",
     );
   }
@@ -342,64 +418,113 @@ export function provisioningHandlers(db: Db, store: ProvisioningStore) {
 
 
   /**
-   * Create the instance's first company, owned by the instance owner.
+   * Create a company, owned by the instance owner.
    *
-   * Every instance starts with exactly one company. Members then sync into it,
-   * which is what lets `membership.set` send `companyId: null` and have the
-   * worker resolve it — see `resolveCompanyId`.
+   * An ADD mechanism, not a one-time bootstrap. An instance starts with one
+   * company so `membership.set` can resolve `companyId: null`, but nothing
+   * stops it having more, and this job is how they arrive.
    *
-   * ALWAYS through `companyService.create`, never an INSERT into `companies`.
-   * It resolves a unique issue prefix, calls `ensureLocalEnvironment` and runs
-   * `autoProvisionBundledAgents`. A raw insert yields a row that lists fine in
-   * the UI and breaks the moment somebody opens it.
+   * `companyPrefix` does double duty, deliberately:
    *
-   * Idempotent by existence, not by key. If an active company already exists
-   * this returns it rather than creating a second: the assertion being made is
-   * "this instance has its company", and replay must not multiply it. That also
-   * means an operator who creates their own company first keeps it, and this
-   * job quietly agrees.
+   *   a company already has it  -> adopt that one, re-assert ownership
+   *   nothing has it            -> CREATE the company with that prefix
+   *
+   * which is what makes the prefix usable as a caller-chosen key. The caller
+   * picks it up front, every later job addresses the company by it, and there
+   * is no read-back step in between.
+   *
+   * ALWAYS through `companyService`, never an INSERT into `companies`. `create`
+   * resolves a unique issue prefix, calls `ensureLocalEnvironment` and runs
+   * `autoProvisionBundledAgents`; a raw insert yields a row that lists fine and
+   * breaks when opened.
+   *
+   * IDEMPOTENT BY NAME when no prefix is given. The queue key stops a replay of
+   * the same job, but two separately-keyed jobs asking for the same company must
+   * not produce two. Without this an instance ends up with `Test` and `Test`,
+   * told apart only by their derived prefixes (`TES`, `TESA`).
    */
   async function companyCreate(payload: Record<string, unknown>): Promise<JobResult> {
+    const adopt = async (companyId: string) => {
+      const row = await db
+        .select({ name: companies.name, issuePrefix: companies.issuePrefix })
+        .from(companies)
+        .where(eq(companies.id, companyId))
+        .then((rows) => rows[0] ?? null);
+      if (!row) throw new PermanentJobError(`company ${companyId} not found`, "company_not_found");
+      const email = readEmail(payload.ownerEmail);
+      if (email) {
+        // Re-assert ownership even on an existing company: this job is about
+        // the owner as much as the company, and it repairs a membership
+        // somebody removed by hand.
+        const owner = await ensureUser(email, readString(payload.ownerName));
+        await applyOwner(companyId, owner.userId);
+      }
+      return { companyId, name: row.name, issuePrefix: row.issuePrefix, created: false };
+    };
+
+    // An explicit uuid means "make sure this one exists and is owned".
+    const explicitId = readString(payload.companyId);
+    if (explicitId) return adopt(explicitId);
+
+    const requestedPrefix = readIssuePrefix(payload.companyPrefix ?? payload.issuePrefix);
+    if (payload.companyPrefix !== undefined && !requestedPrefix) {
+      throw new PermanentJobError(
+        "companyPrefix must be 1-12 letters or digits and contain no hyphen",
+        "invalid_payload",
+      );
+    }
+
+    if (requestedPrefix) {
+      const held = await db
+        .select({ id: companies.id })
+        .from(companies)
+        .where(sql`upper(${companies.issuePrefix}) = ${requestedPrefix}`)
+        .then((rows) => rows[0] ?? null);
+      if (held) return adopt(held.id);
+      // Falls through to create, and the prefix is applied below.
+    }
+
     const name = readString(payload.name);
     if (!name) throw new PermanentJobError("a company name is required", "invalid_payload");
 
-    const existing = await db
-      .select({ id: companies.id, name: companies.name })
-      .from(companies)
-      .where(eq(companies.status, "active"))
-      .limit(2);
+    // Only when the caller gave no prefix: with one, the prefix is the identity
+    // and a name collision is irrelevant.
+    if (!requestedPrefix) {
+      const sameName = await db
+        .select({ id: companies.id })
+        .from(companies)
+        .where(and(eq(companies.name, name), eq(companies.status, "active")))
+        .limit(2);
+      if (sameName.length > 1) {
+        throw new PermanentJobError(
+          `more than one active company is named ${name}; address this job by companyPrefix`,
+          "ambiguous_company",
+        );
+      }
+      if (sameName.length === 1) return adopt(sameName[0].id);
+    }
 
-    // More than one already: this instance is past the point where a bootstrap
-    // job means anything, and picking one to call "the" company would be a
-    // guess. Stop and let somebody look.
-    if (existing.length > 1) {
-      throw new PermanentJobError(
-        "instance already has more than one active company",
-        "ambiguous_company",
-      );
+    // Plan limit, against the real count.
+    const state = await store.readInstanceState();
+    if (state?.maxCompanies) {
+      const current = await db
+        .select({ value: count() })
+        .from(companies)
+        .where(eq(companies.status, "active"))
+        .then((rows) => Number(rows[0]?.value ?? 0));
+      if (current >= state.maxCompanies) {
+        // Permanent: a plan limit is a billing decision, not a transient fault.
+        throw new PermanentJobError(
+          `company limit reached (${current}/${state.maxCompanies})`,
+          "company_limit_reached",
+        );
+      }
     }
 
     const ownerEmail = readEmail(payload.ownerEmail);
     const owner = ownerEmail ? await ensureUser(ownerEmail, readString(payload.ownerName)) : null;
-
-    if (existing.length === 1) {
-      const companyId = existing[0].id;
-      // Re-assert ownership even when the company was already there. The job
-      // is about the owner as much as the company, and this is what repairs it
-      // if somebody removed the membership by hand.
-      if (owner) await applyOwner(companyId, owner.userId);
-      return { companyId, name: existing[0].name, created: false };
-    }
-
-    const state = await store.readInstanceState();
-    if (state?.maxCompanies && state.maxCompanies < 1) {
-      throw new PermanentJobError(
-        `company limit is ${state.maxCompanies}`,
-        "company_limit_reached",
-      );
-    }
-
     const description = readString(payload.description);
+
     const company = await companiesSvc.create({
       name,
       ...(description ? { description } : {}),
@@ -407,10 +532,35 @@ export function provisioningHandlers(db: Db, store: ProvisioningStore) {
       ...(owner ? { defaultResponsibleUserId: owner.userId } : {}),
     });
 
+    // `create` always derives its own prefix — `createCompanyWithUniquePrefix`
+    // does `.values({ ...data, issuePrefix: candidate })`, so one passed in is
+    // overwritten. Setting it is therefore a second step, and it is safe here
+    // because a company created moments ago has no issue identifiers to rekey.
+    // `resolveRenamedIssuePrefix` leaves an explicit prefix alone by design.
+    let issuePrefix = company.issuePrefix;
+    if (requestedPrefix && requestedPrefix !== issuePrefix.toUpperCase()) {
+      try {
+        const renamed = await companiesSvc.update(company.id, { issuePrefix: requestedPrefix });
+        issuePrefix = renamed?.issuePrefix ?? requestedPrefix;
+      } catch (err) {
+        // The unique index caught a prefix another company already holds. The
+        // company itself exists and is owned, so this is reported rather than
+        // rolled back — but it is permanent, because the caller has to choose
+        // a different prefix.
+        throw new PermanentJobError(
+          `issue prefix ${requestedPrefix} is already taken (company ${company.id} was created as ${issuePrefix})`,
+          "issue_prefix_taken",
+        );
+      }
+    }
+
     if (owner) await applyOwner(company.id, owner.userId);
 
-    logger.info({ companyId: company.id, name: company.name }, "provisioning: created company");
-    return { companyId: company.id, name: company.name, created: true };
+    logger.info(
+      { companyId: company.id, name: company.name, issuePrefix, requested: requestedPrefix },
+      "provisioning: created company",
+    );
+    return { companyId: company.id, name: company.name, issuePrefix, created: true };
   }
 
   /** Owner membership plus the grants that make it mean anything. */
@@ -425,7 +575,7 @@ export function provisioningHandlers(db: Db, store: ProvisioningStore) {
     if (!email) throw new PermanentJobError("a valid email is required", "invalid_payload");
 
     const role = roleFor(payload);
-    const companyId = await resolveCompanyId(readString(payload.companyId));
+    const companyId = await resolveCompanyId(payload);
     const { userId, created } = await ensureUser(email, readString(payload.name));
     await assertSeatAvailable(userId, role);
 
