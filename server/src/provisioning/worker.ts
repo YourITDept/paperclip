@@ -142,8 +142,14 @@ export function createProvisioningWorker(db: Db, options: ProvisioningWorkerOpti
         }
 
         try {
-          const result = await handlers.run(job.jobType, job.payload ?? {});
+          const payload = job.payload ?? {};
+          const result = await handlers.run(job.jobType, payload);
           await store.succeed(job.id, result);
+          // A payload that carried a credential is blanked once it has been
+          // applied, so the key does not outlive the job in a retained row.
+          if (handlers.carriesCredential(job.jobType, payload)) {
+            await store.clearPayload(job.id);
+          }
           logger.info({ jobId: job.id, jobType: job.jobType, result }, "provisioning: job applied");
         } catch (err) {
           await settleFailure(job, err);

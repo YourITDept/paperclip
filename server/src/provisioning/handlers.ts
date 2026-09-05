@@ -22,11 +22,14 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { and, count, countDistinct, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { authUsers, companies, companyMemberships } from "@paperclipai/db";
 import type { HumanCompanyMembershipRole } from "@paperclipai/shared";
 import { accessService } from "../services/access.js";
+import { agentService } from "../services/agents.js";
+import { secretService } from "../services/secrets.js";
 import { companyService } from "../services/companies.js";
 import { normalizeHumanRole } from "../services/company-member-roles.js";
 import { logger } from "../middleware/logger.js";
@@ -159,6 +162,8 @@ export function roleFor(payload: Record<string, unknown>): HumanCompanyMembershi
 export function provisioningHandlers(db: Db, store: ProvisioningStore) {
   const access = accessService(db);
   const companiesSvc = companyService(db);
+  const agentsSvc = agentService(db);
+  const secretsSvc = secretService(db);
 
   /**
    * Find or create the `user` row.
@@ -588,14 +593,228 @@ export function provisioningHandlers(db: Db, store: ProvisioningStore) {
     return { userId, companyId, role, userCreated: created };
   }
 
+
+  /* ------------------------------------------------------------------ */
+  /* Agents and their credentials                                        */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Resolve the credential for a `secret.set` job.
+   *
+   * Three sources, in precedence order: an inline `value`, a file to read, or
+   * an environment variable to read. Whichever resolves first wins.
+   *
+   * `valueFromEnv` is where this should end up — the container already carries
+   * `OPENROUTER_API_KEY` (docker-compose passes it through), so the queue never
+   * has to hold the credential at all. `value` is supported because it is what
+   * the onboarding side sends today; see `secretValueIsInline` below for the
+   * consequence that carries.
+   *
+   * Nothing resolving is PERMANENT. A secret created empty authenticates fine
+   * right up until the agent's first real run, which is the expensive place to
+   * discover it.
+   */
+  async function resolveSecretValue(payload: Record<string, unknown>): Promise<string> {
+    const inline = readString(payload.value);
+    if (inline) return inline;
+
+    const fromFile = readString(payload.valueFromFile);
+    if (fromFile) {
+      try {
+        const contents = await readFile(fromFile, "utf8");
+        // Trailing newlines are normal in a mounted secret file and are not
+        // part of the credential.
+        const trimmed = contents.trim();
+        if (trimmed) return trimmed;
+        throw new PermanentJobError(`${fromFile} is empty`, "secret_source_missing");
+      } catch (err) {
+        if (err instanceof PermanentJobError) throw err;
+        throw new PermanentJobError(
+          `cannot read ${fromFile}: ${err instanceof Error ? err.message : String(err)}`,
+          "secret_source_missing",
+        );
+      }
+    }
+
+    const fromEnv = readString(payload.valueFromEnv);
+    if (fromEnv) {
+      const value = readString(process.env[fromEnv]);
+      if (value) return value;
+      throw new PermanentJobError(
+        `environment variable ${fromEnv} is not set in this container`,
+        "secret_source_missing",
+      );
+    }
+
+    throw new PermanentJobError(
+      "one of value, valueFromFile or valueFromEnv is required",
+      "secret_source_missing",
+    );
+  }
+
+  /** True when the credential travelled in the job row itself. */
+  function secretValueIsInline(payload: Record<string, unknown>): boolean {
+    return Boolean(readString(payload.value));
+  }
+
+  /**
+   * Create or rotate a company secret.
+   *
+   * `key` is the identity and the only thing matched on — `name` is a label
+   * matched on by nothing. Several agents deliberately hold the same credential
+   * under different keys, so that any one of them can be rotated later without
+   * re-credentialling the rest.
+   *
+   * `rotate` defaults to false, so a replay is a no-op. This differs from
+   * `onboard-paperclip-2.sh`, where passing the key by value always rotates and
+   * therefore re-credentials every agent bound to it on each run.
+   */
+  async function secretSet(payload: Record<string, unknown>): Promise<JobResult> {
+    const key = readString(payload.key);
+    if (!key) throw new PermanentJobError("a secret key is required", "invalid_payload");
+    const companyId = await resolveCompanyId(payload);
+
+    const existing = await secretsSvc.getByKey(companyId, key);
+    const rotate = payload.rotate === true;
+
+    if (existing && !rotate) {
+      // Deliberately does NOT read the source: a no-op should not require the
+      // credential to still be available.
+      return { secretId: existing.id, key, companyId, rotated: false, created: false };
+    }
+
+    const value = await resolveSecretValue(payload);
+
+    if (existing) {
+      await secretsSvc.rotate(existing.id, { value });
+      logger.info({ secretId: existing.id, key, companyId }, "provisioning: rotated secret");
+      return { secretId: existing.id, key, companyId, rotated: true, created: false };
+    }
+
+    const created = await secretsSvc.create(companyId, {
+      name: readString(payload.name) ?? key,
+      // The instance is configured `local_encrypted` (PAPERCLIP_SECRETS_PROVIDER),
+      // which is the only provider that takes a literal value.
+      provider: "local_encrypted",
+      key,
+      value,
+      ...(readString(payload.description) ? { description: readString(payload.description) } : {}),
+    });
+
+    // The value is never echoed — not here, not in `result`. A log line naming
+    // the key is enough to trace what happened.
+    logger.info({ secretId: created.id, key, companyId }, "provisioning: created secret");
+    return { secretId: created.id, key, companyId, rotated: false, created: true };
+  }
+
+  /**
+   * Create an agent bound to a company secret.
+   *
+   * The binding is a `secret_ref`, not a host environment variable. Resolved
+   * adapter env is merged AFTER the host-env projection and is not filtered by
+   * it, so a bound key always reaches the child process where a host-exported
+   * one depends on the allowlist.
+   *
+   * Idempotent by name within the company: the queue key stops a replay, but
+   * two separately-keyed jobs naming the same agent must not produce two.
+   */
+  async function agentCreate(payload: Record<string, unknown>): Promise<JobResult> {
+    const name = readString(payload.name);
+    if (!name) throw new PermanentJobError("an agent name is required", "invalid_payload");
+    const companyId = await resolveCompanyId(payload);
+
+    const existing = await agentsSvc
+      .list(companyId)
+      .then((rows) => rows.find((row) => row.name === name) ?? null);
+    if (existing) {
+      return { agentId: existing.id, name, companyId, created: false };
+    }
+
+    const secretKey = readString(payload.secretKey);
+    let secretId: string | null = null;
+    if (secretKey) {
+      const secret = await secretsSvc.getByKey(companyId, secretKey);
+      if (!secret) {
+        // Parked, not failed: `secret.set` may simply not have run yet. This is
+        // what makes the enqueue order between the two irrelevant.
+        throw new ParkJobError(`waiting for secret ${secretKey} in this company`);
+      }
+      secretId = secret.id;
+    }
+
+    // The binding VARIABLE NAME is payload-driven, not a constant: it has to
+    // match whatever the vault's config.toml auth command actually reads. A
+    // secret bound to a name nothing looks at is configured-looking and 401s on
+    // the agent's first run.
+    const secretEnv = readString(payload.secretEnv) ?? "OPENROUTER_API_KEY";
+    const codexHome = readString(payload.codexHome);
+    const env: Record<string, unknown> = {};
+
+    // Any extra plain variables the caller wants in the agent's environment,
+    // as a flat { NAME: "value" } map. Applied first so the two derived
+    // entries below win on a collision — `codexHome` and `secretKey` are the
+    // explicit way to set those two, and a plain string smuggled in here for
+    // CODEX_HOME would silently beat the field that exists for it.
+    const extraEnv = payload.env;
+    if (extraEnv && typeof extraEnv === "object" && !Array.isArray(extraEnv)) {
+      // `varName`, not `name`: the agent's own name is in scope here and
+      // shadowing it is how the wrong string ends up in the wrong field.
+      for (const [varName, raw] of Object.entries(extraEnv as Record<string, unknown>)) {
+        const value = readString(raw);
+        // Empty values are dropped rather than bound to "": binding a variable
+        // to an empty string is a different fact from leaving it unset, and the
+        // adapters read it that way.
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(varName) || !value) continue;
+        env[varName] = { type: "plain", value };
+      }
+    }
+
+    // Omitted rather than sent empty: an empty CODEX_HOME binds the variable to
+    // "" instead of leaving the Paperclip-managed home to apply.
+    if (codexHome) env.CODEX_HOME = { type: "plain", value: codexHome };
+    if (secretId) env[secretEnv] = { type: "secret_ref", secretId };
+
+    const model = readString(payload.model);
+    const adapterConfig: Record<string, unknown> = { env };
+    // Never send model:"" — an empty string suppresses the --model flag the
+    // vault relies on, which is not the same as leaving it unset.
+    if (model) adapterConfig.model = model;
+
+    const agent = await agentsSvc.create(companyId, {
+      name,
+      adapterType: readString(payload.adapterType) ?? "codex_local",
+      adapterConfig,
+      // Only sent when it actually changes a default.
+      ...(payload.canCreateAgents === true ? { permissions: { canCreateAgents: true } } : {}),
+    });
+
+    logger.info(
+      { agentId: agent.id, name, companyId, model, secretKey, boundTo: secretEnv },
+      "provisioning: created agent",
+    );
+    return { agentId: agent.id, name, companyId, secretId, created: true };
+  }
+
   const handlers: Record<string, (payload: Record<string, unknown>) => Promise<JobResult>> = {
     "instance.state": instanceState,
     "user.upsert": userUpsert,
     "company.create": companyCreate,
     "membership.set": membershipSet,
+    "secret.set": secretSet,
+    "agent.create": agentCreate,
   };
 
   return {
+    /**
+     * True when this job type carried a credential in its payload, so the
+     * worker can clear the row after it succeeds. A `secret.set` with an inline
+     * `value` is the one exception to keeping terminal rows intact: the audit
+     * trail should record what happened without retaining the key.
+     */
+    carriesCredential(jobType: string, payload: Record<string, unknown>): boolean {
+      return jobType === "secret.set" && secretValueIsInline(payload);
+    },
+
     async run(jobType: string, payload: Record<string, unknown>): Promise<JobResult> {
       const handler = handlers[jobType];
       // Known to the vocabulary but not built yet: park it rather than fail it.

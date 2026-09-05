@@ -55,6 +55,12 @@ export const JOB_TYPES = [
   "membership.set",
   "membership.remove",
   "company.reconcile",
+  // Listed before their handlers exist, and that is the point: a name in this
+  // list PARKS and waits for a build that can apply it, where a name outside it
+  // fails permanently and is never re-queued. Adding the name first is what
+  // makes it safe for the onboarding side to enqueue ahead of this side.
+  "secret.set",
+  "agent.create",
 ] as const;
 
 export type JobType = (typeof JOB_TYPES)[number];
@@ -278,6 +284,26 @@ export function provisioningStore(run: SqlRunner) {
   }
 
   /**
+   * Blank a job's payload after it has been applied.
+   *
+   * For the one case where the payload carried a credential. Terminal rows are
+   * kept as an audit trail, which is right for every other job type and wrong
+   * for this one: an inline secret would sit in `provisioning_jobs.payload` in
+   * plaintext for as long as the row survives, readable by every role holding
+   * SELECT on the table. Clearing it keeps the record of WHAT happened —
+   * status, result, timestamps, the secret's key name — without keeping the key.
+   */
+  async function clearPayload(id: string): Promise<void> {
+    await guard("clear-payload", async () => {
+      await run.execute(sql`
+        UPDATE provisioning.provisioning_jobs
+        SET payload = '{}'::jsonb, updated_at = now()
+        WHERE id = ${id}
+      `);
+    }, undefined);
+  }
+
+  /**
    * Return jobs orphaned by a hard kill.
    *
    * `attempts` is deliberately NOT reset. A job that reliably kills the process
@@ -352,6 +378,7 @@ export function provisioningStore(run: SqlRunner) {
 
   return {
     claimOne,
+    clearPayload,
     succeed,
     failPermanent,
     retryLater,
