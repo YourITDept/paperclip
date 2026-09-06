@@ -68,6 +68,8 @@ each one after every re-branch.
 | # | Change | File | Detect it with |
 | --- | --- | --- | --- |
 | 1 | Invite auto-accept guarded on the invite having loaded | [`ui/src/pages/InviteLanding.tsx`](ui/src/pages/InviteLanding.tsx) | the named test in #1 below |
+| 2 | **TEMPORARY** — Connectors hidden from the sidebar nav | [`ui/src/lib/fork-flags.ts`](ui/src/lib/fork-flags.ts), [`ui/src/components/Sidebar.tsx`](ui/src/components/Sidebar.tsx), [`ui/src/components/Sidebar.production.tsx`](ui/src/components/Sidebar.production.tsx) | the named test in #2 below |
+| 3 | Streamlined UI + Streamlined Left Navigation default OFF | [`packages/shared/src/validators/instance.ts`](packages/shared/src/validators/instance.ts), [`packages/shared/src/feature-catalog.ts`](packages/shared/src/feature-catalog.ts), [`server/src/services/instance-settings.ts`](server/src/services/instance-settings.ts) | the named tests in #3 below |
 
 #### 1. Invite auto-accept must be guarded on `Boolean(invite)`
 
@@ -77,6 +79,147 @@ above it explaining why. Paired regression test in
 `ui/src/pages/InviteLanding.test.tsx`:
 
 > `shows no stale 'Invite not found' when a member opens the link with a warm session`
+
+#### 2. Connectors is hidden from the sidebar — TEMPORARY, remove this
+
+> **This one is meant to be reverted.** Unlike #1, it is not a fix. It hides a
+> working upstream feature while we decide how to host it. If you are reading
+> this after that decision, delete the flag and this entry.
+
+**Why.** Connectors brokers OAuth through Paperclip Cloud at
+`my.paperclip.app` — the default in
+[`server/src/services/paperclip-cloud-connector.ts:142`](server/src/services/paperclip-cloud-connector.ts#L142)
+and twice more in `paperclip-cloud-connector-enrollment.ts` (`:346`, `:369`).
+This deployment is not enrolled with that broker, so the surface is hidden until
+we choose between enrolling, running our own broker
+(`PAPERCLIP_CLOUD_CONNECTOR_BASE_URL`), or using the generic remote-MCP route
+described in [`doc/connections/GENERIC-REMOTE-MCP.md`](doc/connections/GENERIC-REMOTE-MCP.md).
+
+**Why a compile-time constant and not a setting.** There is no supported switch.
+The upstream flag `enableApps` is retired: the server hardcodes it `true` and
+explicitly drops managed overrides — *"never let the retired flag disable Apps"*
+— at [`server/src/services/instance-settings.ts:230`](server/src/services/instance-settings.ts#L230),
+`:267` and `:323`. `PAPERCLIP_HIDDEN_SETTINGS` has no key for this surface
+either ([`packages/shared/src/settings-visibility.ts`](packages/shared/src/settings-visibility.ts)).
+A constant keeps the revert to a one-line diff.
+
+**The change.** `HIDE_CONNECTORS_NAV` in
+[`ui/src/lib/fork-flags.ts`](ui/src/lib/fork-flags.ts), consumed at three nav
+call sites — two in `Sidebar.tsx` (the streamlined "Org" section and the classic
+"Organization" section) and one in `Sidebar.production.tsx`, where it is ANDed
+into the existing `showApps`. **Both sidebars matter**: `ui/src/App.tsx:819`
+picks between them on `streamlinedUiEnabled`, which defaults to `true`, so
+patching only one leaves the item visible for half the instances.
+
+**Scope — navigation only, and that is a deliberate decision, not an oversight.**
+
+This change removes the menu entry and *nothing else*. Specifically, it does
+**not**:
+
+- block the `/apps/*` routes — every one of them in `ui/src/App.tsx:194-217`
+  still resolves, so `https://<host>/<company>/apps/connect?source=<vendor>`
+  loads normally for anyone who types it or holds a bookmark;
+- disable the connector itself — if an enrolled identity file or the
+  `PAPERCLIP_CLOUD_CONNECTOR_*` variables are present, the broker is still live
+  behind the hidden page (see "Turning the broker off" below);
+- touch any server route, the Apps API, or stored `tool_connections` rows.
+
+**Why stop at the menu.** Hiding the entry point is the reversible half. Taking
+the routes away means choosing what happens instead — a redirect, a 404, a
+"not available on this instance" page — and each of those breaks a bookmark or
+an in-product link somewhere. That is a product decision, not a nav tweak, and
+it is not worth making before we know which connectors we actually want.
+
+**DEFERRED — revisit when the connector work starts.** The route question is
+open on purpose. Settle it when we work through the connectors in earnest, at
+which point we will know whether the answer is "enrol with Paperclip Cloud",
+"run our own broker", or "generic remote MCP only" — and the right treatment for
+`/apps/*` follows from that answer rather than preceding it. Until then the
+menu entry is the only thing suppressed, and that is sufficient: users are not
+led to the surface, and nothing is broken for anyone who reaches it deliberately.
+
+**Turning the broker off (separate from this change).** Hiding the nav does not
+stop traffic to `my.paperclip.app`. To do that, clear
+`PAPERCLIP_CLOUD_CONNECTOR_INSTANCE_ID`, `_SIGN_PRIVATE_KEY`, `_SEAL_PRIVATE_KEY`
+and remove `<instance root>/secrets/paperclip-cloud-connector.json`. Also clear
+any legacy `PAPERCLIP_ID_CONNECTOR_*` — with those set but no active identity,
+`paperclipCloudConnectorConfigFromEnv` throws `CONNECTOR_MIGRATION_REQUIRED`
+rather than going quiet.
+
+**Detect it with.** Three assertions in `ui/src/components/Sidebar.test.tsx`
+carry a `HIDE_CONNECTORS_NAV` comment. Upstream's version of the third is named:
+
+> `always shows Connectors in the Org section`
+
+If that test name reappears after a re-branch, the fork change was lost — ours
+is inverted and named `hides Connectors from the Org section (HIDE_CONNECTORS_NAV)`.
+
+**To revert.** Set `HIDE_CONNECTORS_NAV = false`, restore the three original
+assertions from git history, then delete `ui/src/lib/fork-flags.ts`, its three
+call sites, and this entry.
+
+#### 3. Streamlined UI and Streamlined Left Navigation default OFF
+
+**Why.** Of the 31 experimental flags, only these two default ON for a
+self-hosted instance and are user-facing UI experiments. Every other UI
+experiment is off until switched on; these two were the exception, so a fresh
+instance shipped an experimental navigation nobody had opted into. This change
+makes them behave like the rest.
+
+**Why not configuration.** There is no supported switch. `PAPERCLIP_SETTING_DEFAULTS`
+only accepts `feedbackDataSharingPreference` — `DEFAULTABLE_GENERAL_SETTINGS` is a
+one-element list ([`packages/shared/src/setting-defaults.ts`](packages/shared/src/setting-defaults.ts)).
+`PAPERCLIP_MANAGED_CONFIG` accepts only tier-`managed` keys and **throws at
+startup** for anything else ([`server/src/services/managed-config.ts:207`](server/src/services/managed-config.ts#L207));
+both of these are tier `preference`, so putting them in that document stops the
+server booting. Seeding the `instance_settings` row was rejected as an
+onboarding-time SQL step, so the default itself is changed.
+
+**Where the default lives — four sites, and they are coupled.**
+
+| Site | Change |
+| --- | --- |
+| [`validators/instance.ts:50-51`](packages/shared/src/validators/instance.ts#L50) | `z.boolean().default(true)` → `.default(false)` |
+| [`instance-settings.ts:227-228`](server/src/services/instance-settings.ts#L227) | `?? true` → `?? false` (read-time normalization) |
+| [`instance-settings.ts:267-268`](server/src/services/instance-settings.ts#L267) | the parse-failure fallback object, `true` → `false` |
+| [`feature-catalog.ts`](packages/shared/src/feature-catalog.ts) | `selfHostedDefault: true` → `false` for both |
+
+The catalog entry is **not optional**: `packages/shared/src/feature-catalog.test.ts`
+asserts *"keeps selfHostedDefault in sync with the schema defaults"* for every
+key, so changing the validator without the catalog fails that test. That test is
+the tripwire — it will catch a partial re-apply after a re-branch.
+
+`cloudDefault` is deliberately left `true`. It describes what the Paperclip Cloud
+harness chooses, not what we do, and nothing reads it on a self-hosted instance
+(`selfHostedDefault`/`cloudDefault` have no runtime consumers outside the
+catalog). `enableOwnerInstanceAdmin` already ships with the two diverging, so
+the shape is not novel.
+
+**What is unaffected.** An explicit stored choice still wins in both directions —
+only *absence* changed meaning. A user who has already switched Streamlined UI
+on keeps it, and the toggle in Settings → Instance → Experimental works as
+before. The UI hooks read `!== false`
+([`ui/src/hooks/useStreamlinedUiEnabled.ts:13`](ui/src/hooks/useStreamlinedUiEnabled.ts#L13)),
+which is a loading-state guard, not a second default: the server always returns
+an explicit boolean, so the stored value is what renders.
+
+**Consequence worth knowing.** `enableStreamlinedUi` selects which sidebar
+renders — [`ui/src/App.tsx:819`](ui/src/App.tsx#L819) picks `Layout` (→
+`Sidebar.tsx`) when true and `Layout.production` (→ `Sidebar.production.tsx`)
+when false. A fresh instance now gets the **production** sidebar. Both variants
+carry the `HIDE_CONNECTORS_NAV` gate from #2, so Connectors stays hidden either
+way.
+
+**Detect it with.** Assertions marked `FORK` in:
+
+- `packages/shared/src/validators/instance.test.ts` — upstream: `it("defaults the streamlined UI on …")` asserting `toBe(true)`
+- `server/src/__tests__/instance-settings-service.test.ts` — three sites; upstream: `it("defaults streamlined UI on without inheriting the retired navigation preference")`
+
+If either test name reappears with "on" after a re-branch, the fork change was
+lost.
+
+**To revert.** Restore `true` at all four sites (the catalog included, or the
+sync test fails) and restore the four test assertions.
 
 **Why it exists.** Every other term in that expression reads a field off `invite`,
 and an absent `invite` answers each one the *permissive* way —

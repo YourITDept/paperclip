@@ -5,8 +5,14 @@ import {
 } from "./instance.js";
 
 describe("instance experimental settings validators", () => {
-  it("defaults the streamlined UI on and accepts an explicit patch", () => {
-    expect(instanceExperimentalSettingsSchema.parse({}).enableStreamlinedUi).toBe(true);
+  // FORK: upstream names this "defaults the streamlined UI on" and asserts
+  // `true`. See CustomCodeDoc/ReverseProxyCustomChanges.md #3.
+  it("defaults the streamlined UI off and accepts an explicit patch", () => {
+    expect(instanceExperimentalSettingsSchema.parse({}).enableStreamlinedUi).toBe(false);
+    expect(instanceExperimentalSettingsSchema.parse({}).enableStreamlinedLeftNavigation).toBe(false);
+    expect(
+      patchInstanceExperimentalSettingsSchema.parse({ enableStreamlinedUi: true }),
+    ).toEqual({ enableStreamlinedUi: true });
     expect(
       patchInstanceExperimentalSettingsSchema.parse({ enableStreamlinedUi: false }),
     ).toEqual({ enableStreamlinedUi: false });

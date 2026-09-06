@@ -44,8 +44,11 @@ export const instanceExperimentalSettingsSchema = z.object({
   enableNativeRunner: z.boolean().default(false),
   enableManagedSandboxOnly: z.boolean().default(false),
   enableIsolatedWorkspaces: z.boolean().default(false),
-  enableStreamlinedLeftNavigation: z.boolean().default(true),
-  enableStreamlinedUi: z.boolean().default(true),
+  // FORK: upstream defaults both of these to true. Defaulted to false so an
+  // instance with no stored choice behaves like every other experimental flag
+  // (off until switched on). See CustomCodeDoc/ReverseProxyCustomChanges.md #3.
+  enableStreamlinedLeftNavigation: z.boolean().default(false),
+  enableStreamlinedUi: z.boolean().default(false),
   // Deprecated compatibility key. Apps is a standard product surface and is
   // always enabled; this remains accepted so older stored rows and managed
   // configs continue to load during upgrades.

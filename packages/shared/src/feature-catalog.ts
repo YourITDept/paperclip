@@ -79,7 +79,7 @@ export const INSTANCE_FEATURE_CATALOG: Record<InstanceFeatureKey, FeatureCatalog
     description: "Use the streamlined main sidebar navigation layout.",
     tier: "preference",
     cloudDefault: true,
-    selfHostedDefault: true,
+    selfHostedDefault: false,
   },
   enableStreamlinedUi: {
     title: "Streamlined UI",
@@ -87,7 +87,7 @@ export const INSTANCE_FEATURE_CATALOG: Record<InstanceFeatureKey, FeatureCatalog
       "Use the streamlined application shell, shared task collections, focused task detail layout, contextual navigation, and simplified main sidebar.",
     tier: "preference",
     cloudDefault: true,
-    selfHostedDefault: true,
+    selfHostedDefault: false,
   },
   enableApps: {
     title: "Apps (compatibility)",

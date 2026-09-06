@@ -28,8 +28,10 @@ describe("instance settings service", () => {
       enableNativeRunner: false,
       enableManagedSandboxOnly: false,
       enableIsolatedWorkspaces: true,
-      enableStreamlinedLeftNavigation: true,
-      enableStreamlinedUi: true,
+      // FORK: absent in the input, so both now normalize to false (upstream: true).
+      // See CustomCodeDoc/ReverseProxyCustomChanges.md #3.
+      enableStreamlinedLeftNavigation: false,
+      enableStreamlinedUi: false,
       enableApps: true,
       enableConferenceRoomChat: false,
       enableClassicTaskInterface: false,
@@ -60,12 +62,21 @@ describe("instance settings service", () => {
     });
   });
 
-  it("defaults streamlined UI on without inheriting the retired navigation preference", () => {
-    expect(normalizeExperimentalSettings(undefined).enableStreamlinedUi).toBe(true);
-    expect(normalizeExperimentalSettings({}).enableStreamlinedUi).toBe(true);
+  // FORK: upstream names this "defaults streamlined UI on" and asserts true for
+  // the absent cases. See CustomCodeDoc/ReverseProxyCustomChanges.md #3. The
+  // "without inheriting the retired navigation preference" half is preserved:
+  // enableStreamlinedUi must not be derived from enableStreamlinedLeftNavigation.
+  it("defaults streamlined UI off without inheriting the retired navigation preference", () => {
+    expect(normalizeExperimentalSettings(undefined).enableStreamlinedUi).toBe(false);
+    expect(normalizeExperimentalSettings({}).enableStreamlinedUi).toBe(false);
+    expect(
+      normalizeExperimentalSettings({ enableStreamlinedLeftNavigation: true }).enableStreamlinedUi,
+    ).toBe(false);
     expect(
       normalizeExperimentalSettings({ enableStreamlinedLeftNavigation: false }).enableStreamlinedUi,
-    ).toBe(true);
+    ).toBe(false);
+    // An explicit opt-in is still honoured in both directions.
+    expect(normalizeExperimentalSettings({ enableStreamlinedUi: true }).enableStreamlinedUi).toBe(true);
     expect(normalizeExperimentalSettings({ enableStreamlinedUi: false }).enableStreamlinedUi).toBe(false);
   });
 
@@ -182,7 +193,8 @@ describe("instance settings service", () => {
     const current = normalizeExperimentalSettings({});
     const enabled = normalizeExperimentalSettings({ ...current, enableConferenceRoomChat: true });
     expect(enabled.enableConferenceRoomChat).toBe(true);
-    expect(enabled.enableStreamlinedLeftNavigation).toBe(true);
+    // FORK: derives from normalizeExperimentalSettings({}), now false. See #3.
+    expect(enabled.enableStreamlinedLeftNavigation).toBe(false);
 
     const disabled = normalizeExperimentalSettings({ ...enabled, enableConferenceRoomChat: false });
     expect(disabled).toEqual(current);

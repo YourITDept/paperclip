@@ -223,8 +223,9 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
       enableNativeRunner: parsed.data.enableNativeRunner ?? false,
       enableManagedSandboxOnly: parsed.data.enableManagedSandboxOnly ?? false,
       enableIsolatedWorkspaces: parsed.data.enableIsolatedWorkspaces ?? false,
-      enableStreamlinedLeftNavigation: parsed.data.enableStreamlinedLeftNavigation ?? true,
-      enableStreamlinedUi: parsed.data.enableStreamlinedUi ?? true,
+      // FORK: upstream is `?? true` for both. See ReverseProxyCustomChanges.md #3.
+      enableStreamlinedLeftNavigation: parsed.data.enableStreamlinedLeftNavigation ?? false,
+      enableStreamlinedUi: parsed.data.enableStreamlinedUi ?? false,
       // Apps graduated from Experimental. Ignore historical off values while
       // continuing to accept the compatibility key in stored settings.
       enableApps: true,
@@ -262,8 +263,9 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
     enableNativeRunner: false,
     enableManagedSandboxOnly: false,
     enableIsolatedWorkspaces: false,
-    enableStreamlinedLeftNavigation: true,
-    enableStreamlinedUi: true,
+    // FORK: upstream is `true` for both streamlined keys. See #3.
+    enableStreamlinedLeftNavigation: false,
+    enableStreamlinedUi: false,
     enableApps: true,
     enablePipelines: false,
     enableCases: false,

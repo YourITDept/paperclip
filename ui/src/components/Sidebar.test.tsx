@@ -300,7 +300,10 @@ describe("Sidebar", () => {
     expect(container.querySelector('[data-testid="sidebar-projects"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="sidebar-agents"]')?.getAttribute("data-streamlined")).toBe("undefined");
     expect(container.textContent).toContain("Organization");
-    expect(labels).toEqual(expect.arrayContaining(["Org", "Connectors", "Timeline", "Costs", "Activity", "Settings"]));
+    // HIDE_CONNECTORS_NAV (ui/src/lib/fork-flags.ts): "Connectors" removed from
+    // this list while the nav item is hidden. Restore it when the flag goes.
+    expect(labels).toEqual(expect.arrayContaining(["Org", "Timeline", "Costs", "Activity", "Settings"]));
+    expect(labels).not.toContain("Connectors");
     expect(labels).not.toContain("Audit");
     expect(labels).not.toContain("Projects");
     expect(container.querySelector('a[href="/agents"]')).toBeNull();
@@ -406,7 +409,9 @@ describe("Sidebar", () => {
       .map((anchor) => anchor.textContent?.trim());
 
     expect(labels(workSection)).toEqual(["Tasks", "Projects", "Routines", "Artifacts"]);
-    expect(labels(orgSection)).toEqual(["Agents", "Skills", "Connectors", "Audit"]);
+    // HIDE_CONNECTORS_NAV (ui/src/lib/fork-flags.ts): "Connectors" dropped from
+    // the expected Org section. Restore it when the flag goes.
+    expect(labels(orgSection)).toEqual(["Agents", "Skills", "Audit"]);
     expect(sections.indexOf(workSection!)).toBeLessThan(sections.indexOf(orgSection!));
     expect(
       workSection?.querySelector('a[href="/issues"] svg')?.classList.contains("lucide-circle-check"),
@@ -532,18 +537,18 @@ describe("Sidebar", () => {
     });
   });
 
-  it("always shows Connectors in the Org section", async () => {
+  // HIDE_CONNECTORS_NAV (ui/src/lib/fork-flags.ts): upstream asserts Connectors
+  // is ALWAYS shown here. Inverted while the fork hides it. To revert, restore
+  // the original assertions from git history alongside the flag removal.
+  it("hides Connectors from the Org section (HIDE_CONNECTORS_NAV)", async () => {
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableApps: false });
     const root = await renderSidebar();
 
     const links = [...container.querySelectorAll("a")];
-    const link = links.find((anchor) => anchor.textContent === "Connectors");
-    expect(link?.getAttribute("href")).toBe("/apps");
-    expect(link?.querySelector("svg")?.classList).toContain("lucide-unplug");
-    expect(links.findIndex((anchor) => anchor.textContent === "Connectors")).toBeGreaterThan(
-      links.findIndex((anchor) => anchor.textContent === "Skills"),
-    );
-    expect(links.findIndex((anchor) => anchor.textContent === "Connectors")).toBeLessThan(
+    expect(links.find((anchor) => anchor.textContent === "Connectors")).toBeUndefined();
+    expect(container.querySelector('a[href="/apps"]')).toBeNull();
+    // Skills and Audit still bracket where Connectors used to sit.
+    expect(links.findIndex((anchor) => anchor.textContent === "Skills")).toBeLessThan(
       links.findIndex((anchor) => anchor.textContent === "Audit"),
     );
 
