@@ -344,6 +344,18 @@ are almost always kept:
   are easy to half-resolve — the *hire* path is the one a conflict tends to drop,
   and losing it is silent until a board-approval company duplicates an agent.
 
+- `server/src/__tests__/server-startup-feedback-export.test.ts` — the `vi.mock`
+  of `@paperclipai/db`. Added as a collision point 2026-09-06 (Session 18). The
+  fork's `startProvisioningWorker` import in `server/src/index.ts` pulls the
+  provisioning module's service imports, which transitively reach `issues.ts` →
+  `successful-run-handoff-state.ts`; that module touches `heartbeatRuns` at
+  **module scope**, so the import throws unless the mock defines it. The mock is
+  upstream's file and upstream edits it (`0ffc09147` did), which is what makes
+  this a collision rather than a plain fork change. **Currently failing and left
+  unfixed** — the one-line repair is `heartbeatRuns: {},` beside the existing
+  `authUsers: {}` entries. The canary is the suite itself: it fails at import
+  with `No "heartbeatRuns" export is defined on the "@paperclipai/db" mock`.
+
 **v6 removed two of the four.** `packages/adapter-utils/src/acpx-engine/execute.ts`
 and `packages/adapters/codex-local/src/server/execute.ts` were collision points
 only because change sets 2 and 9 lived in them. With both retired the fork now
@@ -1106,6 +1118,147 @@ both still exist if per-test output is wanted.
 > **Numbering note.** The header at the top of this file calls the session log
 > "§7". It is this section, **§8** — §7 is the test procedure. Kept as-is so old
 > cross-references still resolve; read "§7 session log" as this section.
+
+### 2026-09-06 — Session 18: upstream merge into `W8-260906b` (34 commits)
+
+**Who:** Claude (Opus 5) with chris@anderson-family.com
+**Branch:** `W8-260906b` @ `e2f57b81e` + upstream `539c9212f` (merge base `d593463ab`)
+**Scope:** upstream merge, conflict resolution, full four-group test pass.
+**Left staged and uncommitted per RULE 0** — the operator commits.
+
+#### What came in
+
+34 non-merge commits, 2026-09-04 → 2026-09-06, 437 files (+37,320 / −28,839);
+330 files staged. Themes: 7 runner, 5 connections, 4 onboarding, 3 server,
+2 CLI, plus `feat(codex): GPT-6 Astra support` (#12851).
+
+Fetched by URL per §5.1 — no remote added. Rollback tag
+`pre-merge-backup-W8-260906b` at `e2f57b81e`.
+
+#### The one conflict — `server/src/index.ts`
+
+`git merge-tree` predicted it before the merge and it was the only one.
+Upstream (#12894, #12843) rewrote the shutdown handler: it **removed the
+wrapping `{` block** (de-indenting the body), changed the signature to
+`(signal, exitProcess: boolean)`, and added three call sites passing
+`true`/`false`.
+
+Checked against the merge base first: the block was **upstream's, not the
+fork's**, so this was a keep-both, not a structural choice. Took upstream's new
+shape wholesale and re-inserted the fork's two lines —
+`const provisioningWorker = startProvisioningWorker(db as any)` (:1816) and
+`await provisioningWorker.stop()` (:1828) — which is exactly the footprint
+`server/src/provisioning/index.ts` documents for this file. No orphaned braces.
+
+#### Fork register — all preserved
+
+Marker counts compared HEAD vs the merged tree, identical for every one:
+`proxy_header` / `resolveProxyHeaderActor`, `duplicateFromAgentId`,
+`restoreDuplicateSourceEnv` (3), `app.ts` vault mounts, `InviteLanding`
+`Boolean(invite)` guard, `openapi` codex-vaults exclusion, `NewAgent` preset
+seeding (17), the provisioning module (5).
+
+Also preserved: **`HIDE_CONNECTORS_NAV`** (3 refs in each sidebar) even though
+upstream touched `Sidebar.tsx` in `5b56d430e`, and the **streamlined defaults**
+at `false` across all six sites. Verified `enableWorkspaceBranchReconcileForward`
+and `enableWorkspaceDirtyQuarantineRepair` remain untouched at `true`.
+
+#### Lockfile — §7.5 #3 again, and it is upstream's
+
+`--frozen-lockfile` failed on `packages/paperclip-runner`. `d96452db0` (#12929)
+downgraded `@vitejs/plugin-react` `^6.1.1` → `^4.7.0` (a bad Dependabot bump —
+plugin 6 needs Vite 7/8) **without regenerating the lockfile**. Confirmed
+upstream made zero lockfile commits in these 34, so nothing was dropped by the
+merge; upstream's own frozen install fails identically.
+
+Resolved with the §7.5 #3 answer, `corepack pnpm install --no-frozen-lockfile`:
++56/−4, confined to `@vitejs/plugin-react@4.7.0` and its transitives. Patches
+re-confirmed: `acpx@0.12.0`, `acpx@0.13.1`, `embedded-postgres@18.1.0-beta.16`.
+
+#### Results
+
+| Group | Result |
+| --- | --- |
+| typecheck | **exit 0, zero `error TS`** — run alone (see the trap below) |
+| `general-workspaces-a` | 5504 passed / 1 failed — the one environmental |
+| `general-workspaces-b` | 298 passed / 0 failed |
+| `general-server` | 6003 passed / 62 failed across 16 files |
+| `serialized` | 1764 passed / 20 failed across 3 files (12-shard run, 126 blocks) |
+
+**~13,500 tests passed. Every failure classified. None is attributable to this
+merge.**
+
+#### Failure classification (§7.4)
+
+| Class | Files | Evidence |
+| --- | --- | --- |
+| Environmental (§7.5 #4) | `workspace-runtime.test.ts`, `workspace-runtime-exposure-reservation.test.ts`, `services/workspace-runtime-exposure.test.ts`, `local-service-supervisor.test.ts`, 2× `cursor-local-*` | Match Session 15 file-for-file; `cursor-agent` absent from the image |
+| Environmental (timeout) | `ProposalsTab.render.test.tsx` | `Test timed out in 5000ms` under load; **re-ran alone 6/6 pass** |
+| Known fork-caused, pre-existing | `cli-invocation-safety.test.ts` | The v6 failure Session 14/15 record as left unfixed pending the operator's call. Still unfixed. |
+| **Pre-existing upstream** | 6× `heartbeat-*` in general-server, `legacy-finalization-regression`, `native-session-resumption`, plus `heartbeat-dependency-scheduling`, `heartbeat-issue-liveness-escalation`, `heartbeat-process-recovery` in serialized | **Reproduced on a clean worktree at `539c9212f`** with identical counts (9/21, 19/28, 4/3, 16/120) |
+| **Pre-existing fork-caused — new to this register** | `server-startup-feedback-export.test.ts` | Passes at upstream tip, **fails identically at pre-merge `e2f57b81e`** |
+
+The upstream heartbeat failures share one shape: expected
+`status: "cancelled" / errorCode: "issue_not_in_progress"`, received
+`status: "failed" / errorCode: "configuration_incomplete"`. Upstream changed
+`heartbeat.ts` in five commits here — including
+`0ffc09147 feat(connections): add durable GitHub identities and webhooks` —
+adding a pre-dispatch gate for missing secret/env bindings, and left the
+fixtures untouched. Their own suite does not satisfy their new gate.
+
+#### New finding — `server-startup-feedback-export.test.ts`
+
+```
+Error: [vitest] No "heartbeatRuns" export is defined on the "@paperclipai/db" mock.
+```
+
+The fork's `startProvisioningWorker` import in `server/src/index.ts` (upstream
+has **zero** references) pulls the provisioning module's service imports, which
+transitively reach `issues.ts` → `successful-run-handoff-state.ts`. That module
+touches `heartbeatRuns` **at module scope** (a `sql` template at :10), so merely
+importing it throws when the mock omits it. The `vi.mock` block is byte-identical
+across upstream, pre-merge and merged — it is purely the import graph.
+
+**The fix is one line** beside the existing `authUsers: {}` / `companies: {}`
+entries in that mock:
+
+```ts
+heartbeatRuns: {},
+```
+
+**Left unapplied**, matching the `cli-invocation-safety` posture: it is
+pre-existing rather than merge-caused, and §7.4 permits recording a fork-caused
+failure with the reason it is being left. Worth adding to §4.1 as a collision
+point if the provisioning module stays.
+
+#### Two traps hit — both already documented, both my error
+
+1. **Exit 137 (§7.5 #5).** Ran `pnpm -r typecheck` beside two test groups; the
+   server typecheck was OOM-killed. Signature confirmed the diagnosis —
+   `grep -c 'error TS'` = **0** with exit 137. No stale processes were holding
+   memory (checked, per that section). Re-run alone on an idle host: clean.
+   **The section says plainly not to do this. Read it before scheduling, not
+   after.**
+2. **The serialized abort (§7.1).** The first run reported "911 passed" across
+   **58** summary blocks and ended *on* a failing suite — the documented hard
+   exit at [`run-vitest-stable.mjs:298-300`](scripts/run-vitest-stable.mjs#L298-L300).
+   Session 15 recorded 141 blocks. Re-running with `--shard-count 4` isolated
+   the abort to one shard and recovered **81 blocks / 1341 passed**; a
+   `--shard-count 12` pass recovered **126 blocks / 1764 passed**, with 9 of 12
+   shards running clean to completion and the same three files failing.
+   The residual ~15 blocks are the tails of shards 0, 5 and 6, each truncated at
+   its own known-upstream heartbeat suite — coverage is bounded by the abort, not
+   by a new failure.
+   **"Count the summary blocks, not just the banners" is the whole lesson, and
+   the banner is convincing.**
+
+#### Method note — worktrees, not checkouts
+
+Both "pre-existing" verdicts were proved by reproduction, using two scratch
+worktrees (`git worktree add --detach`) at `539c9212f` and
+`pre-merge-backup-W8-260906b`, each with its own `pnpm install`. RULE 0 forbids
+`git checkout <ref>`; §7.4's "scratch worktree" wording is what makes this legal,
+and it costs one install per worktree. Both removed at the end of the session.
 
 ### 2026-09-04 — Session 17: duplicate agent "Validation error" on `W7-20260904a`
 

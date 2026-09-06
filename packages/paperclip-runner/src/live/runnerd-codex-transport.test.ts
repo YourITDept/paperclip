@@ -34,11 +34,13 @@ import {
   codexSemanticToolSpecs,
 } from "../drivers/codex/codex-app-server-driver.js";
 import { releaseMaterializedNativeRuntimeSkills } from "../drivers/runtime-context-materializer.js";
+import { RUNNERD_CANONICAL_ITEM } from "../drivers/codex/codex-driver-values.js";
 
 import {
   authorizedToolSetForProvider,
   createCapabilityRunnerdCodexTransport,
   createCapabilityRunnerdProviderEnvironment,
+  createRunnerdCodexAppServerArgs,
   defaultCapabilityRunnerdBinary,
   expandRunnerdCanonicalNotifications,
   rehydrateRunnerdItemNotification,
@@ -58,6 +60,75 @@ import {
   unwrapRunnerdProviderNotifications,
   withCodexCollaborationRuntimeInstructions,
 } from "./runnerd-codex-transport.js";
+
+it("launches runnerd with its production durable outbox limits", () => {
+  expect(runnerdLaunchProfileInternals.maxOutboxBytes).toBe(16 * 1024 * 1024);
+  expect(runnerdLaunchProfileInternals.p0ReserveBytes).toBe(1024 * 1024);
+});
+
+it("carries the provider attachment seed across consecutive authority rotations", () => {
+  const baseIdentity = {
+    runnerInstanceId: "runner-warm-seed",
+    environmentLeaseId: "lease-warm-seed",
+    runId: "run-warm-one",
+    normalizedSessionId: "session-warm-seed",
+    turnId: "turn-warm-one",
+    itemId: "item-warm-one",
+  };
+  const secondIdentity = {
+    ...baseIdentity,
+    runId: "run-warm-two",
+    turnId: "turn-warm-two",
+    itemId: "item-warm-two",
+  };
+  const thirdIdentity = {
+    ...baseIdentity,
+    runId: "run-warm-three",
+    turnId: "turn-warm-three",
+    itemId: "item-warm-three",
+  };
+  const secondTemplate = runnerdRecoveryInternals.rotatedRunAttachPayload(
+    {
+      commands: [
+        {
+          type: "run.prepare",
+          payload: {
+            provider: {
+              kind: "acpx",
+              runId: baseIdentity.runId,
+              normalizedSessionId: baseIdentity.normalizedSessionId,
+            },
+            workspace: { cwd: "/workspace" },
+          },
+        },
+      ],
+    },
+    secondIdentity,
+    null,
+    undefined,
+  );
+  const thirdTemplate = runnerdRecoveryInternals.rotatedRunAttachPayload(
+    { commands: [], runAttachTemplate: secondTemplate },
+    thirdIdentity,
+    null,
+    undefined,
+  );
+
+  expect(secondTemplate).toMatchObject({
+    provider: {
+      runId: secondIdentity.runId,
+      normalizedSessionId: secondIdentity.normalizedSessionId,
+    },
+    workspace: { cwd: "/workspace" },
+  });
+  expect(thirdTemplate).toMatchObject({
+    provider: {
+      runId: thirdIdentity.runId,
+      normalizedSessionId: thirdIdentity.normalizedSessionId,
+    },
+    workspace: { cwd: "/workspace" },
+  });
+});
 
 it("replays the durable run attachment outcome and latest provider identity", () => {
   expect(
@@ -129,6 +200,328 @@ it("identifies an active provider turn that must stop before suspension", () => 
     activeProviderTurnId: null,
     providerSettled: true,
   });
+});
+
+it("infers a remote provider turn until its own terminal event is durable", () => {
+  expect(
+    runnerdRecoveryInternals.providerTurnIsActiveFromCommittedEvents([
+      { eventType: "turn.started" },
+      { eventType: "run.result.proposed" },
+      { eventType: "run.terminal" },
+    ]),
+  ).toBe(true);
+  expect(
+    runnerdRecoveryInternals.providerTurnIsActiveFromCommittedEvents([
+      { eventType: "turn.started" },
+      { eventType: "run.terminal" },
+      { eventType: "turn.interrupted" },
+    ]),
+  ).toBe(false);
+});
+
+it("accepts only the observed provider start correlated by the command result", () => {
+  const requestedTurnId = "turn_lab_0123456789abcdef0123456789abcdef";
+  expect(
+    runnerdRecoveryInternals.turnStartResponseReady({
+      responseEpoch: 2,
+      observedEpoch: 2,
+      expectedProviderTurnId: requestedTurnId,
+      boundTurnId: requestedTurnId,
+    }),
+  ).toBe(true);
+  expect(
+    runnerdRecoveryInternals.turnStartResponseReady({
+      responseEpoch: 2,
+      observedEpoch: 2,
+      expectedProviderTurnId: requestedTurnId,
+      boundTurnId: "provider-turn-different",
+    }),
+  ).toBe(false);
+  const providerAssignedTurnId = "provider-turn-assigned-for-this-command";
+  expect(
+    runnerdRecoveryInternals.turnStartResponseReady({
+      responseEpoch: 2,
+      observedEpoch: 2,
+      expectedProviderTurnId: providerAssignedTurnId,
+      boundTurnId: providerAssignedTurnId,
+    }),
+  ).toBe(true);
+  expect(
+    runnerdRecoveryInternals.turnStartResponseReady({
+      responseEpoch: 2,
+      observedEpoch: 1,
+      expectedProviderTurnId: requestedTurnId,
+      boundTurnId: requestedTurnId,
+    }),
+  ).toBe(false);
+});
+
+it("defers turn starts until their command result and rejects stale identities", () => {
+  expect(
+    runnerdRecoveryInternals.turnStartNotificationDisposition({
+      responsePending: true,
+      expectedProviderTurnId: null,
+      observedProviderTurnId: "provider-turn-early",
+    }),
+  ).toBe("defer");
+  expect(
+    runnerdRecoveryInternals.turnStartNotificationDisposition({
+      responsePending: true,
+      expectedProviderTurnId: "provider-turn-current",
+      observedProviderTurnId: "provider-turn-stale",
+    }),
+  ).toBe("reject");
+  expect(
+    runnerdRecoveryInternals.turnStartNotificationDisposition({
+      responsePending: true,
+      expectedProviderTurnId: "provider-turn-current",
+      observedProviderTurnId: "",
+    }),
+  ).toBe("reject");
+  expect(
+    runnerdRecoveryInternals.turnStartNotificationDisposition({
+      responsePending: true,
+      expectedProviderTurnId: "provider-turn-current",
+      observedProviderTurnId: "provider-turn-current",
+    }),
+  ).toBe("accept");
+});
+
+it("requires ACPX command results to preserve the requested turn identity", () => {
+  expect(
+    runnerdRecoveryInternals.turnStartCommandResultValid({
+      requestedTurnId: "turn-requested",
+      providerTurnId: "turn-requested",
+      requireRequestedIdentity: true,
+    }),
+  ).toBe(true);
+  expect(
+    runnerdRecoveryInternals.turnStartCommandResultValid({
+      requestedTurnId: "turn-requested",
+      providerTurnId: "turn-different",
+      requireRequestedIdentity: true,
+    }),
+  ).toBe(false);
+  expect(
+    runnerdRecoveryInternals.turnStartCommandResultValid({
+      requestedTurnId: "turn-requested",
+      providerTurnId: "provider-assigned-turn",
+      requireRequestedIdentity: false,
+    }),
+  ).toBe(true);
+});
+
+it.each(["before", "after"] as const)(
+  "retries external authority rotation after crashing %s the remote archive",
+  async (crashPoint) => {
+    const root = await mkdtemp(join(tmpdir(), "runner-external-rotation-"));
+    const priorIdentity = {
+      runnerInstanceId: "runner-external-rotation",
+      environmentLeaseId: "lease-external-rotation",
+      runId: "run-external-prior",
+      normalizedSessionId: "session-external-rotation",
+      turnId: "turn-external-prior",
+      itemId: "item-external-prior",
+    };
+    const desiredIdentity = {
+      ...priorIdentity,
+      runId: "run-external-next",
+      turnId: "turn-external-next",
+      itemId: "item-external-next",
+    };
+    const controlPlaneState = {
+      schema: "paperclip.runner.durable.control-plane-state.v1",
+      identity: priorIdentity,
+    };
+    let activeRunnerState: Record<string, unknown> | null = {
+      schema: "paperclip.runner.durable.state.v1",
+      ...priorIdentity,
+      lifecycle: "suspended",
+    };
+    let archivedRunnerState: Record<string, unknown> | null = null;
+    let readCount = 0;
+    let archiveCount = 0;
+    const readRunnerState = async () => {
+      readCount += 1;
+      if (activeRunnerState === null) throw new Error("runner state moved");
+      return activeRunnerState;
+    };
+    const archiveRunnerState = async () => {
+      archiveCount += 1;
+      if (archiveCount === 1) {
+        if (crashPoint === "after") {
+          archivedRunnerState = activeRunnerState;
+          activeRunnerState = null;
+        }
+        throw new Error(`crashed ${crashPoint} remote archive`);
+      }
+      if (activeRunnerState !== null) {
+        archivedRunnerState = activeRunnerState;
+        activeRunnerState = null;
+      }
+      if (archivedRunnerState === null) {
+        throw new Error("archived runner state unavailable");
+      }
+      return archivedRunnerState;
+    };
+    try {
+      await mkdir(join(root, "control-plane"), { recursive: true });
+      await writeFile(
+        join(root, "control-plane", "control-plane-state.json"),
+        JSON.stringify(controlPlaneState),
+      );
+      await expect(
+        runnerdRecoveryInternals.rotateExternalAuthorityEpoch(
+          root,
+          controlPlaneState,
+          desiredIdentity,
+          readRunnerState,
+          archiveRunnerState,
+        ),
+      ).rejects.toThrow(`crashed ${crashPoint} remote archive`);
+      await expect(stat(join(root, "control-plane"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+
+      await expect(
+        runnerdRecoveryInternals.rotateExternalAuthorityEpoch(
+          root,
+          controlPlaneState,
+          desiredIdentity,
+          readRunnerState,
+          archiveRunnerState,
+        ),
+      ).resolves.toEqual(controlPlaneState);
+      expect(readCount).toBe(1);
+      expect(archiveCount).toBe(2);
+      expect(activeRunnerState).toBeNull();
+      expect(archivedRunnerState).toEqual(
+        expect.objectContaining(priorIdentity),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+it("quiesces the control route before checkpoint and containment regardless of process completion", async () => {
+  const settledSteps: string[] = [];
+  await runnerdRecoveryInternals.releaseRunnerProcessOwnership({
+    runnerSettled: true,
+    checkpoint: async (settlement) => {
+      expect(settlement).toBe("settled");
+      settledSteps.push("checkpoint");
+    },
+    forceKill: () => {
+      settledSteps.push("kill");
+    },
+    release: async () => {
+      settledSteps.push("release");
+    },
+  });
+  expect(settledSteps).toEqual(["release", "checkpoint", "kill"]);
+
+  const unsettledSteps: string[] = [];
+  await runnerdRecoveryInternals.releaseRunnerProcessOwnership({
+    runnerSettled: false,
+    checkpoint: async (settlement) => {
+      expect(settlement).toBe("unsettled");
+      unsettledSteps.push("checkpoint");
+    },
+    forceKill: () => {
+      unsettledSteps.push("kill");
+    },
+    release: async () => {
+      unsettledSteps.push("release");
+    },
+  });
+  expect(unsettledSteps).toEqual(["release", "checkpoint", "kill"]);
+
+  const failedCheckpointSteps: string[] = [];
+  await expect(
+    runnerdRecoveryInternals.releaseRunnerProcessOwnership({
+      runnerSettled: true,
+      checkpoint: async () => {
+        failedCheckpointSteps.push("checkpoint");
+        throw new Error("runner_remote_checkpoint_incomplete");
+      },
+      forceKill: () => {
+        failedCheckpointSteps.push("kill");
+      },
+      release: async () => {
+        failedCheckpointSteps.push("release");
+      },
+    }),
+  ).rejects.toThrow("runner_remote_checkpoint_incomplete");
+  expect(failedCheckpointSteps).toEqual(["release", "checkpoint", "kill"]);
+});
+
+it("waits for the exact durable suspension command behind prior close work", async () => {
+  const commands = [
+    {
+      commandId: "command_close_drain",
+      type: "runner.drain",
+      status: "pending",
+    },
+  ];
+  let lifecycle = "ready";
+  let pumpCount = 0;
+
+  await expect(
+    runnerdRecoveryInternals.awaitRunnerSuspensionBarrier({
+      commands: () => commands,
+      queueSuspend: (commandId) => {
+        commands.push({
+          commandId,
+          type: "runner.suspend",
+          status: "pending",
+        });
+      },
+      readRunnerState: async () => ({ lifecycle }),
+      runnerHasExited: async () => true,
+      pump: () => {
+        pumpCount += 1;
+        if (pumpCount === 1) commands[0]!.status = "completed";
+        if (pumpCount === 2) {
+          commands[1]!.status = "completed";
+          lifecycle = "suspended";
+        }
+      },
+      deadline: Date.now() + 1_000,
+      pollIntervalMs: 0,
+    }),
+  ).resolves.toBe(true);
+  expect(commands.map((command) => command.type)).toEqual([
+    "runner.drain",
+    "runner.suspend",
+  ]);
+  expect(pumpCount).toBeGreaterThanOrEqual(2);
+});
+
+it("does not accept process exit without durable suspension", async () => {
+  const commands: Array<{
+    commandId: string;
+    type: string;
+    status: string;
+  }> = [];
+
+  await expect(
+    runnerdRecoveryInternals.awaitRunnerSuspensionBarrier({
+      commands: () => commands,
+      queueSuspend: (commandId) => {
+        commands.push({
+          commandId,
+          type: "runner.suspend",
+          status: "pending",
+        });
+      },
+      readRunnerState: async () => ({ lifecycle: "ready" }),
+      runnerHasExited: async () => true,
+      pump: () => undefined,
+      deadline: Date.now() + 5,
+      pollIntervalMs: 0,
+    }),
+  ).resolves.toBe(false);
 });
 
 it("keeps ACPX terminal tools under the reserved runner-owned catalog", () => {
@@ -604,6 +997,27 @@ it("allows trusted package-manager runtime roots without exposing HOME paths", (
   ).toEqual(["/opt/homebrew", "/usr/local"]);
 });
 
+it("denies the isolated Codex home without denying a remote execution workspace", () => {
+  const args = createRunnerdCodexAppServerArgs({
+    environment: {
+      HOME: "/workspaces/task",
+      CODEX_HOME: "/workspaces/task/.codex",
+      PATH: "/usr/local/bin:/usr/bin:/bin",
+    },
+    codexHome:
+      "/workspaces/task/.paperclip-runtime/paperclip-runner/sessions/session/filesystem/codex-home",
+    readOnlyRoots: ["/usr/local"],
+  });
+  const serialized = args.join("\n");
+
+  expect(serialized).toContain(
+    '"/workspaces/task/.paperclip-runtime/paperclip-runner/sessions/session/filesystem/codex-home"="none"',
+  );
+  expect(serialized).not.toContain('"/workspaces/task"="none"');
+  expect(serialized).not.toContain('"/workspaces/task/.codex"="none"');
+  expect(serialized).toContain('\":workspace_roots\"={\".\"=\"write\"}');
+});
+
 it("rejects remote OpenCode before spawn when provider-pack paths are absent", async () => {
   const root = await mkdtemp(join(tmpdir(), "paperclip-runner-remote-pack-"));
   const { transport } = createCapabilityRunnerdCodexTransport({
@@ -704,6 +1118,7 @@ it("rehydrates a canonical agent item for the strict Codex facade", () => {
     threadId: "opened-thread-1",
     turnId: "provider-turn-1",
     item: {
+      [RUNNERD_CANONICAL_ITEM]: true,
       id: "message-1",
       type: "agentMessage",
       status: "completed",
@@ -887,6 +1302,17 @@ it("resolves canonical and legacy durable session identities", () => {
     processId: 4242,
     threadId: "provider-thread-1",
     sessionId: "provider-account-1",
+  });
+  expect(
+    resolveRunnerdSessionIdentity({
+      driverSessionId: "provider-thread-2",
+      providerSessionId: "provider-account-2",
+      processId: 4243,
+    }),
+  ).toEqual({
+    processId: 4243,
+    threadId: "provider-thread-2",
+    sessionId: "provider-account-2",
   });
   expect(
     resolveRunnerdSessionIdentity({
@@ -1088,6 +1514,75 @@ it("runs the lab provider boundary through authenticated durable PRP", async () 
   });
 }, 30_000);
 
+it("continues rehydrating events after the committed-event window slides", async () => {
+  const stateDirectory = await mkdtemp(
+    join(tmpdir(), "runnerd-sliding-event-window-"),
+  );
+  const bundle = createCapabilityRunnerdCodexTransport({
+    runnerBinary: defaultCapabilityRunnerdBinary(),
+    codexCommand: fakeCodex,
+    codexArgs: fakeCodexArgs(stateDirectory, "--split-event-burst"),
+    stateDirectory,
+    lifecyclePolicy: { mode: "warm", idleTimeoutMs: 60_000 },
+  });
+  bundle.transport.setServerRequestHandler(async () => ({
+    success: true,
+    contentItems: [
+      {
+        type: "inputText",
+        text: JSON.stringify({ ok: true, result: { task: { id: "task-1" } } }),
+      },
+    ],
+  }));
+  try {
+    await bundle.transport.request("initialize", {});
+    await bundle.transport.request("thread/start", {
+      cwd: tmpdir(),
+      dynamicTools: [
+        {
+          name: "get_task_context",
+          description: "Read the active task.",
+          inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      ],
+    });
+    await bundle.transport.request("turn/start", {
+      input: [{ type: "text", text: "Emit a split event burst." }],
+    });
+    const notifications = bundle.transport
+      .notifications()
+      [Symbol.asyncIterator]();
+    const methods: string[] = [];
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      const next = await Promise.race([
+        notifications.next(),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(new Error("sliding event window notification timeout")),
+            10_000,
+          ),
+        ),
+      ]);
+      if (!next.value) break;
+      methods.push(next.value.method);
+      if (next.value.method === "turn/completed") break;
+    }
+    expect(
+      methods.filter((method) => method === "item/agentMessage/delta"),
+    ).toHaveLength(144);
+    expect(methods).toContain("turn/completed");
+  } finally {
+    await bundle.transport.close();
+    await rm(stateDirectory, { recursive: true, force: true });
+  }
+}, 30_000);
+
 it("binds an immediately failed durable turn before exposing its terminal", async () => {
   const stateDirectory = await mkdtemp(
     join(tmpdir(), "runnerd-fast-terminal-"),
@@ -1120,6 +1615,29 @@ it("binds an immediately failed durable turn before exposing its terminal", asyn
       message: { role: "user", text: "Fail this test turn." },
     });
     expect(accepted.turnId).toBe("provider-turn-1");
+    const durableState = JSON.parse(
+      await readFile(
+        join(stateDirectory, "control-plane", "control-plane-state.json"),
+        "utf8",
+      ),
+    ) as {
+      commands: Array<{
+        type: string;
+        payload: Record<string, unknown>;
+      }>;
+    };
+    const durableTurnStart = durableState.commands.find(
+      (command) => command.type === "turn.start",
+    );
+    expect(durableTurnStart).toMatchObject({
+      payload: {
+        turnId: expect.stringMatching(/^turn_lab_[a-f0-9]{32}$/),
+      },
+    });
+    expect(JSON.parse(String(durableTurnStart?.payload.text))).toMatchObject({
+      message: "Fail this test turn.",
+      task: { objective: "Exercise an immediate provider failure." },
+    });
     const events = [];
     for await (const event of session.events()) {
       events.push(event);
@@ -1609,7 +2127,7 @@ it("steers the active provider turn through the durable PRP command path", async
   }
 }, 30_000);
 
-it("does not expose cross-run attachment before PRP authority can rotate atomically", async () => {
+it("rotates PRP authority in place for a warm cross-run attachment", async () => {
   const stateDirectory = await mkdtemp(join(tmpdir(), "runnerd-warm-attach-"));
   const bundle = createCapabilityRunnerdCodexTransport({
     runnerBinary: defaultCapabilityRunnerdBinary(),
@@ -1622,22 +2140,36 @@ it("does not expose cross-run attachment before PRP authority can rotate atomica
     success: true,
     contentItems: [],
   }));
+  const within = async <T>(label: string, promise: Promise<T>) =>
+    await Promise.race([
+      promise,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`${label} timeout`)), 5_000),
+      ),
+    ]);
   try {
-    await bundle.transport.request("initialize", {});
-    await bundle.transport.request("thread/start", {
-      cwd: tmpdir(),
-      dynamicTools: [
-        {
-          name: "get_task_context",
-          description: "Read the active task.",
-          inputSchema: {
-            type: "object",
-            properties: {},
-            additionalProperties: false,
+    await within("initialize", bundle.transport.request("initialize", {}));
+    await within(
+      "thread start",
+      bundle.transport.request("thread/start", {
+        cwd: tmpdir(),
+        dynamicTools: [
+          {
+            name: "get_task_context",
+            description: "Read the active task.",
+            inputSchema: {
+              type: "object",
+              properties: {},
+              additionalProperties: false,
+            },
           },
+        ],
+        completionContract: {
+          revision: "sha256:warm-three-turn-contract",
+          criterionIds: ["objective"],
         },
-      ],
-    });
+      }),
+    );
     const runnerPid = bundle.evidence().runnerPid;
     const providerPid = bundle.evidence().codexPid;
     const notifications = bundle.transport
@@ -1659,12 +2191,45 @@ it("does not expose cross-run attachment before PRP authority can rotate atomica
       }
       throw new Error(`${label} completion timeout`);
     };
-    await bundle.transport.request("turn/start", {
-      input: [{ type: "text", text: "first run" }],
-    });
+    await within(
+      "first turn start",
+      bundle.transport.request("turn/start", {
+        input: [{ type: "text", text: "first run" }],
+      }),
+    );
     await waitForCompletion("first run");
 
-    expect(bundle.transport.attachRun).toBeUndefined();
+    await within(
+      "warm attach",
+      bundle.transport.attachRun!({
+        runId: "run-warm-second",
+        turnId: "turn-warm-second",
+        itemId: "item-warm-second",
+      }),
+    );
+    await within(
+      "second turn start",
+      bundle.transport.request("turn/start", {
+        input: [{ type: "text", text: "second run" }],
+      }),
+    );
+    await waitForCompletion("second run");
+
+    await within(
+      "second warm attach",
+      bundle.transport.attachRun!({
+        runId: "run-warm-third",
+        turnId: "turn-warm-third",
+        itemId: "item-warm-third",
+      }),
+    );
+    await within(
+      "third turn start",
+      bundle.transport.request("turn/start", {
+        input: [{ type: "text", text: "third run" }],
+      }),
+    );
+    await waitForCompletion("third run");
 
     expect(bundle.evidence()).toMatchObject({
       runnerPid,
@@ -1673,6 +2238,232 @@ it("does not expose cross-run attachment before PRP authority can rotate atomica
     });
   } finally {
     await bundle.transport.close();
+    await rm(stateDirectory, { recursive: true, force: true });
+  }
+}, 30_000);
+
+it("waits for a warm runner to re-authenticate before probing attachment readiness", async () => {
+  const stateDirectory = await mkdtemp(
+    join(tmpdir(), "runnerd-warm-reattach-before-probe-"),
+  );
+  const server = createServer();
+  const authorities = new Map<string, DurablePrpControlPlane>();
+  let blockFirstAuthorityReconnect = false;
+  let resolveRejectedReconnect!: () => void;
+  const rejectedReconnect = new Promise<void>((resolvePromise) => {
+    resolveRejectedReconnect = resolvePromise;
+  });
+  server.on("upgrade", (request, socket, head) => {
+    const route = request.url ?? "";
+    if (route === "/runner-1" && blockFirstAuthorityReconnect) {
+      resolveRejectedReconnect();
+      socket.destroy();
+      return;
+    }
+    const authority = authorities.get(route);
+    if (!authority) {
+      socket.destroy();
+      return;
+    }
+    authority.handleUpgrade(request, socket, route, head);
+  });
+  await new Promise<void>((resolveListen) =>
+    server.listen(0, "127.0.0.1", resolveListen),
+  );
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Expected warm reconnect test listener");
+  }
+  let registrationCount = 0;
+  const diagnostics: string[] = [];
+  const bundle = createCapabilityRunnerdCodexTransport({
+    runnerBinary: defaultCapabilityRunnerdBinary(),
+    codexCommand: fakeCodex,
+    codexArgs: fakeCodexArgs(stateDirectory),
+    stateDirectory,
+    lifecyclePolicy: { mode: "warm", idleTimeoutMs: 60_000 },
+    runnerReconnectGraceMs: 5_000,
+    onDiagnostic: (message) => diagnostics.push(message),
+    controlPlaneRegistration: async (authority) => {
+      registrationCount += 1;
+      const route = `/runner-${registrationCount}`;
+      authorities.set(route, authority);
+      return {
+        connectUrl: `ws://127.0.0.1:${address.port}${route}`,
+        release: () => {
+          if (authorities.get(route) === authority) authorities.delete(route);
+        },
+      };
+    },
+  });
+  bundle.transport.setServerRequestHandler(async () => ({
+    success: true,
+    contentItems: [],
+  }));
+  let runnerPid: number | null = null;
+  try {
+    await bundle.transport.request("thread/start", {
+      cwd: tmpdir(),
+      dynamicTools: codexSemanticToolSpecs(),
+    });
+    runnerPid = bundle.evidence().runnerPid;
+    const firstAuthority = authorities.get("/runner-1");
+    if (!firstAuthority) throw new Error("Missing first warm authority");
+    const priorSnapshotCount = firstAuthority.store.state.commands.filter(
+      (command) => command.type === "session.snapshot",
+    ).length;
+
+    blockFirstAuthorityReconnect = true;
+    firstAuthority.disconnectActiveRunner();
+    const attachment = bundle.transport.attachRun!({
+      runId: "run-warm-after-reconnect",
+      turnId: "turn-warm-after-reconnect",
+      itemId: "item-warm-after-reconnect",
+    });
+    await Promise.race([
+      rejectedReconnect,
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("runner did not attempt to reconnect")),
+          5_000,
+        ),
+      ),
+    ]);
+
+    // No command may be queued while its sole authenticated consumer is
+    // absent. The generic 30-second command timeout used to turn this state
+    // into same-run recovery and replace the healthy warm runner process.
+    expect(
+      firstAuthority.store.state.commands.filter(
+        (command) => command.type === "session.snapshot",
+      ),
+    ).toHaveLength(priorSnapshotCount);
+
+    blockFirstAuthorityReconnect = false;
+    await Promise.race([
+      attachment,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("warm attachment timeout")), 10_000),
+      ),
+    ]);
+    expect(bundle.evidence()).toMatchObject({
+      runnerPid,
+      runnerExited: false,
+    });
+    expect(diagnostics).toContain(
+      "warm runner connection interrupted; waiting for re-authentication before authority rotation",
+    );
+    expect(diagnostics).toContain(
+      "warm runner re-authenticated before authority rotation",
+    );
+  } finally {
+    await bundle.transport.close().catch(() => undefined);
+    if (runnerPid) {
+      try {
+        process.kill(-runnerPid, "SIGKILL");
+      } catch {
+        // A successful durable close already stopped the runner process group.
+      }
+    }
+    server.closeAllConnections();
+    if (server.listening) {
+      await new Promise<void>((resolveClose) =>
+        server.close(() => resolveClose()),
+      );
+    }
+    await rm(stateDirectory, { recursive: true, force: true });
+  }
+}, 30_000);
+
+it("releases both PRP authorities when warm rotation activation fails", async () => {
+  const stateDirectory = await mkdtemp(
+    join(tmpdir(), "runnerd-warm-attach-activation-failure-"),
+  );
+  const server = createServer();
+  const authorities = new Map<string, DurablePrpControlPlane>();
+  const released: string[] = [];
+  server.on("upgrade", (request, socket, head) => {
+    const route = request.url ?? "";
+    const authority = authorities.get(route);
+    if (!authority) {
+      socket.destroy();
+      return;
+    }
+    authority.handleUpgrade(request, socket, route, head);
+  });
+  await new Promise<void>((resolveListen) =>
+    server.listen(0, "127.0.0.1", resolveListen),
+  );
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Expected warm activation failure test listener");
+  }
+  let registrationCount = 0;
+  const bundle = createCapabilityRunnerdCodexTransport({
+    runnerBinary: defaultCapabilityRunnerdBinary(),
+    codexCommand: fakeCodex,
+    codexArgs: fakeCodexArgs(stateDirectory),
+    stateDirectory,
+    lifecyclePolicy: { mode: "warm", idleTimeoutMs: 60_000 },
+    controlPlaneRegistration: async (authority) => {
+      registrationCount += 1;
+      const route = `/runner-${registrationCount}`;
+      authorities.set(route, authority);
+      return {
+        connectUrl: `ws://127.0.0.1:${address.port}${route}`,
+        ...(registrationCount === 1
+          ? {}
+          : {
+              activate: () => {
+                throw new Error("rotation activation failed");
+              },
+            }),
+        release: () => {
+          released.push(route);
+          if (authorities.get(route) === authority) authorities.delete(route);
+        },
+      };
+    },
+  });
+  bundle.transport.setServerRequestHandler(async () => ({
+    success: true,
+    contentItems: [],
+  }));
+  let runnerPid: number | null = null;
+  try {
+    await bundle.transport.request("thread/start", {
+      cwd: tmpdir(),
+      dynamicTools: codexSemanticToolSpecs(),
+    });
+    runnerPid = bundle.evidence().runnerPid;
+
+    await expect(
+      bundle.transport.attachRun!({
+        runId: "run-warm-activation-failure",
+        turnId: "turn-warm-activation-failure",
+        itemId: "item-warm-activation-failure",
+      }),
+    ).rejects.toThrow("rotation activation failed");
+    expect(new Set(released)).toEqual(new Set(["/runner-1", "/runner-2"]));
+    expect(authorities.size).toBe(0);
+    await expect(bundle.transport.request("thread/read", {})).rejects.toThrow(
+      "rotation activation failed",
+    );
+  } finally {
+    await bundle.transport.close().catch(() => undefined);
+    if (runnerPid) {
+      try {
+        process.kill(-runnerPid, "SIGKILL");
+      } catch {
+        // A successful durable close already stopped the runner process group.
+      }
+    }
+    server.closeAllConnections();
+    if (server.listening) {
+      await new Promise<void>((resolveClose) =>
+        server.close(() => resolveClose()),
+      );
+    }
     await rm(stateDirectory, { recursive: true, force: true });
   }
 }, 30_000);
@@ -1739,6 +2530,115 @@ it.each([
     }
   },
 );
+
+it("probes an exact-authority resume and confirms its live provider identity", async () => {
+  const stateDirectory = await mkdtemp(
+    join(tmpdir(), "runnerd-exact-authority-resume-"),
+  );
+  const identity = {
+    runnerInstanceId: "runner-exact-resume",
+    environmentLeaseId: "lease-exact-resume",
+    runId: "run-exact-resume",
+    normalizedSessionId: "session-exact-resume",
+    turnId: "turn-exact-resume",
+    itemId: "item-exact-resume",
+  };
+  const options = {
+    runnerBinary: defaultCapabilityRunnerdBinary(),
+    codexCommand: fakeCodex,
+    codexArgs: fakeCodexArgs(stateDirectory, "--durable-turn-ids"),
+    stateDirectory,
+    lifecyclePolicy: { mode: "per_turn" as const, idleTimeoutMs: null },
+    prpIdentity: identity,
+  };
+  const first = createCapabilityRunnerdCodexTransport(options);
+  first.transport.setServerRequestHandler(async () => ({
+    success: true,
+    contentItems: [],
+  }));
+  let providerThread: { id: string; sessionId: string } | null = null;
+  try {
+    const opened = await first.transport.request("thread/start", {
+      cwd: tmpdir(),
+      dynamicTools: [],
+    });
+    const thread = opened.thread as Record<string, unknown>;
+    providerThread = {
+      id: String(thread.id),
+      sessionId: String(thread.sessionId),
+    };
+  } finally {
+    await first.transport.close();
+  }
+  if (providerThread === null) {
+    throw new Error("exact-authority fixture did not return a provider thread");
+  }
+
+  const statePath = join(
+    stateDirectory,
+    "control-plane",
+    "control-plane-state.json",
+  );
+  const beforeResume = JSON.parse(await readFile(statePath, "utf8")) as {
+    commands: Array<{ type: string }>;
+    committedEvents: Array<{ eventType: string }>;
+  };
+  expect(
+    beforeResume.commands.some((command) => command.type === "run.attach"),
+  ).toBe(false);
+  const priorResumeEvents = beforeResume.committedEvents.filter(
+    (event) => event.eventType === "session.resumed",
+  ).length;
+  const priorSnapshots = beforeResume.commands.filter(
+    (command) => command.type === "session.snapshot",
+  ).length;
+
+  const resumed = createCapabilityRunnerdCodexTransport({
+    ...options,
+    resumeProviderSession: {
+      driverSessionId: providerThread.id,
+      providerSessionId: providerThread.sessionId,
+    },
+  });
+  resumed.transport.setServerRequestHandler(async () => ({
+    success: true,
+    contentItems: [],
+  }));
+  try {
+    const read = await resumed.transport.request("thread/read", {});
+    expect(read.thread).toMatchObject(providerThread);
+    const afterResume = JSON.parse(await readFile(statePath, "utf8")) as {
+      commands: Array<{ commandId: string; type: string; status: string }>;
+      committedEvents: Array<{ eventType: string }>;
+    };
+    expect(afterResume.commands).toContainEqual(
+      expect.objectContaining({
+        commandId: expect.stringMatching(/^command_resume_probe_/),
+        type: "runner.drain",
+        status: "completed",
+      }),
+    );
+    expect(afterResume.commands).toContainEqual(
+      expect.objectContaining({
+        type: "session.snapshot",
+        status: "completed",
+      }),
+    );
+    expect(
+      afterResume.commands.filter(
+        (command) => command.type === "session.snapshot",
+      ),
+    ).toHaveLength(priorSnapshots + 2);
+    expect(
+      afterResume.committedEvents.filter(
+        (event) => event.eventType === "session.resumed",
+      ),
+    ).toHaveLength(priorResumeEvents + 1);
+  } finally {
+    await resumed.transport.close();
+    await rm(stateDirectory, { recursive: true, force: true });
+  }
+}, 30_000);
 
 it("cold-restores a suspended provider session under its durable run binding", async () => {
   const stateDirectory = await mkdtemp(join(tmpdir(), "runnerd-cold-attach-"));
@@ -1929,12 +2829,113 @@ it("cold-restores a suspended provider session under its durable run binding", a
   );
   await mismatched.transport.close();
 
+  const externalIdentity = {
+    ...secondIdentity,
+    runId: "run-cold-external",
+    turnId: "turn-cold-external",
+    itemId: "item-cold-external",
+  };
+  const rejectedExternalRotationSteps: string[] = [];
+  let externalArchiveDirectory: string | null = null;
+  const rejectedExternalRotation = createCapabilityRunnerdCodexTransport({
+    ...options,
+    runnerStateDirectory: externallyOwnedRunnerStateDirectory,
+    readRunnerState,
+    prepareExternalRunnerState: async () => {
+      rejectedExternalRotationSteps.push("prepared");
+    },
+    archiveExternalRunnerState: async ({ archiveKey }) => {
+      await expect(
+        stat(join(stateDirectory, "control-plane")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      expect(
+        await stat(
+          join(
+            stateDirectory,
+            "authority-epochs",
+            `epoch-${archiveKey}`,
+            "control-plane",
+          ),
+        ),
+      ).toBeDefined();
+      externalArchiveDirectory = join(
+        stateDirectory,
+        "external-authority-epochs",
+        archiveKey,
+      );
+      await mkdir(externalArchiveDirectory, { recursive: true });
+      await rename(
+        join(externallyOwnedRunnerStateDirectory, "runner-state.json"),
+        join(externalArchiveDirectory, "runner-state.json"),
+      );
+      rejectedExternalRotationSteps.push("remote-archived");
+      throw new Error("controller crashed after external archive");
+    },
+    resumeDynamicTools: dynamicTools,
+    prpIdentity: externalIdentity,
+  });
+  await expect(
+    rejectedExternalRotation.transport.request("thread/read", {}),
+  ).rejects.toThrow("controller crashed after external archive");
+  await rejectedExternalRotation.transport.close();
+  expect(rejectedExternalRotationSteps).toEqual([
+    "prepared",
+    "remote-archived",
+  ]);
+  await expect(stat(join(stateDirectory, "control-plane"))).rejects.toThrow();
+  await expect(
+    stat(join(externallyOwnedRunnerStateDirectory, "runner-state.json")),
+  ).rejects.toThrow();
+
+  const externalRotationSteps: string[] = [];
+  const externallyRotated = createCapabilityRunnerdCodexTransport({
+    ...options,
+    runnerStateDirectory: externallyOwnedRunnerStateDirectory,
+    readRunnerState,
+    prepareExternalRunnerState: async () => {
+      throw new Error("retry must not prepare a new external runner");
+    },
+    archiveExternalRunnerState: async ({ archiveKey }) => {
+      expect(externalArchiveDirectory).toBe(
+        join(stateDirectory, "external-authority-epochs", archiveKey),
+      );
+      externalRotationSteps.push("archived");
+      return JSON.parse(
+        await readFile(
+          join(externalArchiveDirectory!, "runner-state.json"),
+          "utf8",
+        ),
+      ) as Record<string, unknown>;
+    },
+    resumeDynamicTools: dynamicTools,
+    resumeCompletionContract: {
+      revision: "contract-external",
+      criterionIds: ["criterion-external"],
+    },
+    prpIdentity: externalIdentity,
+  });
+  externallyRotated.transport.setServerRequestHandler(async () => ({
+    success: true,
+    contentItems: [],
+  }));
+  try {
+    const read = await externallyRotated.transport.request("thread/read", {});
+    expect(read.thread).toMatchObject({
+      id: firstProviderThread.id,
+      sessionId: firstProviderThread.sessionId,
+      cwd: tmpdir(),
+    });
+    expect(externalRotationSteps).toEqual(["archived"]);
+  } finally {
+    await externallyRotated.transport.close();
+  }
+
   const restored = createCapabilityRunnerdCodexTransport({
     ...options,
     runnerStateDirectory: externallyOwnedRunnerStateDirectory,
     readRunnerState,
     resumeDynamicTools: dynamicTools,
-    prpIdentity: secondIdentity,
+    prpIdentity: externalIdentity,
   });
   restored.transport.setServerRequestHandler(async () => ({
     success: true,
@@ -1987,7 +2988,7 @@ it("cold-restores a suspended provider session under its durable run binding", a
   }
 }, 30_000);
 
-it("adopts a live runner on the same durable authority without spawning a duplicate", async () => {
+async function verifyLiveRunnerAdoption(mismatchedCheckpoint: boolean) {
   const stateDirectory = await mkdtemp(join(tmpdir(), "runnerd-live-adopt-"));
   const server = createServer();
   let authority: DurablePrpControlPlane | null = null;
@@ -2035,8 +3036,9 @@ it("adopts a live runner on the same durable authority without spawning a duplic
   let adopted: ReturnType<typeof createCapabilityRunnerdCodexTransport> | null =
     null;
   try {
+    let opened: Record<string, unknown>;
     try {
-      await first.transport.request("thread/start", {
+      opened = await first.transport.request("thread/start", {
         cwd: tmpdir(),
         dynamicTools: codexSemanticToolSpecs(),
       });
@@ -2055,12 +3057,43 @@ it("adopts a live runner on the same durable authority without spawning a duplic
     await first.detachControllerForRestart();
     expect(() => process.kill(runnerPid!, 0)).not.toThrow();
 
+    const controlPlaneStatePath = join(
+      stateDirectory,
+      "control-plane",
+      "control-plane-state.json",
+    );
+    const compactProviderIdentityEvents = async () => {
+      const controlPlaneState = JSON.parse(
+        await readFile(controlPlaneStatePath, "utf8"),
+      ) as { committedEvents: Array<{ eventType: string }> };
+      controlPlaneState.committedEvents =
+        controlPlaneState.committedEvents.filter(
+          (event) =>
+            event.eventType !== "harness.ready" &&
+            event.eventType !== "session.started" &&
+            event.eventType !== "session.resumed",
+        );
+      await writeFile(
+        controlPlaneStatePath,
+        `${JSON.stringify(controlPlaneState, null, 2)}\n`,
+        { mode: 0o600 },
+      );
+    };
+    await compactProviderIdentityEvents();
+
     const duplicateLauncher = vi.fn(() => {
       throw new Error("duplicate runner spawn attempted");
     });
+    const openedThread = opened.thread as Record<string, unknown>;
     adopted = createCapabilityRunnerdCodexTransport({
       ...sharedOptions,
       resumeDynamicTools: [],
+      resumeProviderSession: {
+        driverSessionId: String(openedThread.id),
+        providerSessionId: mismatchedCheckpoint
+          ? "wrong-provider-session"
+          : String(openedThread.sessionId),
+      },
       runnerProcessLauncher: duplicateLauncher,
       adoptExistingRunner: {
         pid: runnerPid!,
@@ -2076,6 +3109,14 @@ it("adopts a live runner on the same durable authority without spawning a duplic
         },
       },
     });
+    if (mismatchedCheckpoint) {
+      await expect(
+        adopted.transport.request("thread/read", {}),
+      ).rejects.toThrow("native_adopted_provider_identity_mismatch");
+      expect(duplicateLauncher).not.toHaveBeenCalled();
+      expect(() => process.kill(runnerPid!, 0)).not.toThrow();
+      return;
+    }
     await expect(adopted.transport.request("thread/read", {})).resolves.toEqual(
       expect.objectContaining({
         thread: expect.objectContaining({ id: "codex-thread-1" }),
@@ -2085,6 +3126,12 @@ it("adopts a live runner on the same durable authority without spawning a duplic
     expect(duplicateLauncher).not.toHaveBeenCalled();
     expect(adopted.evidence().diagnostics).toContain(
       `adopted runner ${runnerPid} authenticated to its durable PRP authority`,
+    );
+    expect(adopted.evidence().diagnostics).toContain(
+      "restored adopted provider identity from the exact durable checkpoint after PRP event compaction; awaiting live confirmation",
+    );
+    expect(adopted.evidence().diagnostics).toContain(
+      "confirmed adopted provider identity against authenticated recovery session.snapshot",
     );
   } finally {
     await adopted?.transport.close().catch(() => undefined);
@@ -2097,11 +3144,25 @@ it("adopts a live runner on the same durable authority without spawning a duplic
     }
     server.closeAllConnections();
     if (server.listening) {
-      await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+      await new Promise<void>((resolveClose) =>
+        server.close(() => resolveClose()),
+      );
     }
     await rm(stateDirectory, { recursive: true, force: true });
   }
-}, 30_000);
+}
+
+it(
+  "adopts a live runner on the same durable authority without spawning a duplicate",
+  () => verifyLiveRunnerAdoption(false),
+  30_000,
+);
+
+it(
+  "rejects a live runner whose provider identity mismatches the compacted checkpoint",
+  () => verifyLiveRunnerAdoption(true),
+  30_000,
+);
 
 it("surfaces a runner exit while provider-ingress readiness is still pending", async () => {
   const neverReady = new Promise<void>(() => undefined);
