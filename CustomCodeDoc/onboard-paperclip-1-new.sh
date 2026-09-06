@@ -77,8 +77,18 @@
 #   ./onboard-paperclip-1-new.sh --queue        # what is waiting to be applied
 #   ./onboard-paperclip-1-new.sh --apply-config # re-apply config patches
 #
-# Flags: --timeout <seconds>  --wait
+# Flags: --db-url <url>       use this database URL instead of the environment
+#        --timeout <seconds>  --wait
 #        --pnpm  run the CLI from this checkout via tsx instead of the release
+#
+# DATABASE URL, highest precedence first:
+#   1. --db-url <url>    explicit; nothing has to be exported
+#   2. $POSTGRES_URL     what Environment-base.txt publishes
+#   3. the built-in localhost default
+#
+# Whichever wins is exported as DATABASE_URL and written to the instance .env,
+# so boot 2 reads the same value without the variable being set again. --db-url
+# exists because POSTGRES_URL is often not present in the environment.
 
 set -euo pipefail
 
@@ -86,6 +96,7 @@ MODE="onboard"
 WAIT_FOR_READY=false
 WAIT_TIMEOUT=120
 USE_PNPM=false
+DB_URL_OVERRIDE=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -96,8 +107,11 @@ while [ $# -gt 0 ]; do
     --queue) MODE="queue"; shift ;;
     --wait) WAIT_FOR_READY=true; shift ;;
     --pnpm) USE_PNPM=true; shift ;;
+    --db-url) DB_URL_OVERRIDE="${2:?--db-url needs a value}"; shift 2 ;;
     --timeout) WAIT_TIMEOUT="${2:?--timeout needs a value}"; shift 2 ;;
-    -h|--help) sed -n '2,54p' "$0"; exit 0 ;;
+    # Print from the usage banner to the end of the header, so adding usage
+    # lines never truncates -h the way the old fixed 2,54 range did.
+    -h|--help) awk '/^# -+ usage -+$/{u=1} u{ if (!/^#/) exit; print }' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -157,7 +171,34 @@ LOG_DIR="${LOG_DIR:-$LOG_BASE_DIR/paperclip}"
 # name Paperclip reads (server/src/config.ts:320). This mapping is the bridge.
 # Without it the server silently falls back to embedded postgres and provisions
 # into a database nobody is looking at.
-export DATABASE_URL="${POSTGRES_URL:-postgres://paperclip:secret@127.0.0.1:5432/paperclip}"
+#
+# --db-url outranks both, so a host that never publishes POSTGRES_URL can be
+# onboarded without exporting anything. The resolved value is what the .env
+# writer below persists, so boot 2 inherits it.
+if [ -n "$DB_URL_OVERRIDE" ]; then
+  DATABASE_URL="$DB_URL_OVERRIDE"
+  DATABASE_URL_SOURCE="--db-url"
+elif [ -n "${POSTGRES_URL:-}" ]; then
+  DATABASE_URL="$POSTGRES_URL"
+  DATABASE_URL_SOURCE="\$POSTGRES_URL"
+else
+  DATABASE_URL="postgres://paperclip:secret@127.0.0.1:5432/paperclip"
+  DATABASE_URL_SOURCE="built-in default"
+fi
+export DATABASE_URL DATABASE_URL_SOURCE
+
+# Checked, not assumed: a typo here is silent. The server falls back to embedded
+# postgres and provisions into a database nobody is looking at, which is the
+# exact failure the POSTGRES_URL -> DATABASE_URL mapping above exists to stop.
+# Read-only modes only report it (see check_env); onboard refuses to proceed.
+db_url_valid() {
+  node -e '
+    try {
+      const u = new URL(process.argv[1]);
+      process.exit(u.protocol === "postgres:" || u.protocol === "postgresql:" ? 0 : 1);
+    } catch { process.exit(1); }
+  ' "$DATABASE_URL" 2>/dev/null
+}
 
 # -------------------------------------------------------------- backups -----
 export PAPERCLIP_DB_BACKUP_ENABLED=true
@@ -392,10 +433,15 @@ show_env() {
 
 check_env() {
   echo "=== you must set these ==="
-  show_env POSTGRES_URL "-> DATABASE_URL. The only way Paperclip finds the database."
+  show_env POSTGRES_URL "-> DATABASE_URL, unless --db-url is passed."
+  printf '  %-40s %-9s %s\n' "--db-url" \
+    "$([ -n "$DB_URL_OVERRIDE" ] && echo given || echo "not given")" \
+    "overrides POSTGRES_URL when passed"
   echo
   echo "=== resolved from the above, or defaulted ==="
   printf '  %-40s %s\n' "DATABASE_URL" "${DATABASE_URL%%\?*}"
+  printf '  %-40s %s\n' "  (source)" \
+    "$DATABASE_URL_SOURCE$(db_url_valid || echo '   *** NOT a postgres:// URL ***')"
   printf '  %-40s %s\n' "PAPERCLIP_HOME" "$PAPERCLIP_HOME"
   printf '  %-40s %s\n' "PAPERCLIP_INSTANCE_ID" "$PAPERCLIP_INSTANCE_ID"
   printf '  %-40s %s\n' "PAPERCLIP_CONFIG" "$CONFIG_PATH"
@@ -453,6 +499,13 @@ case "$MODE" in
 esac
 
 check_gates
+
+if ! db_url_valid; then
+  echo "FATAL: the database URL from $DATABASE_URL_SOURCE is not a postgres:// URL." >&2
+  echo "       got: ${DATABASE_URL%%\?*}" >&2
+  echo "       Pass a valid one with --db-url, or set POSTGRES_URL." >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------- guard -----
 # onboard preserves an existing config and applies none of the above.
@@ -536,7 +589,7 @@ chmod 600 "$ENV_PATH"
 # The server is deliberately left STOPPED. supervisord/systemd starts the real
 # one afterwards, and THAT is boot 2, the one with the provisioning flag on.
 echo "Using CLI:    ${PAPERCLIP_CMD[*]}"
-echo "Database:     ${DATABASE_URL%%\?*}"
+echo "Database:     ${DATABASE_URL%%\?*} (from $DATABASE_URL_SOURCE)"
 echo "Config:       $CONFIG_PATH"
 echo "Provisioning: DISABLED for this run (boot 1)"
 echo
