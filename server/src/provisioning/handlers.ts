@@ -708,46 +708,199 @@ export function provisioningHandlers(db: Db, store: ProvisioningStore) {
   }
 
   /**
-   * Create an agent bound to a company secret.
+   * Resolve one of the secret keys an `agent.create` binds, in the job's target
+   * company.
+   *
+   * Parked rather than failed when the key is absent: the `secret.set` that
+   * creates it may simply not have run yet, which is what makes the enqueue
+   * order between the two irrelevant.
+   *
+   * `field` is in the message on purpose. An agent now resolves TWO secrets —
+   * its credential and its codex home — and a bare "secret not found" sends
+   * whoever reads it to the wrong half of the payload.
+   */
+  async function resolveAgentSecretId(
+    companyId: string,
+    key: string,
+    field: "secretKey" | "codexHome",
+  ): Promise<string> {
+    const secret = await secretsSvc.getByKey(companyId, key);
+    if (!secret) {
+      throw new ParkJobError(`waiting for secret ${key} (${field}) in this company`);
+    }
+    return secret.id;
+  }
+
+  /**
+   * Normalise one adapter `env` entry to the two facts worth comparing.
+   *
+   * A persisted binding is not byte-identical to the one built here: a plain
+   * value may be stored as a bare string, and a `secret_ref` carries a
+   * `version` this handler never sends. Comparing objects literally would
+   * report a difference on every pass and rewrite the agent — and a revision —
+   * each time a job replayed.
+   */
+  function envBindingIdentity(value: unknown): string | null {
+    if (typeof value === "string") return value.trim() ? `plain:${value}` : null;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const record = value as Record<string, unknown>;
+    if (record.type === "plain") {
+      return typeof record.value === "string" ? `plain:${record.value}` : null;
+    }
+    if (record.type === "secret_ref") {
+      return typeof record.secretId === "string" ? `secret_ref:${record.secretId}` : null;
+    }
+    // Anything else — a user_secret_ref, or a shape added later — is compared
+    // whole. Getting this wrong costs a redundant update, never a lost binding.
+    return `other:${JSON.stringify(record)}`;
+  }
+
+  /**
+   * Apply an `agent.create` payload to the agent that already carries its name.
+   *
+   * Merges rather than replaces: entries the payload does not mention are left
+   * exactly as they are. That protects the per-agent `CODEX_HOME` the server's
+   * own isolation guard writes, and any variable a person added by hand, from
+   * being erased by a queue row that never knew about them.
+   */
+  async function reconcileAgent(
+    existing: { id: string; adapterConfig: unknown },
+    desired: {
+      name: string;
+      companyId: string;
+      env: Record<string, unknown>;
+      model: string | null;
+      secretKey: string | null;
+      secretEnv: string;
+      codexHomeKey: string | null;
+      codexHomeSecretId: string | null;
+      secretId: string | null;
+    },
+  ): Promise<JobResult> {
+    const currentConfig =
+      existing.adapterConfig && typeof existing.adapterConfig === "object" && !Array.isArray(existing.adapterConfig)
+        ? { ...(existing.adapterConfig as Record<string, unknown>) }
+        : {};
+    const currentEnv =
+      currentConfig.env && typeof currentConfig.env === "object" && !Array.isArray(currentConfig.env)
+        ? { ...(currentConfig.env as Record<string, unknown>) }
+        : {};
+
+    // Named so the log line says what moved. An operator reading "updated
+    // agent" with no fields cannot tell a real change from a churned revision.
+    const changed: string[] = [];
+    const nextEnv = { ...currentEnv };
+    for (const [varName, binding] of Object.entries(desired.env)) {
+      if (envBindingIdentity(currentEnv[varName]) === envBindingIdentity(binding)) continue;
+      nextEnv[varName] = binding;
+      changed.push(`env.${varName}`);
+    }
+    if (desired.model && currentConfig.model !== desired.model) changed.push("model");
+
+    if (changed.length === 0) {
+      return {
+        agentId: existing.id,
+        name: desired.name,
+        companyId: desired.companyId,
+        secretId: desired.secretId,
+        codexHomeSecretId: desired.codexHomeSecretId,
+        created: false,
+        updated: false,
+      };
+    }
+
+    const nextConfig: Record<string, unknown> = { ...currentConfig, env: nextEnv };
+    if (desired.model) nextConfig.model = desired.model;
+
+    // Only `adapterConfig`. `adapterType` and `permissions` are deliberately
+    // not re-asserted on an agent that already exists: switching an adapter
+    // under a running agent is destructive, and permissions may have been
+    // narrowed on purpose after provisioning.
+    const updated = await agentsSvc.update(existing.id, { adapterConfig: nextConfig });
+    if (!updated) {
+      // Listed a moment ago and gone now — a delete raced this job. Park: a
+      // replay either finds it again or creates it.
+      throw new ParkJobError(`agent ${desired.name} disappeared while being updated`);
+    }
+
+    logger.info(
+      {
+        agentId: existing.id,
+        name: desired.name,
+        companyId: desired.companyId,
+        changed,
+        codexHomeKey: desired.codexHomeKey,
+        boundTo: desired.secretEnv,
+      },
+      "provisioning: updated agent",
+    );
+    return {
+      agentId: existing.id,
+      name: desired.name,
+      companyId: desired.companyId,
+      secretId: desired.secretId,
+      codexHomeSecretId: desired.codexHomeSecretId,
+      created: false,
+      updated: true,
+      changed,
+    };
+  }
+
+  /**
+   * Create — or reconcile — an agent bound to its company secrets.
    *
    * The binding is a `secret_ref`, not a host environment variable. Resolved
    * adapter env is merged AFTER the host-env projection and is not filtered by
    * it, so a bound key always reaches the child process where a host-exported
    * one depends on the allowlist.
    *
-   * Idempotent by name within the company: the queue key stops a replay, but
-   * two separately-keyed jobs naming the same agent must not produce two.
+   * Identity is the agent's NAME within the company, and only the name. The
+   * queue key stops a replay, but two separately-keyed jobs naming the same
+   * agent must not produce two agents, and a job whose payload has moved on —
+   * a new model, a different `codexHome` key — must UPDATE the one that exists
+   * rather than no-op. A no-op there is what leaves an instance provisioned
+   * before this change bound to a codex home nobody maintains, with the queue
+   * reporting success: the exact silent state this contract exists to remove.
+   *
+   * An omitted field asserts nothing. `model`, `codexHome`, `secretKey` and
+   * `env` are each applied only when present, so a partial payload cannot strip
+   * configuration a person (or the server's own isolation guard) put there.
    */
   async function agentCreate(payload: Record<string, unknown>): Promise<JobResult> {
     const name = readString(payload.name);
     if (!name) throw new PermanentJobError("an agent name is required", "invalid_payload");
     const companyId = await resolveCompanyId(payload);
 
-    const existing = await agentsSvc
-      .list(companyId)
-      .then((rows) => rows.find((row) => row.name === name) ?? null);
-    if (existing) {
-      return { agentId: existing.id, name, companyId, created: false };
-    }
-
+    // Resolved BEFORE the create/update split, so both paths park on the same
+    // condition. An existing agent whose new codex-home secret has not landed
+    // yet must wait for it, not silently keep the binding it already has.
     const secretKey = readString(payload.secretKey);
-    let secretId: string | null = null;
-    if (secretKey) {
-      const secret = await secretsSvc.getByKey(companyId, secretKey);
-      if (!secret) {
-        // Parked, not failed: `secret.set` may simply not have run yet. This is
-        // what makes the enqueue order between the two irrelevant.
-        throw new ParkJobError(`waiting for secret ${secretKey} in this company`);
-      }
-      secretId = secret.id;
+    const secretId = secretKey ? await resolveAgentSecretId(companyId, secretKey, "secretKey") : null;
+
+    // `codexHome` NAMES A SECRET KEY, not a path — the contract changed on
+    // 2026-09-07 and the field's type did not, so an old payload and a new one
+    // are indistinguishable by shape. The discriminator is that a secret key
+    // never begins with `/` (nor `~`, the other path form the adapter calls
+    // out). A path-shaped value is a payload written against the retired
+    // contract and fails PERMANENTLY rather than being honoured as a literal:
+    // an instance half on each contract, with nothing showing which, is exactly
+    // the silent failure this change exists to remove.
+    const codexHomeKey = readString(payload.codexHome);
+    if (codexHomeKey && /^[/~]/.test(codexHomeKey)) {
+      throw new PermanentJobError(
+        `codexHome must name a company secret, not a path (got ${codexHomeKey})`,
+        "codex_home_not_a_secret_key",
+      );
     }
+    const codexHomeSecretId = codexHomeKey
+      ? await resolveAgentSecretId(companyId, codexHomeKey, "codexHome")
+      : null;
 
     // The binding VARIABLE NAME is payload-driven, not a constant: it has to
     // match whatever the vault's config.toml auth command actually reads. A
     // secret bound to a name nothing looks at is configured-looking and 401s on
     // the agent's first run.
     const secretEnv = readString(payload.secretEnv) ?? "OPENROUTER_API_KEY";
-    const codexHome = readString(payload.codexHome);
     const env: Record<string, unknown> = {};
 
     // Any extra plain variables the caller wants in the agent's environment,
@@ -769,9 +922,24 @@ export function provisioningHandlers(db: Db, store: ProvisioningStore) {
       }
     }
 
-    // Omitted rather than sent empty: an empty CODEX_HOME binds the variable to
-    // "" instead of leaving the Paperclip-managed home to apply.
-    if (codexHome) env.CODEX_HOME = { type: "plain", value: codexHome };
+    // Bound the same way the credential is, so the path exists in exactly one
+    // place and every agent naming that key moves with it. `secret_ref` is
+    // available here rather than assumed: `codexLocalEnvKeyConfigured`
+    // (routes/agents.ts) already counts a `secret_ref` CODEX_HOME as
+    // configured, `resolveAdapterConfigForRuntime` dereferences env bindings
+    // before the adapter is invoked, and the fork's own device-login flow
+    // creates a `CODEX_HOME_<handle>` secret for agents to bind to.
+    //
+    // One visible consequence: an env var resolved from a secret is added to
+    // the run's `secretKeys`, so CODEX_HOME reads `***REDACTED***` in the
+    // `adapter.invoke` event. That is the log line only — the child process
+    // receives the resolved path.
+    //
+    // Omitted rather than sent empty: an absent codexHome means the
+    // Paperclip-managed home, directly. There is no environment fallback —
+    // `PAPERCLIP_CODEX_HOME` is retired on this path, so an omission cannot
+    // quietly mean "whatever this container was configured with".
+    if (codexHomeSecretId) env.CODEX_HOME = { type: "secret_ref", secretId: codexHomeSecretId };
     if (secretId) env[secretEnv] = { type: "secret_ref", secretId };
 
     const model = readString(payload.model);
@@ -779,6 +947,13 @@ export function provisioningHandlers(db: Db, store: ProvisioningStore) {
     // Never send model:"" — an empty string suppresses the --model flag the
     // vault relies on, which is not the same as leaving it unset.
     if (model) adapterConfig.model = model;
+
+    const existing = await agentsSvc
+      .list(companyId)
+      .then((rows) => rows.find((row) => row.name === name) ?? null);
+    if (existing) {
+      return reconcileAgent(existing, { name, companyId, env, model, secretKey, secretEnv, codexHomeKey, codexHomeSecretId, secretId });
+    }
 
     const agent = await agentsSvc.create(companyId, {
       name,
@@ -789,10 +964,26 @@ export function provisioningHandlers(db: Db, store: ProvisioningStore) {
     });
 
     logger.info(
-      { agentId: agent.id, name, companyId, model, secretKey, boundTo: secretEnv },
+      {
+        agentId: agent.id,
+        name,
+        companyId,
+        model,
+        secretKey,
+        boundTo: secretEnv,
+        codexHomeKey,
+        // An explicit codex home is a HAND-OFF: Codex treats that home as
+        // user-managed, so Paperclip will not seed auth into it, will not merge
+        // PAPERCLIP_CODEX_PROVIDERS and will not rewrite its config.toml. The
+        // vault at that path has to carry a working config.toml whose auth
+        // command reads the same variable `secretEnv` names, and neither side
+        // can detect a mismatch — it is configured-looking and 401s on the
+        // first real run.
+        ...(codexHomeKey ? { authSeeding: "skipped: explicit codexHome" } : {}),
+      },
       "provisioning: created agent",
     );
-    return { agentId: agent.id, name, companyId, secretId, created: true };
+    return { agentId: agent.id, name, companyId, secretId, codexHomeSecretId, created: true };
   }
 
   const handlers: Record<string, (payload: Record<string, unknown>) => Promise<JobResult>> = {
