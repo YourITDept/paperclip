@@ -19,8 +19,24 @@
 # Results land in $OUT (default /tmp/paperclip-verify) with a summary.tsv.
 # ============================================================================
 set -uo pipefail
-cd "$(dirname "$0")/.."
-REPO=$(pwd)
+# Resolve the repo root ROBUSTLY, because this script gets copied.
+#
+# `cd "$(dirname "$0")/.."` alone is wrong the moment the script runs from
+# anywhere but `scripts/` — a copy in /tmp resolves to `/`, and pnpm then tries
+# to walk the entire filesystem and dies with ERR_PNPM_WORKSPACE_WALK_ERROR
+# ("Failed to walk workspace projects under /"). Every suite after that reports
+# `Command "vitest" not found` or 0 tests, which looks exactly like §7.5 #1's
+# missing-plugin-sdk signature and sends you to the wrong place entirely.
+# Cost 20 minutes of a full run on 2026-09-08 (Session 20).
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)
+if [ ! -f "${REPO:-/nonexistent}/pnpm-workspace.yaml" ]; then
+  REPO=$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || echo "")
+fi
+if [ ! -f "${REPO:-/nonexistent}/pnpm-workspace.yaml" ]; then
+  printf '\033[31mverify-fork.sh: cannot find the repo root. Run it from the checkout.\033[0m\n' >&2
+  exit 2
+fi
+cd "$REPO"
 OUT=${OUT:-/tmp/paperclip-verify}
 MODE=${1:-default}
 mkdir -p "$OUT"
@@ -115,6 +131,24 @@ pair "cs3/4 settings tab bar"      ui/src/components/access/CompanySettingsNav.t
 pair "cs3/4 routes + imports"      ui/src/App.tsx  codex-logins claude-logins InstanceCodexVaults InstanceClaudeVaults
 # §4.1 — upstream emptied this exclusion set in Session 19; the fork's two stay
 g     "cs3/4 openapi exclusions" 2 "codex-vaults.ts\|claude-vaults.ts" server/src/__tests__/openapi-routes.test.ts
+# change set 5 — DEGRADED since 2026-09-08 (Session 20). Upstream #13011 replaced
+# NewAgent.tsx with a wrapper around NewAgentSetup, which reads ?adapterType= but
+# has no equivalent of the fork's ?env= preset. The vault button still BUILDS a
+# URL carrying `env`, and nothing consumes it any more.
+#
+# A WARN, not a FAIL: the degradation is known and accepted until the port is
+# decided, and a permanently red check would be noise nobody reads. But it must
+# not be SILENT — the cs5 suite is green (upstream's own tests) and says nothing
+# about the fork's half.
+if grep -q "buildNewAgentPresetPath" ui/src/components/CreateAgentFromLoginButton.tsx 2>/dev/null; then
+  if grep -rqs "parseNewAgentEnvPreset" --include=*.tsx ui/src/pages ui/src/components 2>/dev/null; then
+    grn "  PASS  cs5 vault preset is consumed"; note PASS "cs5 preset consumed" "wired"
+  else
+    ylw "  WARN  cs5 DEGRADED — the vault button emits ?env= and nothing parses it."
+    ylw "        The prefill is gone; ?adapterType= still works. See §4 change set 5."
+    note WARN "cs5 preset consumed" "emitted-but-unparsed"
+  fi
+fi
 # change set 6 — one term, easy to lose
 g     "cs6 invite auto-accept guard" 1 "Boolean(invite) &&" ui/src/pages/InviteLanding.tsx
 # change set 10 — the HIRE call site is the one a conflict tends to drop

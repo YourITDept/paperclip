@@ -306,7 +306,7 @@ RETIRED, so the numbered references throughout §8 still resolve. Do not
 | 2 | ~~**`PAPERCLIP_CODEX_HOME`** — relocates the Paperclip-*managed* Codex home without opting out of management~~ **RETIRED in v6 — see §4.2** | [`Codex-changes-instructions.md`](CustomCodeDoc/Codex-changes-instructions.md) (historical) | none — removed from `packages/adapter-utils/src/server-utils.ts`, `packages/adapter-utils/src/acpx-engine/execute.ts`, `packages/adapters/codex-local/src/server/{execute,codex-home,acp,test}.ts` |
 | 3 | **Codex credential vaults** — provision `/sysops/llm/codex/<name>`, sign in, sign out, delete, from Settings | [`Codex device login web service.md`](CustomCodeDoc/Codex%20device%20login%20web%20service.md) | `server/src/services/codex-vault-login-service.ts`, `server/src/routes/codex-vaults.ts`, `ui/src/pages/InstanceCodexVaults.tsx`, `ui/src/api/codexVaults.ts`, **and the nav entries in `ui/src/components/CompanySettingsSidebar.tsx` AND `…Sidebar.production.tsx`** (see §4.1), `packages/adapters/codex-local/src/server/{codex-vault,host-login-pty}.ts` |
 | 4 | **Claude credential vaults** — the sibling feature, `/sysops/llm/claude/<name>` and `CLAUDE_CONFIG_DIR` | [`Claude device login web service.md`](CustomCodeDoc/Claude%20device%20login%20web%20service.md) | `server/src/services/claude-vault-login-service.ts`, `server/src/routes/claude-vaults.ts`, `ui/src/pages/InstanceClaudeVaults.tsx`, `ui/src/api/claudeVaults.ts`, **and the nav entries in both sidebars** (see §4.1), `packages/adapters/claude-local/src/server/{claude-vault,claude-host-login-pty}.ts` |
-| 5 | **Create agent from a login vault** — a button that opens New Agent with the runtime and the vault directory prefilled | [`Create agent from a login vault.md`](CustomCodeDoc/Create%20agent%20from%20a%20login%20vault.md) | `ui/src/lib/new-agent-preset.ts`, `ui/src/components/CreateAgentFromLoginButton.tsx`, `ui/src/pages/NewAgent.tsx` |
+| 5 | **Create agent from a login vault** — a button that opens New Agent with the runtime and the vault directory prefilled. **DEGRADED 2026-09-08 (Session 20): the runtime still prefills, the vault directory no longer does** — upstream #13011 replaced `NewAgent.tsx` with a wrapper around `NewAgentSetup`, which reads `?adapterType=` but not the fork's `?env=`. `parseNewAgentEnvPreset` is orphaned; `verify-fork.sh` prints a WARN. Open item O-7 | [`Create agent from a login vault.md`](CustomCodeDoc/Create%20agent%20from%20a%20login%20vault.md) | `ui/src/lib/new-agent-preset.ts`, `ui/src/components/CreateAgentFromLoginButton.tsx`, `ui/src/pages/NewAgent.tsx` |
 | 6 | **Invite auto-accept guard** — `Boolean(invite) &&` as the first term of `shouldAutoAcceptHumanInvite` | [`Reviewing onboarding process and error messages.md`](CustomCodeDoc/Reviewing%20onboarding%20process%20and%20error%20messages.md), and `ReverseProxyCustomChanges.md` §0.1 #1 | `ui/src/pages/InviteLanding.tsx` |
 | 7 | ~~**Startup banner** — the Codex Home and OpenRouter rows~~ **RETIRED in v6 — see §4.2** | — | none — rows and helpers removed from `server/src/startup-banner.ts`; `startup-banner.test.ts` deleted |
 | 8 | **Local packaging and verification scripts** | [`builds paperclip.md`](CustomCodeDoc/builds%20paperclip.md), and §7.0 for `verify-fork.sh` | `scripts/pack-local.sh`, `scripts/reset-local.sh`, `scripts/verify-fork.sh`, `releases/` |
@@ -989,7 +989,7 @@ use it** — it is an argument, not a measurement.
 
 ### 7.5 Prerequisites and traps — read before believing a failure
 
-Five things have produced confusing failures that were **not** real defects.
+Seven things have produced confusing failures that were **not** real defects.
 Check each before investigating a red suite.
 
 #### 1. Build the plugin SDK first, or 12 suites collect nothing
@@ -1156,6 +1156,33 @@ ERR_PNPM_OUTDATED_LOCKFILE
 specifiers in the lockfile don't match specs in package.json
 ```
 
+> **A second form, found 2026-09-08 (Session 20): `patchedDependencies`.**
+>
+> ```
+> ERR_PNPM_LOCKFILE_CONFIG_MISMATCH
+> The current "patchedDependencies" configuration doesn't match the value found in the lockfile
+> ```
+>
+> This one misleads, because the entry *names* in `package.json` and the
+> lockfile match perfectly — the fork's, upstream's and the merged
+> `patchedDependencies` blocks were byte-identical. **It is the HASHES.**
+> Upstream edited two patch files (`patches/acpx@0.13.1.patch` +142 lines,
+> `patches/@agentclientprotocol__codex-acp@1.6.2.patch` +10) without
+> regenerating the lockfile that records their content hashes.
+>
+> Diagnose it by diffing the patches, not the dependency list:
+>
+> ```bash
+> git diff --stat $MERGE_BASE FETCH_HEAD -- patches/   # upstream's changes
+> git diff --stat $MERGE_BASE HEAD -- patches/         # ours (expect empty)
+> ```
+>
+> Same answer as the rest of trap 3 — regenerate. The resulting diff was 17
+> lines and exactly the two changed hashes, which is what a correct
+> regeneration looks like. **Taking upstream's lockfile wholesale does NOT fix
+> this one** (their lockfile is the stale artefact), which is the difference
+> from the Session 19 case.
+
 Upstream lands `package.json` dependency changes without regenerating
 `pnpm-lock.yaml`, usually from stacked PRs. It has happened repeatedly — #12318,
 #12461, #12464, #12484 are all lockfile repairs, and it recurred immediately
@@ -1280,6 +1307,42 @@ Checked 2026-09-04: **no script, config or CI workflow in this repo passes the
 flag**, so there is nothing to repair in-tree — it only bites when a flag is typed
 by hand, or copied from a pre-v4 note. `--reporter=verbose` and `--reporter=dot`
 both still exist if per-test output is wanted.
+
+#### 7. `verify-fork.sh` is a file bash is reading — do not edit it mid-run
+
+**Added Session 20, after both halves of this went wrong in one session.**
+
+**Never edit the script while a run is executing it.** Bash does not load a
+script into memory; it reads and executes incrementally, tracking position by
+**byte offset**. Inserting lines above the current position shifts every offset
+after it, and the remainder of the run executes garbled text. There is no error
+message for this — you get nonsense, or silence. A 90-minute run was killed
+rather than trusted.
+
+If the script must change while something is running, run a copy:
+
+```bash
+cp scripts/verify-fork.sh /tmp/verify-fork-frozen.sh
+bash /tmp/verify-fork-frozen.sh full          # from inside the checkout
+```
+
+**But a copy must still resolve the repo root, and this is the trap inside the
+trap.** The script used `cd "$(dirname "$0")/.."`, so a copy in `/tmp` resolved
+to **`/`**. pnpm then tried to walk the entire filesystem:
+
+```
+ERR_PNPM_WORKSPACE_WALK_ERROR
+Failed to walk workspace projects under /: ... /home/ubuntu: Permission denied
+```
+
+and every suite afterwards reported `Command "vitest" not found` or **0 tests** —
+which is **exactly §7.5 #1's missing-plugin-sdk signature**. Two unrelated
+causes, one symptom, and the obvious reading is the wrong one.
+
+`verify-fork.sh` now resolves its root from `BASH_SOURCE`, falls back to
+`git rev-parse --show-toplevel`, and **exits 2 with a clear message** if neither
+finds a `pnpm-workspace.yaml`. Loud beats silent; the old behaviour was a
+20-minute detour.
 
 ---
 
