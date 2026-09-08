@@ -103,8 +103,8 @@ instance.state   user.upsert   company.create   membership.set
 membership.remove   company.reconcile   secret.set   agent.create   agent.task
 ```
 
-Three of those have no handler yet (`membership.remove`, `company.reconcile`) or
-are recent (`agent.task`). **A name in `JOB_TYPES` with no handler parks and
+`company.reconcile` is the only one with no handler left; `membership.remove`
+and `agent.task` were both built on 2026-09-08. **A name in `JOB_TYPES` with no handler parks and
 waits; a name outside it fails permanently.** That asymmetry is deliberate and
 is what makes it safe for the control plane to enqueue ahead of this side — the
 enqueuer's keys are content-addressed, so a row that reaches a terminal state is
@@ -124,7 +124,9 @@ the suites in *Verifying it* are named.
 | --- | --- | --- |
 | `accessService.ensureMembership` | every `membership.set` | a member with no access |
 | `accessService.ensureRoleDefaultGrants` | every `membership.set` | **a member who signs in, sees the company, and can do nothing** — type-clean, looks like a bug |
-| `accessService.promoteInstanceAdmin` / `demoteInstanceAdmin` | `user.upsert` | the owner cannot create companies |
+| `accessService.promoteInstanceAdmin` / `demoteInstanceAdmin` | `user.upsert`, `membership.remove` | the owner cannot create companies |
+| `accessService.archiveMember` | `membership.remove` | **a removed person keeps access.** Note this is used in preference to `setUserCompanyAccess`, whose UI-oriented guards refuse to remove an `owner`/`admin` or an instance admin — the Outseta primary contact arrives as `admin`, so that path refuses the common case |
+| `authSessions` / `boardApiKeys` (`revoked_at`) | `membership.remove` | a live cookie or API key outlives the revocation |
 | `companyService.create` / `update` | `company.create` | — |
 | `agentService.create` / `update` | `agent.create` | — |
 | `agentService.list(companyId, { includeTerminated })` | resolving an agent by name | **see the trap below** |
@@ -168,7 +170,20 @@ red.
    `public`, finds nothing, and **does not error** — it just never sees a job.
    Every statement in `store.ts` says `provisioning.provisioning_jobs`. Neither
    side sets a `search_path`.
-6. **A parked job waiting for ever.** Parking is correct and deliberate, and
+6. **A revocation that half-applies.** A person can hold memberships in several
+   companies and each is archived in its own transaction, so a guard raised
+   part-way would leave some archived and the job permanently failed — and
+   because the enqueuer's keys are content-addressed, no later event re-queues
+   it. The handler checks every target company for the last-owner condition
+   **before** archiving anything, which makes the normal failure
+   all-or-nothing. It is not a cross-company transaction; a database failure
+   mid-loop can still split it.
+7. **Deleting a user instead of archiving one.** 125 columns hold a user id and
+   only 5 carry a foreign key to `user`. A `DELETE` succeeds, cascades those 5,
+   and leaves up to 120 columns pointing at an id that no longer exists — with
+   no error anywhere. `company_memberships.principal_id` is among the
+   unconstrained ones because it is polymorphic.
+8. **A parked job waiting for ever.** Parking is correct and deliberate, and
    `error_code` stays NULL so it stays out of the error report. There is no
    ceiling: park N times then fail is **not** implemented. A job parked on a
    condition that never arrives looks identical on day one and day thirty.
@@ -179,10 +194,11 @@ red.
 not behavioural ones.
 
 ```bash
-# 17/17 expected. The only coverage of this module.
+# 27/27 expected. The only coverage of this module.
 $CLEAN corepack pnpm exec vitest run --project @paperclipai/server \
   server/src/__tests__/provisioning-agent-codex-home.test.ts \
-  server/src/__tests__/provisioning-agent-task.test.ts
+  server/src/__tests__/provisioning-agent-task.test.ts \
+  server/src/__tests__/provisioning-membership-remove.test.ts
 
 # the two lines in index.ts — the §4.1 collision point
 grep -n "startProvisioningWorker\|provisioningWorker.stop" server/src/index.ts
@@ -193,7 +209,7 @@ Both suites use the embedded-Postgres harness and exercise the real services, so
 they fail if an upstream service changes behaviour underneath — which is exactly
 the risk this change set has and the file-level checks cannot see.
 
-**What they do NOT cover**, stated so nobody reads 17 green tests as more than
+**What they do NOT cover**, stated so nobody reads 27 green tests as more than
 they are: `instance.state`, `user.upsert`, `company.create` and `membership.set`
 have no unit tests on this side. They were verified live on `db_dev92` in an
 earlier session and have not regressed, but a merge that broke
@@ -242,6 +258,7 @@ If you are changing a payload's meaning, the note goes in `07-`.
 | 2026-09-06 (Session 18) | Module first merged; `server-startup-feedback-export.test.ts` went red as a side effect (§4.1) |
 | 2026-09-07 | `codexHome` on `agent.create` changed from a path to a **secret key**; `agent.create` gained reconcile-on-existing |
 | 2026-09-08 | `agent.task` added — the first job type that **spends money on being applied** |
+| 2026-09-08 | `membership.remove` built — the only job type that REVOKES. Archives memberships, reassigns open issues, revokes sessions and API keys; guards the last owner and the last instance admin |
 | 2026-09-08 (Session 19) | Registered as change set 11. `server-startup-feedback-export.test.ts` repaired, 18/18 |
 
 ## Open

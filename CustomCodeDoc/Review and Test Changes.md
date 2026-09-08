@@ -875,11 +875,12 @@ corepack pnpm exec vitest run \
   server/src/__tests__/agent-permissions-routes.test.ts
 
 # the fork's provisioning module (O-6 — not yet a registered change set).
-# 17/17 expected. This is the only coverage of `server/src/provisioning/` and
+# 27/27 expected. This is the only coverage of `server/src/provisioning/` and
 # of the two lines it adds to `server/src/index.ts`.
 corepack pnpm exec vitest run --project @paperclipai/server \
   server/src/__tests__/provisioning-agent-codex-home.test.ts \
-  server/src/__tests__/provisioning-agent-task.test.ts
+  server/src/__tests__/provisioning-agent-task.test.ts \
+  server/src/__tests__/provisioning-membership-remove.test.ts
 
 # change set 10 also adds a field to createAgentSchema, which feeds the generated
 # OpenAPI document. 5/5 expected. This suite is ALSO the canary for the §4.1

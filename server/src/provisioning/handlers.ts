@@ -23,9 +23,16 @@
 
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { and, count, countDistinct, eq, sql } from "drizzle-orm";
+import { and, count, countDistinct, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { authUsers, companies, companyMemberships } from "@paperclipai/db";
+import {
+  authSessions,
+  authUsers,
+  boardApiKeys,
+  companies,
+  companyMemberships,
+  instanceUserRoles,
+} from "@paperclipai/db";
 import type { HumanCompanyMembershipRole } from "@paperclipai/shared";
 import { ISSUE_PRIORITIES, ISSUE_STATUSES } from "@paperclipai/shared";
 import { accessService } from "../services/access.js";
@@ -1049,6 +1056,225 @@ export function provisioningHandlers(
   }
 
   /**
+   * Find an existing `user` row by address, without creating one.
+   *
+   * Matched on `lower(email)`, the same way `ensureUser` writes it and
+   * `resolveProxyHeaderUser` reads it. If those three ever disagreed about
+   * which row an address means, a revocation would archive somebody else's
+   * memberships — which is the one mistake here that cannot be undone by
+   * re-running the job.
+   */
+  async function findUserByEmail(email: string): Promise<{ id: string } | null> {
+    return db
+      .select({ id: authUsers.id })
+      .from(authUsers)
+      .where(sql`lower(${authUsers.email}) = ${email}`)
+      .then((rows) => rows[0] ?? null);
+  }
+
+  /**
+   * Refuse a revocation that would leave a company without an active owner, or
+   * the instance without an admin — BEFORE anything is archived.
+   *
+   * `archiveMember` performs the owner check itself, inside its own
+   * transaction, per company. That is correct but it is checked too late for
+   * this job: a person can hold memberships in several companies, each archived
+   * in its own transaction, so a conflict raised on the third would leave the
+   * first two already archived and the job permanently failed — a half-revoked
+   * person nobody asked for. Checking every target first makes the normal
+   * failure all-or-nothing.
+   *
+   * The instance-admin half is an ADDITION to what the control plane asked for.
+   * Its stated reason for the owner guard — "we would rather see `last_owner`
+   * in the queue than an instance nobody can administer" — applies with equal
+   * force to the last `instance_admin`, who is the only principal that can
+   * create companies. Remove it if you would rather the queue never blocked on
+   * this.
+   */
+  async function assertRevocationLeavesAnAdmin(
+    userId: string,
+    memberships: Array<{ id: string; companyId: string; status: string; membershipRole: string | null }>,
+  ): Promise<void> {
+    for (const membership of memberships) {
+      if (membership.status !== "active" || membership.membershipRole !== "owner") continue;
+      const [{ owners }] = await db
+        .select({ owners: count() })
+        .from(companyMemberships)
+        .where(
+          and(
+            eq(companyMemberships.companyId, membership.companyId),
+            eq(companyMemberships.principalType, "user"),
+            eq(companyMemberships.status, "active"),
+            eq(companyMemberships.membershipRole, "owner"),
+          ),
+        );
+      if (owners <= 1) {
+        throw new PermanentJobError(
+          `removing this person would leave company ${membership.companyId} with no active owner`,
+          "last_owner",
+        );
+      }
+    }
+
+    const holdsInstanceAdmin = await db
+      .select({ userId: instanceUserRoles.userId })
+      .from(instanceUserRoles)
+      .where(and(eq(instanceUserRoles.userId, userId), eq(instanceUserRoles.role, "instance_admin")))
+      .then((rows) => rows.length > 0);
+    if (!holdsInstanceAdmin) return;
+
+    const [{ admins }] = await db
+      .select({ admins: count() })
+      .from(instanceUserRoles)
+      .where(eq(instanceUserRoles.role, "instance_admin"));
+    if (admins <= 1) {
+      throw new PermanentJobError(
+        "removing this person would leave the instance with no instance admin",
+        "last_instance_admin",
+      );
+    }
+  }
+
+  /**
+   * Revoke a person's access. The ONLY job type that takes something away.
+   *
+   * Every other handler asserts a desired state and converges on it, so a
+   * replay is harmless by construction. This one is different in kind, and two
+   * things follow from that.
+   *
+   * ARCHIVE, NEVER DELETE. 125 columns across this database hold a user id and
+   * only 5 carry a foreign key to `user`. A `DELETE` would succeed, cascade
+   * those 5, and leave up to 120 columns pointing at an id that no longer
+   * exists — issues assigned to nobody, comments by nobody, approvals decided
+   * by nobody, with no error anywhere. `company_memberships.principal_id` is
+   * among the unconstrained ones because it is polymorphic.
+   *
+   * NO COMPANY NAMED MEANS EVERY COMPANY. That is the opposite of
+   * `membership.set`, deliberately: adding somebody to every company is a
+   * decision, removing them is not. A payload that does name one is read as
+   * "just this one".
+   */
+  async function membershipRemove(payload: Record<string, unknown>): Promise<JobResult> {
+    const email = readEmail(payload.email);
+    if (!email) throw new PermanentJobError("a valid email is required", "invalid_payload");
+
+    const user = await findUserByEmail(email);
+    if (!user) {
+      // SUCCESS, not failure. Somebody removed before they were ever
+      // provisioned is the ordinary case — a person who signed up and left
+      // without signing in — and a permanent error would put a red row on a
+      // healthy instance for a job that has nothing to do.
+      logger.info({ email }, "provisioning: nothing to revoke, no such user");
+      return { email, removed: false, reason: "no_such_user" };
+    }
+
+    // An explicitly named company narrows this to that one. `companyName` is
+    // read through `readString` so an empty string does not count as naming
+    // one — an empty name must not silently become "revoke everywhere".
+    const namesCompany =
+      readString(payload.companyId) !== null ||
+      payload.companyPrefix !== undefined ||
+      readString(payload.companyName) !== null;
+    const scopedCompanyId = namesCompany ? await resolveCompanyId(payload) : null;
+
+    const memberships = await db
+      .select({
+        id: companyMemberships.id,
+        companyId: companyMemberships.companyId,
+        status: companyMemberships.status,
+        membershipRole: companyMemberships.membershipRole,
+      })
+      .from(companyMemberships)
+      .where(
+        and(
+          eq(companyMemberships.principalType, "user"),
+          eq(companyMemberships.principalId, user.id),
+          ...(scopedCompanyId ? [eq(companyMemberships.companyId, scopedCompanyId)] : []),
+        ),
+      );
+
+    await assertRevocationLeavesAnAdmin(user.id, memberships);
+
+    // `archiveMember` is the right primitive rather than `setUserCompanyAccess`,
+    // which looks closer but refuses this job outright: it throws
+    // "Owners and admins cannot be removed from company access" and
+    // "Instance admins cannot be removed", guards written for a person editing
+    // access in the UI. The Outseta primary contact arrives as `admin`, so that
+    // path would refuse the common case. `archiveMember` carries the guard that
+    // matters here — the last active owner — and nothing else.
+    //
+    // It also reassigns the person's open issues and resets anything
+    // `in_progress` back to `todo`, which plain membership archival does not.
+    // Work does not silently belong to somebody who no longer exists.
+    const archived: string[] = [];
+    let reassignedIssues = 0;
+    for (const membership of memberships) {
+      // Already archived returns the row with a zero count, so a replay is a
+      // no-op rather than an error.
+      const result = await access.archiveMember(membership.companyId, membership.id);
+      if (!result) continue;
+      if (membership.status !== "archived") archived.push(membership.companyId);
+      reassignedIssues += result.reassignedIssueCount;
+    }
+
+    // Instance-admin is instance-wide, so it only goes when the revocation is
+    // instance-wide. Scoping to one company and silently stripping it would
+    // remove access the payload never mentioned.
+    const demoted = scopedCompanyId ? null : await access.demoteInstanceAdmin(user.id);
+
+    // CREDENTIALS THAT ALREADY EXIST, and the reason this is not optional.
+    // Archiving a membership stops AUTHORISATION, but a live session cookie or
+    // a board API key is a credential already in somebody's hands. A person
+    // removed from the account should stop being able to act, not stop being
+    // able to start. Skipped for a company-scoped removal, where the person
+    // legitimately keeps access to everything else.
+    let sessionsRevoked = 0;
+    let apiKeysRevoked = 0;
+    if (!scopedCompanyId) {
+      sessionsRevoked = await db
+        .delete(authSessions)
+        .where(eq(authSessions.userId, user.id))
+        .returning({ id: authSessions.id })
+        .then((rows) => rows.length);
+      // Revoked, not deleted — `board_api_keys` carries `revoked_at` for
+      // exactly this, and the row is the audit record of a key having existed.
+      apiKeysRevoked = await db
+        .update(boardApiKeys)
+        .set({ revokedAt: new Date() })
+        .where(and(eq(boardApiKeys.userId, user.id), isNull(boardApiKeys.revokedAt)))
+        .returning({ id: boardApiKeys.id })
+        .then((rows) => rows.length);
+    }
+
+    logger.info(
+      {
+        userId: user.id,
+        email,
+        scope: scopedCompanyId ?? "instance",
+        companiesArchived: archived.length,
+        reassignedIssues,
+        instanceAdminDemoted: Boolean(demoted),
+        sessionsRevoked,
+        apiKeysRevoked,
+      },
+      "provisioning: revoked access",
+    );
+
+    return {
+      userId: user.id,
+      email,
+      removed: true,
+      scope: scopedCompanyId ?? "instance",
+      companiesArchived: archived.length,
+      companies: archived,
+      reassignedIssues,
+      instanceAdminDemoted: Boolean(demoted),
+      sessionsRevoked,
+      apiKeysRevoked,
+    };
+  }
+
+  /**
    * Resolve an agent by NAME within a company.
    *
    * Same rule as `secretKey` and `codexHome`: the onboarding side names things
@@ -1235,6 +1461,7 @@ export function provisioningHandlers(
     "user.upsert": userUpsert,
     "company.create": companyCreate,
     "membership.set": membershipSet,
+    "membership.remove": membershipRemove,
     "secret.set": secretSet,
     "agent.create": agentCreate,
     "agent.task": agentTask,

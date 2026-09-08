@@ -174,8 +174,9 @@ suite "cs6 invite guard" 19 ui/src/pages/InviteLanding.test.tsx
 suite "cs10 duplicate payload" 5 ui/src/lib/duplicate-agent-payload.test.ts
 suite "cs10 agent permissions" 69 server/src/__tests__/agent-permissions-routes.test.ts
 suite "cs3/4 openapi contract" 5 server/src/__tests__/openapi-routes.test.ts
-suite "cs11 provisioning" 17 server/src/__tests__/provisioning-agent-codex-home.test.ts \
-  server/src/__tests__/provisioning-agent-task.test.ts
+suite "cs11 provisioning" 27 server/src/__tests__/provisioning-agent-codex-home.test.ts \
+  server/src/__tests__/provisioning-agent-task.test.ts \
+  server/src/__tests__/provisioning-membership-remove.test.ts
 
 if [ "$MODE" != "full" ]; then
   hdr "Summary"; column -t -s"$(printf '\t')" "$SUMMARY" 2>/dev/null || cat "$SUMMARY"
