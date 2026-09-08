@@ -89,6 +89,30 @@ g     "cs1 proxy_header in express.d.ts" 1 '"proxy_header"' server/src/types/exp
 # change sets 3+4 — the credential vault routes
 check "cs3 codex-vaults route"  "yes" "$([ -f server/src/routes/codex-vaults.ts ] && echo yes || echo no)"
 check "cs4 claude-vaults route" "yes" "$([ -f server/src/routes/claude-vaults.ts ] && echo yes || echo no)"
+# change sets 3+4, THE UI HALF. Server routes surviving proves nothing about
+# whether a person can reach the pages. Added 2026-09-08 after the two tabs went
+# missing from a production build for a week: upstream's `.production` layout
+# family (#12746/#12748) is chosen by `streamlinedUiEnabled`, and the fork's
+# sidebar entries existed in the streamlined file only. Nothing failed — the
+# routes were registered for both modes, so the pages stayed reachable by URL
+# and every test passed. They were simply invisible.
+# BOTH sidebars must carry BOTH entries. Keep them in sync.
+#
+# Presence, not an exact count: these files legitimately mention each name
+# several times (nav item, visibility map, path matcher), and a count-based
+# guard would go red the first time someone adds a line. What must never be
+# true is a name being ABSENT from one of these surfaces.
+pair() { # pair <label> <file> <term>...
+  local label=$1 file=$2; shift 2
+  local missing=""
+  for term in "$@"; do grep -q -- "$term" "$file" 2>/dev/null || missing="$missing $term"; done
+  if [ -z "$missing" ]; then grn "  PASS  $label"; note PASS "$label" "all present"
+  else red "  FAIL  $label — absent from $(basename "$file"):$missing"; note FAIL "$label" "missing:$missing"; FAILED=1; fi
+}
+pair "cs3/4 sidebar (streamlined)" ui/src/components/CompanySettingsSidebar.tsx            codex-logins claude-logins
+pair "cs3/4 sidebar (production)"  ui/src/components/CompanySettingsSidebar.production.tsx codex-logins claude-logins
+pair "cs3/4 settings tab bar"      ui/src/components/access/CompanySettingsNav.tsx         codex-logins claude-logins
+pair "cs3/4 routes + imports"      ui/src/App.tsx  codex-logins claude-logins InstanceCodexVaults InstanceClaudeVaults
 # §4.1 — upstream emptied this exclusion set in Session 19; the fork's two stay
 g     "cs3/4 openapi exclusions" 2 "codex-vaults.ts\|claude-vaults.ts" server/src/__tests__/openapi-routes.test.ts
 # change set 6 — one term, easy to lose
@@ -144,6 +168,7 @@ suite "cs3+4 credential vaults" 83 server/src/__tests__/codex-vault-login-servic
   server/src/__tests__/claude-vault-login-service.test.ts \
   packages/adapters/codex-local/src/server/codex-vault.test.ts \
   packages/adapters/claude-local/src/server/claude-vault.test.ts
+suite "cs3/4 sidebar parity (UI reachability)" 4 ui/src/components/CompanySettingsSidebar.fork-parity.test.ts
 suite "cs5 vault preset" 20 ui/src/lib/new-agent-preset.test.ts ui/src/pages/NewAgent.test.tsx
 suite "cs6 invite guard" 19 ui/src/pages/InviteLanding.test.tsx
 suite "cs10 duplicate payload" 5 ui/src/lib/duplicate-agent-payload.test.ts

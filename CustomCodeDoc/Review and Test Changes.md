@@ -304,8 +304,8 @@ RETIRED, so the numbered references throughout §8 still resolve. Do not
 | --- | --- | --- | --- |
 | 1 | **Reverse-proxy / forward-auth** — a `proxy_header` actor source resolved from `X-Forwarded-User`, off unless `PAPERCLIP_PROXY_AUTH_ENABLED=true` | [`ReverseProxyCustomChanges.md`](CustomCodeDoc/ReverseProxyCustomChanges.md), [`doc/REVERSE-PROXY-AUTH.md`](doc/REVERSE-PROXY-AUTH.md) | `server/src/auth/proxy-header-auth.ts`, `server/src/middleware/auth.ts`, `server/src/types/express.d.ts`, `server/src/services/authorization.ts`, `server/src/routes/authz.ts`, `server/src/realtime/live-events-ws.ts` |
 | 2 | ~~**`PAPERCLIP_CODEX_HOME`** — relocates the Paperclip-*managed* Codex home without opting out of management~~ **RETIRED in v6 — see §4.2** | [`Codex-changes-instructions.md`](CustomCodeDoc/Codex-changes-instructions.md) (historical) | none — removed from `packages/adapter-utils/src/server-utils.ts`, `packages/adapter-utils/src/acpx-engine/execute.ts`, `packages/adapters/codex-local/src/server/{execute,codex-home,acp,test}.ts` |
-| 3 | **Codex credential vaults** — provision `/sysops/llm/codex/<name>`, sign in, sign out, delete, from Settings | [`Codex device login web service.md`](CustomCodeDoc/Codex%20device%20login%20web%20service.md) | `server/src/services/codex-vault-login-service.ts`, `server/src/routes/codex-vaults.ts`, `ui/src/pages/InstanceCodexVaults.tsx`, `ui/src/api/codexVaults.ts`, `packages/adapters/codex-local/src/server/{codex-vault,host-login-pty}.ts` |
-| 4 | **Claude credential vaults** — the sibling feature, `/sysops/llm/claude/<name>` and `CLAUDE_CONFIG_DIR` | [`Claude device login web service.md`](CustomCodeDoc/Claude%20device%20login%20web%20service.md) | `server/src/services/claude-vault-login-service.ts`, `server/src/routes/claude-vaults.ts`, `ui/src/pages/InstanceClaudeVaults.tsx`, `ui/src/api/claudeVaults.ts`, `packages/adapters/claude-local/src/server/{claude-vault,claude-host-login-pty}.ts` |
+| 3 | **Codex credential vaults** — provision `/sysops/llm/codex/<name>`, sign in, sign out, delete, from Settings | [`Codex device login web service.md`](CustomCodeDoc/Codex%20device%20login%20web%20service.md) | `server/src/services/codex-vault-login-service.ts`, `server/src/routes/codex-vaults.ts`, `ui/src/pages/InstanceCodexVaults.tsx`, `ui/src/api/codexVaults.ts`, **and the nav entries in `ui/src/components/CompanySettingsSidebar.tsx` AND `…Sidebar.production.tsx`** (see §4.1), `packages/adapters/codex-local/src/server/{codex-vault,host-login-pty}.ts` |
+| 4 | **Claude credential vaults** — the sibling feature, `/sysops/llm/claude/<name>` and `CLAUDE_CONFIG_DIR` | [`Claude device login web service.md`](CustomCodeDoc/Claude%20device%20login%20web%20service.md) | `server/src/services/claude-vault-login-service.ts`, `server/src/routes/claude-vaults.ts`, `ui/src/pages/InstanceClaudeVaults.tsx`, `ui/src/api/claudeVaults.ts`, **and the nav entries in both sidebars** (see §4.1), `packages/adapters/claude-local/src/server/{claude-vault,claude-host-login-pty}.ts` |
 | 5 | **Create agent from a login vault** — a button that opens New Agent with the runtime and the vault directory prefilled | [`Create agent from a login vault.md`](CustomCodeDoc/Create%20agent%20from%20a%20login%20vault.md) | `ui/src/lib/new-agent-preset.ts`, `ui/src/components/CreateAgentFromLoginButton.tsx`, `ui/src/pages/NewAgent.tsx` |
 | 6 | **Invite auto-accept guard** — `Boolean(invite) &&` as the first term of `shouldAutoAcceptHumanInvite` | [`Reviewing onboarding process and error messages.md`](CustomCodeDoc/Reviewing%20onboarding%20process%20and%20error%20messages.md), and `ReverseProxyCustomChanges.md` §0.1 #1 | `ui/src/pages/InviteLanding.tsx` |
 | 7 | ~~**Startup banner** — the Codex Home and OpenRouter rows~~ **RETIRED in v6 — see §4.2** | — | none — rows and helpers removed from `server/src/startup-banner.ts`; `startup-banner.test.ts` deleted |
@@ -365,6 +365,37 @@ are almost always kept:
   "@paperclipai/db" mock`, which is an **import** failure, never an assertion
   one. If the fork's provisioning imports widen again, expect that loop rather
   than a single addition.
+
+- `ui/src/components/CompanySettingsSidebar.tsx` **and**
+  `ui/src/components/CompanySettingsSidebar.production.tsx` — change sets 3 and
+  4's "Codex logins" / "Claude logins" nav entries. Added as a collision point
+  2026-09-08 **after the two tabs were missing from production builds for a
+  week and nobody could see why.**
+
+  **Upstream maintains a parallel `.production` component family** (added in
+  #12746 / #12748, the "streamlined navigation foundation"), and
+  [`App.tsx`](ui/src/App.tsx) picks between them at runtime:
+
+  ```tsx
+  <Route path=":companyPrefix" element={streamlinedUiEnabled ? <Layout /> : <ProductionLayout />}>
+  ```
+
+  The fork's entries went into the streamlined sidebar only. With the
+  streamlined UI **off** — which is the default — the two pages vanished from
+  the nav while **"Adapters" beside them stayed visible**, because that entry is
+  upstream's and exists in both files. That asymmetry is what made it look like
+  a hidden-settings or permissions problem: all three share the
+  `showPage("instance.adapters")` gate, so "Adapters is there but the other two
+  are not" appears impossible until you know there are two sidebars.
+
+  **Nothing failed.** The routes were registered for both modes the whole time,
+  so the pages stayed reachable by URL, the server routes were untouched, and
+  all 83 vault tests plus the sidebar suites passed throughout. **A feature can
+  be perfectly built, perfectly tested and completely unreachable.**
+
+  Guarded now by `verify-fork.sh` (§7.0), which asserts both names are present
+  in **both** sidebars. Whenever upstream adds a `.production` variant of a file
+  the fork has patched, assume the patch is missing from the new one.
 
 - `server/src/index.ts` — change set 11's three lines: the
   `startProvisioningWorker` import (~:94), the call that starts it (~:1824), and
@@ -808,7 +839,12 @@ corepack pnpm exec vitest run server/src/auth/proxy-header-auth.test.ts \
   server/src/middleware/proxy-header-actor.test.ts \
   server/src/__tests__/proxy-header-auth.integration.test.ts
 
-# change sets 3 and 4 — credential vaults
+# change sets 3 and 4 — credential vaults. The parity suite is the UI half: it
+# asserts the fork's two nav entries exist in BOTH settings sidebars, which is
+# what was missing for a week while every other check stayed green (Session 19,
+# Finding 7). 4/4 expected.
+corepack pnpm exec vitest run ui/src/components/CompanySettingsSidebar.fork-parity.test.ts
+
 corepack pnpm exec vitest run server/src/__tests__/codex-vault-login-service.test.ts \
   server/src/__tests__/claude-vault-login-service.test.ts \
   packages/adapters/codex-local/src/server/codex-vault.test.ts \
@@ -1466,6 +1502,59 @@ One thing it caught immediately, which is the argument for having it: the
 session's `express.d.ts` conflict resolution also contains the word. The check
 now counts the quoted union member. A guard that cannot tell a comment from code
 would have cried wolf on every future run until someone stopped believing it.
+
+#### Finding 7 — the Codex/Claude login tabs were invisible in production builds
+
+**Reported by the operator after testing the merged build**, and worth recording
+in full because every instinct about it was wrong.
+
+**Symptom:** "Codex logins" and "Claude logins" missing from Settings.
+**"Adapters" — sitting between them, on the identical visibility gate — was
+still there.**
+
+**What it was not.** The merge changed none of it:
+`git diff 60a77857b HEAD` over `CompanySettingsNav.tsx`,
+`CompanySettingsSidebar.tsx`, `App.tsx` and both vault pages is **empty**. All
+eight §4 files for change sets 3 and 4 were present, the four routes were
+registered, the built bundle contained the string "Codex logins", and the vault
+suites passed 83/83. Nothing had been lost and there was nothing to restore.
+
+**What it was.** Upstream maintains a parallel `.production` component family
+(#12746 / #12748), and `App.tsx:819` picks between them:
+
+```tsx
+<Route path=":companyPrefix" element={streamlinedUiEnabled ? <Layout /> : <ProductionLayout />}>
+```
+
+`Layout` → `CompanySettingsSidebar.tsx` — **has the fork's two entries.**
+`ProductionLayout` → `CompanySettingsSidebar.production.tsx` — **did not.**
+
+With the streamlined UI off, the production sidebar rendered, and it carried
+upstream's "Adapters" but not the fork's two. Fixed by mirroring the pair into
+the production sidebar; UI typecheck clean, sidebar and nav suites 12/12.
+
+**Three things to carry forward.**
+
+1. **A feature can be perfectly built, perfectly tested, and unreachable.** The
+   routes worked the whole time — the pages were live at their URLs — and every
+   test passed. Nothing in the suite asks "can a person get here?"
+2. **The symptom that looked impossible was the clue.** Three sibling entries
+   share one `showPage("instance.adapters")` gate, so "one renders and two do
+   not" cannot happen — *in one file*. It is the fact that made a
+   hidden-settings or permissions explanation impossible and pointed at a second
+   component. When an observation contradicts the source you are reading, check
+   whether you are reading the source that runs.
+3. **The standing rule this earns:** when upstream adds a `.production` (or any
+   parallel) variant of a file the fork has patched, **assume the patch is
+   missing from the new one.** Nothing conflicts, nothing fails, and no test
+   notices — the fork's hunk simply sits in a file that is no longer rendered.
+   `find ui/src -name "*.production.tsx"` currently lists 20 such files.
+
+**Guarded.** `verify-fork.sh` now asserts both names in **both** sidebars, the
+tab bar and `App.tsx`. Verified by deleting the entry and watching the guard go
+red, then restoring it. My earlier §6.5 checks covered the **server** routes
+only — server routes surviving proves nothing about whether a person can reach
+the page, which is exactly the hole this fell through.
 
 #### Convergence watch (§6.4 q3)
 

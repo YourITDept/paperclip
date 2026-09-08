@@ -207,6 +207,34 @@ export function CompanySettingsSidebar() {
               icon={Cpu}
             />
           )}
+          {/*
+            Fork-carried (CustomCodeDoc §4 change sets 3 and 4). These two must
+            be kept IN SYNC with CompanySettingsSidebar.tsx, which carries the
+            same pair.
+
+            Upstream added the `.production` layout family in #12746/#12748 and
+            `App.tsx` picks between them on `streamlinedUiEnabled`. The fork's
+            entries were added to the streamlined sidebar only, so with the
+            streamlined UI OFF the two pages became unreachable from the nav —
+            while "Adapters" beside them stayed visible, because that one is
+            upstream's and exists in both files. The routes were registered for
+            both modes the whole time, so the pages were reachable by URL and
+            nothing failed; they were simply invisible.
+          */}
+          {showPage("instance.adapters") && (
+            <SidebarNavItem
+              to={`${INSTANCE_SETTINGS_PATH_PREFIX}/codex-logins`}
+              label="Codex logins"
+              icon={KeyRound}
+            />
+          )}
+          {showPage("instance.adapters") && (
+            <SidebarNavItem
+              to={`${INSTANCE_SETTINGS_PATH_PREFIX}/claude-logins`}
+              label="Claude logins"
+              icon={KeyRound}
+            />
+          )}
         </div>
       </nav>
     </aside>

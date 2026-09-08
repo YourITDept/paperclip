@@ -10,13 +10,13 @@ It is the one file in this directory that is not append-only.
 
 ---
 
-## Current state — updated 2026-09-08 15:05
+## Current state — updated 2026-09-08 16:20
 
 | | |
 | --- | --- |
 | **Branch** | `W8-20260908a` |
 | **HEAD** | `bcede974a` "Updated the resume" · merge commit `e2339b7eb` |
-| **Working tree** | **Dirty — documentation + one new script.** The merge itself is committed. |
+| **Working tree** | **Dirty — one UI fix, documentation, one new script.** The merge itself is committed. |
 | **Active work item** | Session 19 — upstream merge (8 commits, upstream tip `297d8741f`) |
 | **Its document** | [`Review and Test Changes.md`](CustomCodeDoc/Review%20and%20Test%20Changes.md) §8, Session 19 |
 | **Rollback tag** | `pre-merge-backup-W8-20260908a` → `60a77857b` |
@@ -57,12 +57,33 @@ session entry is written (§8, Session 19) and change set 11 is registered.
 What remains is uncommitted, for the operator to review and commit:
 
 ```
-M CustomCodeDoc/Review and Test Changes.md    Session 19 entry, §7.0, 6 procedural fixes
+M ui/src/components/CompanySettingsSidebar.production.tsx   THE USER-VISIBLE FIX (below)
+M CustomCodeDoc/Review and Test Changes.md    Session 19 entry, §7.0, procedural fixes
 M CustomCodeDoc/SESSION-RESUME.md             this file
 M CustomCodeDoc/CHANGELOG.md                  change set 11 entry
 A CustomCodeDoc/Outseta provisioning worker.md  change set 11's document
 A scripts/verify-fork.sh                      the procedure, executable (§7.0)
 ```
+
+### The one user-visible fix in this tree
+
+**"Codex logins" and "Claude logins" were missing from Settings in production
+builds** — reported after testing the merged release. **Not caused by the
+merge**, which changed none of those files. Upstream keeps a parallel
+`.production` component family and `App.tsx:819` picks between them on
+`streamlinedUiEnabled`; the fork's two nav entries existed in the streamlined
+sidebar only. With the streamlined UI off, they vanished while **"Adapters" —
+on the identical gate, one line above — stayed visible**, because that entry is
+upstream's and lives in both files.
+
+The pages were reachable by URL the whole time and every test passed. Fixed by
+mirroring the pair into `CompanySettingsSidebar.production.tsx`. UI typecheck
+clean; sidebar + nav suites 12/12; guarded in `verify-fork.sh`.
+
+**Standing rule this earned:** when upstream adds a `.production` (or any
+parallel) variant of a file the fork has patched, **assume the patch is missing
+from the new one.** Nothing conflicts, nothing fails, no test notices.
+`find ui/src -name "*.production.tsx"` lists 20 such files today.
 
 **Before the next merge, run this instead of copying commands by hand:**
 
