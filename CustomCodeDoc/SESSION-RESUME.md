@@ -42,10 +42,27 @@ Upstream #13011 replaced the fork's 500-line `NewAgent.tsx` with a **14-line
 wrapper** around a new `NewAgentSetup` (1149 lines), and deleted the §4.1 canary
 test. The operator chose *take upstream's page, port later*.
 
-Consequence, live now: the vault button still navigates and still selects the
-runtime via `?adapterType=`, but **`parseNewAgentEnvPreset` is orphaned** —
-nothing reads `?env=CODEX_HOME=…`, so the vault path is no longer prefilled.
-The operator types it.
+Consequence, live now, and it is **worse than "the operator types it"** — that
+was the first reading and it was wrong. The vault button still navigates and
+still selects the runtime via `?adapterType=`, but:
+
+- `parseNewAgentEnvPreset` is orphaned — nothing reads `?env=CODEX_HOME=…`; and
+- **the new setup flow has no free-form environment field at all.**
+  `NewAgentSetup.tsx:329` sets `envBindings: nextConnection?.env ?? {}` — env
+  comes *only* from a selected connection. There is nowhere to type a vault
+  path during creation.
+
+So a vault-bound agent **cannot be created in one step any more.** The
+capability is not lost — `AgentConfigForm` still carries the env editor and is
+still rendered from `AgentDetail.tsx` — but the flow is now: create the agent,
+then open Agent detail and set `CODEX_HOME` / `CLAUDE_CONFIG_DIR` by hand.
+
+**Upstream has not converged on this.** Its new `SETUP_CREDENTIAL_KEYS`
+(`ui/src/lib/agent-setup-fields.ts`) maps adapters to **API keys**
+(`CURSOR_API_KEY`, `GEMINI_API_KEY`, …) and does not list `codex_local` or
+`claude_local` at all. A vault *directory* is a different concern, so
+"retire change set 5 and use upstream's flow" is **not** available on the
+evidence — retiring it would lose a capability upstream does not provide.
 
 **The cs5 suite reports 45 passing and that number means nothing about the fork's
 half** — it is upstream's tests. `verify-fork.sh` now prints a WARN for this
