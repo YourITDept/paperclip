@@ -20,6 +20,54 @@ they are the thing most likely to undo a fork change, but the detail lives in th
 
 ---
 
+## 2026-09-08 — Change set 11: Outseta provisioning worker (registered)
+
+**Status:** `COMMITTED` — on `W8-20260908a`. Registration itself is
+`AWAITING REVIEW` (documentation, uncommitted).
+**Document:** [`Outseta provisioning worker.md`](CustomCodeDoc/Outseta%20provisioning%20worker.md)
+
+**Not new code — new bookkeeping.** The module has been on the branch since
+Session 18 and grew through 2026-09-07/08, but it was never entered in the §4
+register, so no merge review had ever been told to check it. Session 19 found
+that gap while merging upstream `297d8741f` and closed it.
+
+**What the fork carries:** five net-new files under `server/src/provisioning/`
+(2115 lines) plus **three lines in `server/src/index.ts`** — the import, the
+`startProvisioningWorker(db, { heartbeat })` call, and `stop()` in the shutdown
+handler. An Outseta signup provisions an instance through a job queue the
+callback container inserts into, so **no inbound port is opened on the Paperclip
+container**. Off unless `PAPERCLIP_PROVISIONING_WORKER_ENABLED=true`.
+
+**Why registering it matters more than it sounds.** §6.2 cross-checks the
+post-merge diff against the §4 list and treats a vanished change set as the
+alarm. Until now this one was not on that list. Worse, it is the fork's **worst
+silent-failure risk**: lose the three `index.ts` lines in a conflict resolution
+and the build succeeds, the typecheck passes and every suite stays green while
+the instance onboards nobody, for ever. The provisioning suites do not catch it
+— they construct the handlers directly and never import `index.ts`.
+
+**The risk profile is inverted from the rest of §4**, which is the substance of
+the new document. The other change sets are hunks inside upstream files, at risk
+of being overwritten. This one is mostly net-new files that never conflict; what
+threatens it is **upstream changing an API its handlers call under an unchanged
+signature** — `issueService.create`'s `idempotencyKey`/`onDeduplicated`,
+`accessService.ensureRoleDefaultGrants`, `agentService.list`'s
+`includeTerminated`, `heartbeat.wakeup`. That list is now written down with what
+each silently breaks.
+
+**Coverage, stated honestly:** 17 tests across two suites cover `secret.set`,
+`agent.create` and `agent.task`. `instance.state`, `user.upsert`,
+`company.create` and `membership.set` have **no unit tests on this side** — they
+were verified live on `db_dev92` and have not regressed, but a merge breaking
+`ensureRoleDefaultGrants` would not be caught. Not `LIVE-VERIFIED` for the newer
+job types: no `agent.task` has been watched to completion on a running instance.
+
+**Open:** no budget cap on `agent.task` (it dispatches paid agent runs); the
+enqueue role is now a work-dispatch capability rather than a provisioning one;
+no park ceiling.
+
+---
+
 ## 2026-09-04 — Change set 10: duplicate agent fails with "Validation error"
 
 **Status:** `AWAITING REVIEW` — uncommitted on `W7-20260904a` @ `2f5a2153c`

@@ -309,9 +309,10 @@ RETIRED, so the numbered references throughout §8 still resolve. Do not
 | 5 | **Create agent from a login vault** — a button that opens New Agent with the runtime and the vault directory prefilled | [`Create agent from a login vault.md`](CustomCodeDoc/Create%20agent%20from%20a%20login%20vault.md) | `ui/src/lib/new-agent-preset.ts`, `ui/src/components/CreateAgentFromLoginButton.tsx`, `ui/src/pages/NewAgent.tsx` |
 | 6 | **Invite auto-accept guard** — `Boolean(invite) &&` as the first term of `shouldAutoAcceptHumanInvite` | [`Reviewing onboarding process and error messages.md`](CustomCodeDoc/Reviewing%20onboarding%20process%20and%20error%20messages.md), and `ReverseProxyCustomChanges.md` §0.1 #1 | `ui/src/pages/InviteLanding.tsx` |
 | 7 | ~~**Startup banner** — the Codex Home and OpenRouter rows~~ **RETIRED in v6 — see §4.2** | — | none — rows and helpers removed from `server/src/startup-banner.ts`; `startup-banner.test.ts` deleted |
-| 8 | **Local packaging scripts** | [`builds paperclip.md`](CustomCodeDoc/builds%20paperclip.md) | `scripts/pack-local.sh`, `scripts/reset-local.sh`, `releases/` |
+| 8 | **Local packaging and verification scripts** | [`builds paperclip.md`](CustomCodeDoc/builds%20paperclip.md), and §7.0 for `verify-fork.sh` | `scripts/pack-local.sh`, `scripts/reset-local.sh`, `scripts/verify-fork.sh`, `releases/` |
 | 9 | ~~**`OPENROUTER_API_KEY` in the ACPX `codex` host-env allowlist**~~ **RETIRED in v6 — see §4.2.** The key is now bound per-agent instead of inherited from the host | §8 Session 12, Finding 2 (historical) | none — entry removed from `ACPX_INHERITED_PROVIDER_ENV_KEYS` in `packages/adapter-utils/src/acpx-engine/execute.ts`; guard removed from `execute-identity.test.ts` |
 | 10 | **Duplicate agent — retired-key drop and redacted-env restore** — a duplicate drops `runtimeConfig.modelProfiles` (rejected since upstream #12683) and names its source via a new optional `duplicateFromAgentId` so the server can restore `adapterConfig.env` values the client only ever held redacted | [`Duplicate agent fix.md`](CustomCodeDoc/Duplicate%20agent%20fix.md) | `ui/src/lib/duplicate-agent-payload.ts`, `packages/shared/src/validators/agent.ts` (`createAgentSchema`), `server/src/routes/agents.ts` (`restoreDuplicateSourceEnv`, wired into the create **and** hire paths) |
+| 11 | **Outseta provisioning worker** — an in-process worker that drains `provisioning.provisioning_jobs` into companies, users, memberships, secrets, agents and agent tasks, so an Outseta signup provisions an instance **without opening an inbound port**. Off unless `PAPERCLIP_PROVISIONING_WORKER_ENABLED=true` | [`Outseta provisioning worker.md`](CustomCodeDoc/Outseta%20provisioning%20worker.md) | `server/src/provisioning/{store,handlers,worker,index,run-once}.ts` (net-new), `server/src/index.ts` (two lines) |
 
 ### 4.1 The files where fork and upstream both edit
 
@@ -351,10 +352,39 @@ are almost always kept:
   `successful-run-handoff-state.ts`; that module touches `heartbeatRuns` at
   **module scope**, so the import throws unless the mock defines it. The mock is
   upstream's file and upstream edits it (`0ffc09147` did), which is what makes
-  this a collision rather than a plain fork change. **Currently failing and left
-  unfixed** — the one-line repair is `heartbeatRuns: {},` beside the existing
-  `authUsers: {}` entries. The canary is the suite itself: it fails at import
-  with `No "heartbeatRuns" export is defined on the "@paperclipai/db" mock`.
+  this a collision rather than a plain fork change. **REPAIRED 2026-09-08
+  (Session 19) — now 18/18**, after two sessions during which the suite did not
+  execute at all.
+
+  **It was not the one-line repair recorded here.** It needed five mock entries,
+  not one: `agentWakeupRequests`, `documents`, `heartbeatRuns`, `issueDocuments`,
+  `issues`. They cannot be listed in advance — the import throws at *module
+  scope*, so vitest names exactly one missing export at a time, and each is
+  found by adding the previous one and re-running. The canary is unchanged:
+  `Tests: no tests` plus `No "<name>" export is defined on the
+  "@paperclipai/db" mock`, which is an **import** failure, never an assertion
+  one. If the fork's provisioning imports widen again, expect that loop rather
+  than a single addition.
+
+- `server/src/index.ts` — change set 11's three lines: the
+  `startProvisioningWorker` import (~:94), the call that starts it (~:1824), and
+  `provisioningWorker.stop()` in the shutdown handler (~:1836). Added as a
+  collision point 2026-09-08 (Session 19). Upstream edits this file constantly.
+
+  **This is the fork's worst silent-failure risk, because nothing goes red.** If
+  those lines are lost in a conflict resolution the build succeeds, the
+  typecheck passes and every suite stays green — the instance simply onboards
+  nobody, for ever. The provisioning suites do **not** catch it: they construct
+  the handlers directly and never import `index.ts`. The only tells are the
+  `grep` in §6.5 and the absence of `provisioning: worker enabled` in the boot
+  log.
+
+  Note the risk here is the *opposite* of the rest of §4.1. The module's other
+  five files are net-new and therefore never conflict; what threatens change set
+  11 is upstream changing an API its handlers call, under an unchanged
+  signature. That list is in
+  [`Outseta provisioning worker.md`](CustomCodeDoc/Outseta%20provisioning%20worker.md)
+  and re-checking it is part of §6.4.
 
 **v6 removed two of the four.** `packages/adapter-utils/src/acpx-engine/execute.ts`
 and `packages/adapters/codex-local/src/server/execute.ts` were collision points
@@ -597,6 +627,15 @@ For each incoming commit, ask the three questions in order:
 ```bash
 grep -n "codexVault\|claudeVault" server/src/app.ts server/src/routes/index.ts
 grep -n "codex-vaults\|claude-vaults" server/src/__tests__/openapi-routes.test.ts
+
+# change set 11 — MUST print 3 lines: the import, the start, the stop.
+# Nothing else detects the loss of these: the build, the typecheck and every
+# suite all stay green while the instance silently onboards nobody.
+grep -n "startProvisioningWorker\|provisioningWorker.stop" server/src/index.ts
+
+# change set 11 — the exclusion set upstream emptied in Session 19. MUST print
+# both. Losing them turns openapi-routes.test.ts red naming the two files.
+grep -c "codex-vaults.ts\|claude-vaults.ts" server/src/__tests__/openapi-routes.test.ts
 ```
 
 The two `execute.ts` greps that used to live here were dropped in v6 along with
@@ -607,6 +646,35 @@ you want is "nothing fork-carried is in those files any more."
 
 ## 7. The test procedure
 
+### 7.0 The short version — `scripts/verify-fork.sh`
+
+**Added Session 19.** Everything in §6.5, §7.1, §7.2 and §7.3 is executable:
+
+```bash
+./scripts/verify-fork.sh guards     # ~3 min   the §6.5 greps + toolchain pins
+./scripts/verify-fork.sh targeted   # ~15 min  the above + typecheck + §7.2 suites
+./scripts/verify-fork.sh full       # ~90 min  everything, incl. the serialized re-run
+./scripts/verify-fork.sh            # guards + targeted
+```
+
+Results land in `$OUT` (default `/tmp/paperclip-verify`) with a `summary.tsv`,
+and the exit status is non-zero if anything regressed.
+
+**Why it exists rather than the commands being copied by hand.** Every trap in
+§7.1 and §7.5 is a thing that makes a green result untrue — the group abort that
+skips whole projects, the serialized truncation that hides 59% of the suites,
+the four `PAPERCLIP_*` variables that fail suites for reasons unrelated to the
+code, the OOM that looks like a type error. Each was found the expensive way and
+then forgotten by the next session. The script carries them so they cannot be.
+
+**It is a floor, not a ceiling.** It runs what is known to matter and classifies
+nothing — read §7.4 and §7.5 before believing any failure it reports. The
+closing banner it prints is that reminder in short form.
+
+> **Baselines drift upward.** A suite count *above* the baseline is upstream
+> adding cases and is reported as a note, not a failure. A count going **down**
+> is the alarm. When a baseline moves, update it here **and** in §7.2.
+
 ### 7.1 Run the full suite — one group per process
 
 > **Do not use `pnpm run test:run` on this host.** It aborts after the first
@@ -614,7 +682,7 @@ you want is "nothing fork-carried is in those files any more."
 
 ```bash
 SC=/tmp/paperclip-tests; mkdir -p $SC
-CLEAN="env -u PAPERCLIP_CODEX_HOME -u PAPERCLIP_PUBLIC_URL -u PAPERCLIP_TELEMETRY_DISABLED"  # see 7.5 #2
+CLEAN="env -u PAPERCLIP_CODEX_HOME -u PAPERCLIP_PUBLIC_URL -u PAPERCLIP_TELEMETRY_DISABLED -u PAPERCLIP_NO_BROWSER"  # see 7.5 #2
 
 corepack pnpm --filter @paperclipai/plugin-sdk ensure-build-deps  # see 7.5 #1
 
@@ -754,7 +822,8 @@ corepack pnpm exec vitest run packages/adapters/codex-local/src/server/codex-hom
 # change set 5 — create agent from a vault
 corepack pnpm exec vitest run ui/src/lib/new-agent-preset.test.ts ui/src/pages/NewAgent.test.tsx
 
-# change set 6 — invite auto-accept guard (18/18 expected)
+# change set 6 — invite auto-accept guard (19/19 expected; was 18 before
+# upstream added a case, Session 19)
 corepack pnpm exec vitest run ui/src/pages/InviteLanding.test.tsx
 
 # change set 9 — RETIRED in v6 (§4.2). The suite remains; the OPENROUTER_API_KEY
@@ -763,14 +832,24 @@ corepack pnpm exec vitest run \
   packages/adapter-utils/src/acpx-engine/execute-identity.test.ts
 
 # change set 10 — duplicate agent (added 2026-09-04)
-# 5/5 and 67/67 expected. The server suite is the §4.1 canary for the fork's
+# 5/5 and 69/69 expected (was 67 before upstream added two, Session 19). The server suite is the §4.1 canary for the fork's
 # first change in server/src/routes/agents.ts.
 corepack pnpm exec vitest run ui/src/lib/duplicate-agent-payload.test.ts
 corepack pnpm exec vitest run \
   server/src/__tests__/agent-permissions-routes.test.ts
 
+# the fork's provisioning module (O-6 — not yet a registered change set).
+# 17/17 expected. This is the only coverage of `server/src/provisioning/` and
+# of the two lines it adds to `server/src/index.ts`.
+corepack pnpm exec vitest run --project @paperclipai/server \
+  server/src/__tests__/provisioning-agent-codex-home.test.ts \
+  server/src/__tests__/provisioning-agent-task.test.ts
+
 # change set 10 also adds a field to createAgentSchema, which feeds the generated
-# OpenAPI document. 5/5 expected.
+# OpenAPI document. 5/5 expected. This suite is ALSO the canary for the §4.1
+# semantic collision resolved in Session 19 — it fails in one direction if the
+# fork's vault exclusions are dropped, and in the other if upstream's three
+# entries are wrongly re-added.
 corepack pnpm exec vitest run server/src/__tests__/openapi-routes.test.ts
 ```
 
@@ -835,6 +914,39 @@ recording it:
 Record every non-passing suite in the session entry (§7) with its class, even
 when it is not ours. The value of the register is that a failure appearing twice
 is recognised as standing rather than re-investigated from scratch.
+
+#### Take a pre-merge baseline — it costs one command and saves an hour
+
+**Added Session 19.** Before merging, run the suites §4.1 already lists as
+failing, on the clean tree:
+
+```bash
+$CLEAN corepack pnpm exec vitest run --project @paperclipai/server \
+  server/src/__tests__/server-startup-feedback-export.test.ts
+```
+
+A failure recorded *before* the merge is classified `Pre-existing` in seconds.
+The same failure discovered afterwards looks exactly like merge damage and gets
+investigated as such. Session 19 did this and closed the question immediately.
+
+#### Byte-identity is a valid substitute for the scratch-worktree check
+
+The `Pre-existing upstream` row above prescribes `git checkout $UPSTREAM_TIP` in
+a scratch worktree, which needs its own `node_modules` and is expensive. When
+the failing suite and the code it exercises are **byte-identical to the upstream
+tip**, fork causation is not available as an explanation and the worktree adds
+nothing:
+
+```bash
+git diff --quiet $UPSTREAM_TIP HEAD -- <impl> && echo identical
+git diff --quiet $UPSTREAM_TIP HEAD -- <test> && echo identical
+git log $PREV_UPSTREAM_TIP..$FORK_TIP -- <impl>      # empty = fork never touched it
+```
+
+Then check the suite's imports do not reach fork-carried code. Session 19 used
+exactly this to classify six new `heartbeat-*` failures as upstream's after
+upstream rewrote `heartbeat.ts` by 345 lines. **State the substitution when you
+use it** — it is an argument, not a measurement.
 
 ---
 
@@ -951,15 +1063,37 @@ on that list. The tell is the assertion message: `expected null not to be null`.
 
 Verified: with the variable cleared, both cases pass.
 
+##### 2b-3. `PAPERCLIP_NO_BROWSER` — the CLI onboard-service suite
+
+**Found 2026-09-08 (Session 19).** `cli/src/__tests__/onboard-service.test.ts` →
+*"uses the ready service runtime port before opening the dashboard"* asserts
+`openDashboard` was called with `http://127.0.0.1:3101`. The container exports
+`PAPERCLIP_NO_BROWSER=1`, which suppresses the call entirely.
+
+Verified: with the variable cleared, **17/17**.
+
+**The tell is different from the first three, and that is the lesson.** The
+other three produced a *wrong value* — a host, a URL, a null. This one produces
+`Number of calls: 0`. A variable that suppresses an action leaves an **absence**,
+and an absence does not look like contamination; it looks like a broken
+code path. When an assertion fails because something was never called, check
+`env | grep PAPERCLIP_` for a variable that would have turned it off.
+
 ##### 2c. Treat this as a class, not two bugs
 
 The container exports ~24 `PAPERCLIP_*` variables for the live deployment and the
-suite assumes a clean environment. **Three have bitten so far** —
+suite assumes a clean environment. **Four have bitten so far** —
 `PAPERCLIP_CODEX_HOME` (retired in v6, no longer reachable),
-`PAPERCLIP_PUBLIC_URL`, and `PAPERCLIP_TELEMETRY_DISABLED`, leaving two live.
-`PAPERCLIP_DEPLOYMENT_MODE=authenticated`,
-`PAPERCLIP_PROXY_AUTH_ENABLED=true`, `PAPERCLIP_ALLOWED_HOSTNAMES` and
-`PAPERCLIP_CONFIG` remain plausible next candidates.
+`PAPERCLIP_PUBLIC_URL`, `PAPERCLIP_TELEMETRY_DISABLED`, and
+`PAPERCLIP_NO_BROWSER` — leaving three live.
+
+> **The prediction has now missed three times in a row.** Earlier versions of
+> this section named `PAPERCLIP_DEPLOYMENT_MODE`, `PAPERCLIP_PROXY_AUTH_ENABLED`,
+> `PAPERCLIP_ALLOWED_HOSTNAMES` and `PAPERCLIP_CONFIG` as the likely next
+> candidates. The actual next ones were `PAPERCLIP_TELEMETRY_DISABLED` (a
+> different workspace package) and `PAPERCLIP_NO_BROWSER` (a suppression flag,
+> not a value). Those four remain plausible — but treat the *class* as the
+> finding and the candidate list as a hint, not a checklist.
 
 > The third one is the reason to read this as a standing class rather than a
 > list. It was not on the predicted-candidates list above, it lives in a
@@ -1118,6 +1252,230 @@ both still exist if per-test output is wanted.
 > **Numbering note.** The header at the top of this file calls the session log
 > "§7". It is this section, **§8** — §7 is the test procedure. Kept as-is so old
 > cross-references still resolve; read "§7 session log" as this section.
+
+### 2026-09-08 — Session 19: upstream merge into `W8-20260908a` (8 commits)
+
+**Who:** Claude (Opus 5) with chris@anderson-family.com
+**Branch:** `W8-20260908a` @ `60a77857b` + upstream `297d8741f` (merge base `bac60d9d3`)
+**Merge commit:** `e2339b7eb`, made by the operator after review. The assistant
+staged it and stopped, per RULE 0.
+**Rollback tag:** `pre-merge-backup-W8-20260908a` → `60a77857b`
+
+**Incoming:** 8 commits, 174 files, +7174/−864. Merge base was exactly PR #45's
+upstream tip, so the lineage is clean. No renames and no deletions upstream
+(§6.4 q2 clear), and six new migrations `0240`–`0245`.
+
+#### Headline: no fork-caused failures
+
+Every §4 change set survived, every targeted suite is green, and all 20 failing
+suites across the full run are either already in the register or provably
+upstream's. **Typecheck exit 0, zero `error TS`.**
+
+#### The three conflicts
+
+| File | Kind | Resolution |
+| --- | --- | --- |
+| `server/src/types/express.d.ts` | adjacency | Both sides: upstream's `identityContextId`, plus the fork's `proxy_header` union. The union is kept multi-line deliberately so a future upstream edit conflicts visibly instead of burying the entry in a long single line |
+| `server/src/__tests__/openapi-routes.test.ts` | **semantic** | See below |
+| `pnpm-lock.yaml` | regenerate | Took upstream's (`392ab26b1` refreshed it). `--frozen-lockfile` then installed clean — which is itself the evidence that **the fork carries no dependency divergence** |
+
+**The openapi one is the fork's second semantic collision** (the first was
+`NewAgent.tsx`, Session 15), and it is the reason §5.3's "keep both sides" rule
+has an exception clause. Upstream did not edit `explicitOpenApiCoverageExclusions`
+— it **emptied** it, `new Set<string>()`, and moved its three entries
+(`pipelines.ts`, `cases.ts`, `smoke-lab.ts`) up into `apiPrefixes`. That flips
+those routes from *excluded* to *required in the OpenAPI document*.
+
+Keeping both sides mechanically would have re-excluded upstream's three and
+silently undone their change, because the exclusion `continue`s before
+`apiPrefixes` is ever read. Raised with the operator per §5.3 rather than
+resolved unilaterally; the operator chose **the fork's two entries only**.
+`openapi-routes.test.ts` then passes 5/5, which proves the resolution in both
+directions at once — upstream's three are now covered, the fork's two still are
+not.
+
+#### Full suite — four processes, then the serialized re-run
+
+| Group | Test Files | Tests |
+| --- | --- | --- |
+| `general-server` | 15 failed, 494 passed, 2 skipped (511) | 62 failed, 6912 passed, 13 skipped (6987) |
+| `general-workspaces-a` — `@paperclipai/ui` | **561 passed (561)** | **5522 passed (5522)** |
+| `general-workspaces-a` — `paperclipai` (CLI) | 1 failed, 61 passed (62) | 1 failed, 477 passed (478) |
+| `general-workspaces-b` | 1 failed, 85 passed (86) | 2 failed, 1157 passed, 5 skipped |
+| `--mode serialized` (as run by the script) | **truncated — 58 of 143** | meaningless, see below |
+| **serialized, re-run per file** | **3 failed of 143** | the real number |
+
+`general-workspaces-a` printed **2 summary blocks**, so the Session 12 trap was
+avoided and the CLI project genuinely ran.
+
+#### §7.2 targeted suites — all green
+
+| Change set | Result | Note |
+| --- | --- | --- |
+| 1 — proxy header auth | 28/28 | |
+| 3 + 4 — credential vaults | 83/83 | |
+| 5 — vault preset | 20/20 | |
+| 6 — invite guard | **19**/19 | §7.2 says 18 expected; upstream added one |
+| 10 — duplicate agent | 5/5 and **69**/69 | §7.2 says 67; upstream added two |
+| 10 — openapi | 5/5 | the semantic-conflict canary |
+| provisioning (codex home + `agent.task`) | 17/17 | not yet in §4 — see O-6 |
+
+Both `restoreDuplicateSourceEnv` call sites survived, **including the hire path**
+that §4.1 warns is the one a conflict tends to half-resolve.
+
+#### Finding 1 — a FOURTH member of the §7.5 #2 env-leak class: `PAPERCLIP_NO_BROWSER`
+
+The CLI failure was `cli/src/__tests__/onboard-service.test.ts` →
+*"uses the ready service runtime port before opening the dashboard"*, asserting
+`openDashboard` was called with `http://127.0.0.1:3101`. It was called **0
+times** — because the container exports `PAPERCLIP_NO_BROWSER=1` and the suite
+never scrubs it. Cleared: **17/17**.
+
+§7.5 #2c predicted `PAPERCLIP_DEPLOYMENT_MODE`, `PAPERCLIP_PROXY_AUTH_ENABLED`,
+`PAPERCLIP_ALLOWED_HOSTNAMES` and `PAPERCLIP_CONFIG` as the next candidates.
+**It was none of them**, which is the third time running that the specific
+prediction missed and the class held. The `$CLEAN` recipe in §7.1 has been
+updated to unset it.
+
+Note the tell was *"called 0 times"*, not a wrong value — a variable that
+suppresses an action produces an absence, and an absence does not look like
+contamination. Worth remembering when the next one appears.
+
+#### Finding 2 — the serialized truncation is worse than Session 12 recorded
+
+`--mode serialized` stopped at `heartbeat-dependency-scheduling.test.ts` after
+**58 of 143** suites: **85 (59%) never ran.** Session 12 measured 80 of 140
+(57%); the loss has grown with the suite.
+
+Its printed `Tests 4 failed | 3 passed (7)` is that one file's tally and nothing
+more. Re-running every suite in its own process (the §7.1 loop) gives the real
+answer: **3 failures of 143**. One of the three,
+`heartbeat-issue-liveness-escalation.test.ts`, sits *after* the abort point and
+was therefore **invisible in every serialized run this fork has recorded.**
+
+Do not quote a serialized tally that came from the script. It is a lower bound
+on a number nobody can see.
+
+#### Finding 3 — six new `heartbeat-*` failures, and they are upstream's
+
+Upstream rewrote `heartbeat.ts` by 345 lines in `1cc45086d`, and six heartbeat
+suites not previously in the register went red:
+
+```
+heartbeat-accepted-plan-workspace-refresh   heartbeat-stale-queue-invalidation
+heartbeat-direct-adapter-native-isolation   heartbeat-workspace-branch-containment
+heartbeat-plugin-environment                heartbeat-workspace-finalize-branch
+```
+
+All 15 `general-server` failures were re-run **individually on an idle machine**
+and all 15 reproduced, so none is contention.
+
+Classified **pre-existing upstream**, on evidence rather than inference:
+
+- `git log bac60d9d3..60a77857b -- server/src/services/heartbeat.ts` is **empty**
+  — the fork has never touched that file.
+- `heartbeat.ts` and all six test files are **byte-identical to `297d8741f`**
+  (`git diff --quiet 297d8741f HEAD -- <file>` for each).
+- The only shared import across the six is `server/src/adapters/index.ts`, also
+  byte-identical to upstream. None of them reaches the provisioning module, the
+  proxy-header auth, or either vault service.
+
+There is no fork content anywhere in that code path, so fork causation is not
+available as an explanation. **Caveat, stated rather than glossed:** they were
+not run against a pristine upstream checkout, which would need its own
+`node_modules`. The byte-identity argument is what stands in for it.
+
+`packages/adapter-utils/src/github-launcher.test.ts` (2 failures,
+`general-workspaces-b`) is the same story and simpler — the file was **created
+by this merge**, tests a managed-GitHub-launcher feature the fork carries
+nothing in, and is byte-identical to upstream.
+
+#### Finding 4 — §4.1's "one-line repair" was wrong, and the shape matters
+
+`server-startup-feedback-export.test.ts` has been red since Session 18. A
+**pre-merge baseline was taken on the clean tree first**, which classified it as
+pre-existing in seconds instead of investigating it as merge damage. That step
+is cheap and is now recommended in §7.4.
+
+§4.1 recorded the fix as one line, `heartbeatRuns: {}`. It needed **five** mock
+entries: `agentWakeupRequests`, `documents`, `heartbeatRuns`, `issueDocuments`,
+`issues`. They cannot be predicted — the import throws at **module scope**, so
+vitest reports exactly one missing name at a time and each is found by adding
+the last and re-running. Signature: `Tests: no tests` plus
+`No "<name>" export is defined`, never an assertion failure.
+
+Now **18/18** — a suite that had not executed at all for two sessions. Left as a
+separate file in the tree so it could be reviewed apart from the merge.
+
+If the fork's provisioning imports widen again, expect the loop, not a line.
+
+#### Finding 5 — the provisioning module is not in the §4 register (O-6)
+
+`server/src/provisioning/` (five files) plus two lines in `server/src/index.ts`
+is now the fork's largest carried change, and **nothing in this procedure
+protects it.** It came through this merge untouched — verified that
+`issues.ts`'s `create` signature, `issue-assignment-wakeup.ts` and
+`agent-assignability.ts` are all unchanged — but that was luck, not a check.
+
+**DONE, same session.** Registered as **change set 11**: a §4 table row, a §4.1
+collision entry for `server/src/index.ts`, the two suites in §7.2, a §6.5 grep,
+a per-change-set document
+([`Outseta provisioning worker.md`](CustomCodeDoc/Outseta%20provisioning%20worker.md))
+and a `CHANGELOG.md` entry.
+
+The document says one thing worth repeating here, because it inverts the
+assumption the rest of §4 is built on. **The other change sets are hunks inside
+upstream files, at risk of being overwritten. This one is mostly net-new files
+that never conflict** — its exposure is upstream changing an API its handlers
+call *under an unchanged signature*: `issueService.create`'s
+`idempotencyKey`/`onDeduplicated`, `accessService.ensureRoleDefaultGrants`,
+`agentService.list`'s `includeTerminated`, `heartbeat.wakeup`. Those four were
+checked by hand this session because nothing told anyone to. They are now
+written down with what each silently breaks.
+
+And the three `index.ts` lines are **the fork's worst silent failure**: lose them
+and the build, the typecheck and every suite stay green while the instance
+onboards nobody, for ever. The provisioning suites do not catch it — they
+construct the handlers directly and never import `index.ts`. Only the §6.5 grep
+does.
+
+#### Finding 6 — the procedure is now executable: `scripts/verify-fork.sh`
+
+Every trap this document records is a thing that makes a green result untrue,
+and each was found the expensive way and then forgotten by the next session.
+They are now in a script (§7.0), which was written and **run** this session:
+`guards` and `targeted` both pass, exit 0.
+
+```
+./scripts/verify-fork.sh guards     ~3 min    §6.5 greps + toolchain pins
+./scripts/verify-fork.sh targeted   ~15 min   + typecheck + the §7.2 suites
+./scripts/verify-fork.sh full       ~90 min   + four groups + serialized per file
+```
+
+It encodes the four `PAPERCLIP_*` scrubs, `ensure-build-deps`, the
+two-summary-block assertion for `general-workspaces-a`, the serialized per-file
+loop, the OOM-versus-type-error discrimination, and every §6.5 grep — including
+the three-line `index.ts` check that is the only detector of change set 11
+disappearing.
+
+**It classifies nothing**, deliberately. It prints the §7.4 / §7.5 classification
+rules as a closing banner and stops. Reading a failure is still a person's job.
+
+One thing it caught immediately, which is the argument for having it: the
+`proxy_header` grep returned **2**, not 1, because the comment added during this
+session's `express.d.ts` conflict resolution also contains the word. The check
+now counts the quoted union member. A guard that cannot tell a comment from code
+would have cried wolf on every future run until someone stopped believing it.
+
+#### Convergence watch (§6.4 q3)
+
+Upstream's `1cc45086d` adds `server/src/services/run-identity.ts` and an
+`identityContextId` on the actor — a per-run notion of *which human's GitHub
+credentials an agent acts with*. That is adjacent to change set 1's
+`proxy_header` actor (*which human is authenticated at the edge*) without
+overlapping it: the incoming diff touches `proxy_header` **zero** times. Not a
+convergence opportunity yet. Worth re-reading if upstream generalises the
+identity context beyond GitHub.
 
 ### 2026-09-06 — Session 18: upstream merge into `W8-260906b` (34 commits)
 
