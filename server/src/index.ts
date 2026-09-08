@@ -1813,7 +1813,15 @@ export async function startServer(): Promise<StartedServer> {
   
   // Outseta provisioning. Inert unless PAPERCLIP_PROVISIONING_WORKER_ENABLED
   // is set: no timer, no query, no connection. See server/src/provisioning/.
-  const provisioningWorker = startProvisioningWorker(db as any);
+  //
+  // The heartbeat is handed in because `agent.task` wakes the agent it has just
+  // assigned an issue to. It is THIS process's scheduler, never one the
+  // provisioning module builds for itself — `heartbeatService` claims runs and
+  // holds leases, so a second instance would be a second claimant. When the
+  // scheduler is disabled (`HEARTBEAT_SCHEDULER_ENABLED=false`) `heartbeat` is
+  // null, and `agent.task` still creates the issue and reports that it woke
+  // nobody rather than pretending it did.
+  const provisioningWorker = startProvisioningWorker(db as any, { heartbeat });
 
   const shutdown = async (
     signal: "SIGINT" | "SIGTERM",

@@ -27,11 +27,18 @@ import { and, count, countDistinct, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { authUsers, companies, companyMemberships } from "@paperclipai/db";
 import type { HumanCompanyMembershipRole } from "@paperclipai/shared";
+import { ISSUE_PRIORITIES, ISSUE_STATUSES } from "@paperclipai/shared";
 import { accessService } from "../services/access.js";
 import { agentService } from "../services/agents.js";
 import { secretService } from "../services/secrets.js";
 import { companyService } from "../services/companies.js";
+import { issueService } from "../services/issues.js";
+import {
+  queueIssueAssignmentWakeup,
+  type IssueAssignmentWakeupDeps,
+} from "../services/issue-assignment-wakeup.js";
 import { normalizeHumanRole } from "../services/company-member-roles.js";
+import { HttpError } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import type { ProvisioningStore } from "./store.js";
 
@@ -100,6 +107,29 @@ function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+/**
+ * Translate an assignability refusal into a permanent failure.
+ *
+ * `assertAssignableAgent` throws a 409 whose `details` already carry
+ * `agent_not_assignable` and the reason — `assignee_terminated`,
+ * `pending_approval`, one of the org-chain reasons. Reusing Paperclip's own
+ * code rather than minting one keeps the operator reading a single vocabulary.
+ *
+ * None of those change on a retry, so they must not spend the failure budget
+ * five times before anyone sees them. Anything else is passed through
+ * untouched, so a genuinely transient database error still retries.
+ */
+function asPermanentAssignmentError(err: unknown, agentName: string): unknown {
+  if (!(err instanceof HttpError)) return err;
+  const details = (err.details ?? null) as { code?: unknown; reason?: unknown } | null;
+  if (details?.code !== "agent_not_assignable") return err;
+  const reason = typeof details.reason === "string" ? details.reason : "unknown";
+  return new PermanentJobError(
+    `cannot assign work to ${agentName}: ${reason} (${err.message})`,
+    "agent_not_assignable",
+  );
+}
+
 function readInt(value: unknown): number | null {
   if (value === null || value === undefined) return null;
   const parsed = typeof value === "number" ? value : Number(value);
@@ -159,11 +189,43 @@ export function roleFor(payload: Record<string, unknown>): HumanCompanyMembershi
   return "operator";
 }
 
-export function provisioningHandlers(db: Db, store: ProvisioningStore) {
+/**
+ * What a handler knows about the row it is applying, beyond the payload.
+ *
+ * Only `agent.task` reads it today, and only for the idempotency key.
+ */
+export type ProvisioningJobContext = {
+  /** `provisioning_jobs.idempotency_key` for the row being applied. */
+  idempotencyKey: string;
+};
+
+export type ProvisioningHandlerDeps = {
+  /**
+   * The process's heartbeat scheduler, for waking an agent that has just been
+   * given work.
+   *
+   * PASSED IN, NEVER CONSTRUCTED HERE. `heartbeatService` is a stateful
+   * scheduler that claims runs and holds leases; a second instance inside one
+   * process is a bug, not a duplicate object.
+   *
+   * Null when `HEARTBEAT_SCHEDULER_ENABLED=false`, in which case there is
+   * nothing to wake and `agent.task` says so in its result rather than
+   * pretending otherwise.
+   */
+  heartbeat?: IssueAssignmentWakeupDeps | null;
+};
+
+export function provisioningHandlers(
+  db: Db,
+  store: ProvisioningStore,
+  deps: ProvisioningHandlerDeps = {},
+) {
   const access = accessService(db);
   const companiesSvc = companyService(db);
   const agentsSvc = agentService(db);
   const secretsSvc = secretService(db);
+  const issuesSvc = issueService(db);
+  const heartbeat = deps.heartbeat ?? null;
 
   /**
    * Find or create the `user` row.
@@ -986,13 +1048,196 @@ export function provisioningHandlers(db: Db, store: ProvisioningStore) {
     return { agentId: agent.id, name, companyId, secretId, codexHomeSecretId, created: true };
   }
 
-  const handlers: Record<string, (payload: Record<string, unknown>) => Promise<JobResult>> = {
+  /**
+   * Resolve an agent by NAME within a company.
+   *
+   * Same rule as `secretKey` and `codexHome`: the onboarding side names things
+   * and this side resolves them, because it cannot know a uuid. PARKS when the
+   * name does not resolve — on a fresh instance a task queued behind a plan
+   * expansion can arrive seconds before the `agent.create` that makes it.
+   */
+  async function resolveAgentByName(companyId: string, agentName: string) {
+    // `includeTerminated` deliberately. `list` hides terminated agents by
+    // default, and without this a task addressed to one would look like a task
+    // addressed to an agent that does not exist yet — so it would PARK, waiting
+    // for a condition that never arrives, invisible to the queue check by
+    // design. Found it here rather than in production. Resolving it means the
+    // create below refuses it loudly as `agent_not_assignable` instead.
+    const agent = await agentsSvc
+      .list(companyId, { includeTerminated: true })
+      .then((rows) => rows.find((row) => row.name === agentName) ?? null);
+    if (!agent) {
+      // The name is in the message on purpose: a task resolves a company AND an
+      // agent, and "not found" without it sends the reader to the wrong half of
+      // the payload.
+      throw new ParkJobError(`waiting for agent ${agentName} in this company`);
+    }
+    return agent;
+  }
+
+  /** The board label when the payload sends none: the command's first line. */
+  function firstLine(command: string): string {
+    const line = command.split("\n", 1)[0]?.trim() ?? "";
+    // Never empty — `readString` already rejected an all-whitespace command, so
+    // a blank first line means the command starts with newlines and the second
+    // line is the real one.
+    const source = line || command.trim();
+    return source.length > 80 ? `${source.slice(0, 79).trimEnd()}…` : source;
+  }
+
+  /**
+   * Give a named agent a piece of work.
+   *
+   * There is no task table in Paperclip and no RPC to call: the unit of work is
+   * an ISSUE, and assigning it is setting `issues.assignee_agent_id`. So this
+   * creates one issue, assigned, and then wakes the agent.
+   *
+   * THIS IS THE FIRST JOB TYPE THAT SPENDS MONEY ON BEING APPLIED. Every other
+   * payload describes state to converge on; this one is a command an agent runs
+   * with its own credentials. Two things follow, and both are load-bearing
+   * below: the status must not silently be one that wakes nobody, and a
+   * re-queued row must not buy the same run twice.
+   */
+  async function agentTask(
+    payload: Record<string, unknown>,
+    job: ProvisioningJobContext,
+  ): Promise<JobResult> {
+    const agentName = readString(payload.agentName);
+    const command = readString(payload.command);
+    if (!agentName || !command) {
+      throw new PermanentJobError(
+        "agentName and command are both required",
+        "invalid_payload",
+      );
+    }
+
+    // Validated here rather than left to the insert. An unknown status is a
+    // `text` column with no check constraint, so it would be written happily
+    // and produce an issue no board shows and no agent picks up.
+    const status = readString(payload.status) ?? "todo";
+    if (!(ISSUE_STATUSES as readonly string[]).includes(status)) {
+      throw new PermanentJobError(`unknown issue status ${status}`, "invalid_payload");
+    }
+    const priority = readString(payload.priority);
+    if (priority && !(ISSUE_PRIORITIES as readonly string[]).includes(priority)) {
+      throw new PermanentJobError(`unknown issue priority ${priority}`, "invalid_payload");
+    }
+
+    const companyId = await resolveCompanyId(payload);
+    const agent = await resolveAgentByName(companyId, agentName);
+
+    // `issues.status` defaults to `backlog`, and a backlog issue wakes nobody
+    // (`issue-assignment-wakeup.ts`). So the default here is `todo` — the
+    // status is load-bearing, not decoration, and inheriting the column default
+    // would queue work that sits there showing every other sign of success.
+    //
+    // `backlog` remains a legitimate thing to ask for — put it on the board, do
+    // not start it — which is why it is accepted rather than rejected, and why
+    // `wakeupQueued` is in the result: "the job succeeded and the agent did
+    // nothing" has to be distinguishable from a broken wakeup.
+    const title = readString(payload.title) ?? firstLine(command);
+
+    // TWO LAYERS OF IDEMPOTENCY, AND BOTH ARE NEEDED. The queue's own key stops
+    // this ROW being applied twice; it does nothing about a second row being
+    // queued, which is the normal case — every account callback re-asserts the
+    // whole plan, and operator commands key on the clock deliberately. So the
+    // task's own key goes through to `issueService.create`, which returns the
+    // existing issue instead of creating a second one and a second agent run.
+    //
+    // The window is seven days (ISSUE_CREATE_IDEMPOTENCY_KEY_RETENTION_DAYS),
+    // after which the same taskKey creates a new issue. That is right for a
+    // recurring task and wrong to lean on as a unique constraint.
+    const idempotencyKey = readString(payload.taskKey) ?? job.idempotencyKey;
+
+    let deduplicated = false;
+    let issue: Awaited<ReturnType<typeof issuesSvc.create>>;
+    try {
+      issue = await issuesSvc.create(companyId, {
+        title,
+        description: command,
+        assigneeAgentId: agent.id,
+        status,
+        ...(priority ? { priority } : {}),
+        idempotencyKey,
+        onDeduplicated: () => {
+          deduplicated = true;
+        },
+      });
+    } catch (err) {
+      // `assertAssignableAgent` throws a 409 carrying `agent_not_assignable`
+      // and the reason (terminated, pending_approval, a broken org chain). None
+      // of those change on a retry, so they are permanent here rather than
+      // spending the failure budget five times over.
+      throw asPermanentAssignmentError(err, agentName);
+    }
+
+    // AFTER THE COMMIT, NEVER INSIDE IT. The wakeup is the only part of this
+    // that is not the database's problem, and the issues route does the same:
+    // create, commit, then wake, fire-and-forget, so a scheduler hiccup cannot
+    // fail an issue that was created.
+    //
+    // Not woken when the issue was deduplicated: the run it would wake for was
+    // already bought by the job that created it.
+    const wakeupSkipped = deduplicated
+      ? "deduplicated"
+      : status === "backlog"
+        ? "backlog"
+        : !heartbeat
+          ? "heartbeat_scheduler_disabled"
+          : null;
+    const wakeupQueued = wakeupSkipped === null;
+    if (wakeupQueued && heartbeat) {
+      void queueIssueAssignmentWakeup({
+        heartbeat,
+        issue,
+        reason: "issue_assigned",
+        mutation: "create",
+        contextSource: "provisioning.agent.task",
+        requestedByActorType: "system",
+        taskKey: readString(payload.taskKey),
+      });
+    }
+
+    logger.info(
+      {
+        issueId: issue.id,
+        identifier: issue.identifier,
+        companyId,
+        agentId: agent.id,
+        agentName,
+        status,
+        deduplicated,
+        wakeupQueued,
+        ...(wakeupSkipped ? { wakeupSkipped } : {}),
+      },
+      "provisioning: dispatched agent task",
+    );
+
+    // `identifier` is the one a person can act on — it is what the URL and
+    // every comment thread use — so it is in the result for the control plane
+    // to record against the account.
+    return {
+      issueId: issue.id,
+      identifier: issue.identifier,
+      companyId,
+      agentId: agent.id,
+      deduplicated,
+      wakeupQueued,
+      ...(wakeupSkipped ? { wakeupSkipped } : {}),
+    };
+  }
+
+  const handlers: Record<
+    string,
+    (payload: Record<string, unknown>, job: ProvisioningJobContext) => Promise<JobResult>
+  > = {
     "instance.state": instanceState,
     "user.upsert": userUpsert,
     "company.create": companyCreate,
     "membership.set": membershipSet,
     "secret.set": secretSet,
     "agent.create": agentCreate,
+    "agent.task": agentTask,
   };
 
   return {
@@ -1006,14 +1251,18 @@ export function provisioningHandlers(db: Db, store: ProvisioningStore) {
       return jobType === "secret.set" && secretValueIsInline(payload);
     },
 
-    async run(jobType: string, payload: Record<string, unknown>): Promise<JobResult> {
+    async run(
+      jobType: string,
+      payload: Record<string, unknown>,
+      job: ProvisioningJobContext,
+    ): Promise<JobResult> {
       const handler = handlers[jobType];
       // Known to the vocabulary but not built yet: park it rather than fail it.
       // The enqueuer keys on content, so a terminal row is never re-queued and
       // failing here would kill the job for good — including after we ship the
       // handler it was waiting for.
       if (!handler) throw new ParkJobError(`no handler built for ${jobType} yet`);
-      return handler(payload);
+      return handler(payload, job);
     },
   };
 }

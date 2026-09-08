@@ -14,6 +14,7 @@ export { createProvisioningWorker } from "./worker.js";
 export type { ProvisioningWorker, ProvisioningWorkerOptions } from "./worker.js";
 export { provisioningStore, JOB_TYPES, isKnownJobType } from "./store.js";
 export { provisioningHandlers, roleFor, readEmail, ParkJobError, PermanentJobError } from "./handlers.js";
+export type { ProvisioningHandlerDeps, ProvisioningJobContext } from "./handlers.js";
 
 export const PROVISIONING_ENABLED_ENV = "PAPERCLIP_PROVISIONING_WORKER_ENABLED";
 

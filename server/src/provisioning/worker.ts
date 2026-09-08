@@ -26,7 +26,12 @@
 import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
-import { ParkJobError, PermanentJobError, provisioningHandlers } from "./handlers.js";
+import {
+  ParkJobError,
+  PermanentJobError,
+  provisioningHandlers,
+  type ProvisioningHandlerDeps,
+} from "./handlers.js";
 import { isKnownJobType, provisioningStore } from "./store.js";
 
 export type ProvisioningWorkerOptions = {
@@ -38,6 +43,14 @@ export type ProvisioningWorkerOptions = {
   reapAfterMs?: number;
   /** Upper bound on one pass, so a bad batch cannot spin. */
   maxJobsPerPass?: number;
+  /**
+   * The process's heartbeat scheduler. `agent.task` wakes the agent it has
+   * just given work to, and there is nothing else in this module that needs it.
+   *
+   * Passed down rather than constructed: `heartbeatService` claims runs and
+   * holds leases, so a second instance in one process is a bug.
+   */
+  heartbeat?: ProvisioningHandlerDeps["heartbeat"];
 };
 
 export type ProvisioningWorker = {
@@ -61,7 +74,7 @@ export function createProvisioningWorker(db: Db, options: ProvisioningWorkerOpti
   const workerId = `${process.pid}:${randomUUID().slice(0, 8)}`;
 
   const store = provisioningStore(db);
-  const handlers = provisioningHandlers(db, store);
+  const handlers = provisioningHandlers(db, store, { heartbeat: options.heartbeat ?? null });
 
   let stopped = false;
   let draining = false;
@@ -143,7 +156,9 @@ export function createProvisioningWorker(db: Db, options: ProvisioningWorkerOpti
 
         try {
           const payload = job.payload ?? {};
-          const result = await handlers.run(job.jobType, payload);
+          const result = await handlers.run(job.jobType, payload, {
+            idempotencyKey: job.idempotencyKey,
+          });
           await store.succeed(job.id, result);
           // A payload that carried a credential is blanked once it has been
           // applied, so the key does not outlive the job in a retained row.

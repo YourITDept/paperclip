@@ -61,6 +61,11 @@ export const JOB_TYPES = [
   // makes it safe for the onboarding side to enqueue ahead of this side.
   "secret.set",
   "agent.create",
+  // `agent.task` is the first type that ASKS AN AGENT TO ACT rather than
+  // describing state to converge on. Anything holding INSERT on the queue can
+  // now dispatch work, not just provision it — a wider grant than the others,
+  // and worth knowing before it is handed to anything new.
+  "agent.task",
 ] as const;
 
 export type JobType = (typeof JOB_TYPES)[number];
@@ -75,6 +80,14 @@ export type JobRow = {
   payload: Record<string, unknown>;
   attempts: number;
   maxAttempts: number;
+  /**
+   * The queue's own idempotency key, carried through to the handler.
+   *
+   * `agent.task` needs it: an issue is created with an idempotency key of its
+   * own, and a task that names no `taskKey` falls back to this so a re-queued
+   * row cannot create a second issue and a second agent run.
+   */
+  idempotencyKey: string;
 };
 
 export type InstanceState = {
@@ -178,7 +191,7 @@ export function provisioningStore(run: SqlRunner) {
           FOR UPDATE SKIP LOCKED
           LIMIT 1
         )
-        RETURNING id, job_type, payload, attempts, max_attempts
+        RETURNING id, job_type, payload, attempts, max_attempts, idempotency_key
       `);
       const row = rowsOf<Record<string, unknown>>(result)[0];
       if (!row) return null;
@@ -188,6 +201,7 @@ export function provisioningStore(run: SqlRunner) {
         payload: (row.payload ?? {}) as Record<string, unknown>,
         attempts: toInt(row.attempts),
         maxAttempts: toInt(row.max_attempts),
+        idempotencyKey: String(row.idempotency_key),
       };
     }, null);
   }
