@@ -10,79 +10,100 @@ It is the one file in this directory that is not append-only.
 
 ---
 
-## Current state — updated 2026-09-04 17:55
+## Current state — updated 2026-09-08 12:45
 
 | | |
 | --- | --- |
-| **Branch** | `W7-20260904a` |
-| **HEAD** | `df401863f` (this clone) · the build clone `/Projects/W7-20260904a` is one ahead at `0a3040984`, its packaging commit |
-| **Working tree** | **DIRTY — 6 files, uncommitted. The operator is checking these in.** |
-| **Active work item** | Change set 10 — duplicate agent "Validation error" |
-| **Its document** | [`Duplicate agent fix.md`](CustomCodeDoc/Duplicate%20agent%20fix.md) |
-| **State** | Change set 10 committed and pushed · **root cause still unconfirmed** — see below |
+| **Branch** | `W8-20260908a` |
+| **HEAD** | `60a77857b` "Packaged up compiled code for release W8-20260907a" |
+| **Working tree** | **MERGE IN PROGRESS — staged, uncommitted, 175 files.** Upstream merge; conflicts resolved; awaiting the operator's review and commit. |
+| **Active work item** | Session 19 — upstream merge (8 commits, upstream tip `297d8741f`) |
+| **Its document** | [`Review and Test Changes.md`](CustomCodeDoc/Review%20and%20Test%20Changes.md) §8, Session 19 |
+| **Rollback tag** | `pre-merge-backup-W8-20260908a` → `60a77857b` |
 
-### Uncommitted, and what each is
+> **The previous version of this file was four days stale** (it claimed
+> `W7-20260904a` / `df401863f`). Per the resume protocol below, git won. The
+> change sets it described as uncommitted — the O-2 `validation-error-message`
+> fix and the three doc edits — are all in history now.
+
+### What is staged
+
+`git merge --no-ff --no-commit FETCH_HEAD`, authorised by the operator
+2026-09-08. **The merge commit has not been made.** 175 files: 129 modified,
+46 added.
+
+Three conflicts, all resolved:
+
+| File | Kind | Resolution |
+| --- | --- | --- |
+| `server/src/types/express.d.ts` | adjacency | Both sides. Upstream's `identityContextId`, plus the fork's multi-line `source` union carrying `proxy_header` |
+| `server/src/__tests__/openapi-routes.test.ts` | **semantic** | Operator chose: keep the fork's two entries only. Upstream emptied `explicitOpenApiCoverageExclusions` and moved its three into `apiPrefixes`; that is taken as-is, and `codex-vaults.ts` / `claude-vaults.ts` stay excluded |
+| `pnpm-lock.yaml` | regenerate | Took upstream's (`392ab26b1` refreshed it). `--frozen-lockfile` then installed clean, which proves the fork carries no dependency divergence |
+
+One repair that is **not** part of the merge and can be reviewed separately:
 
 ```
-?? ui/src/lib/validation-error-message.ts       O-2 fix: extract Zod details from ApiError.body
-?? ui/src/lib/validation-error-message.test.ts  5 tests
-M  ui/src/components/AgentActionButtons.tsx     duplicate toast uses apiErrorMessage()
-M  CustomCodeDoc/Review and Test Changes.md     RULE 0 rewritten (§5.4, §0.1 rule 2)
-M  CustomCodeDoc/SESSION-RESUME.md              this file
-M  CustomCodeDoc/builds paperclip.md            traps 6 and 7 — decode --version; partial packs
+M server/src/__tests__/server-startup-feedback-export.test.ts
 ```
 
-**The O-2 fix must be in the next build to be useful** — it is the thing that will
-finally name the failing field.
-
-Verified: `ui/src/lib/validation-error-message.test.ts` 5/5, affected UI suites
-17/17, `cd ui && npx tsc -b` clean.
+The §4.1 known-failing suite, red since Session 18. Now **18/18**. See *What was
+learned* below — it was not the one-line fix §4.1 recorded.
 
 ### The very next action
 
-**Re-pack, install, and read the new toast.**
+**Read the four-group suite result**, then append the Session 19 entry to §8 of
+`Review and Test Changes.md` and hand the tree over.
 
 ```bash
-cd /Projects/W7-20260904a
-./scripts/pack-local.sh 2>&1 | tee /tmp/pack.log
-ls releases/local/paperclipai-0.0.0-local.*.tgz releases/local/install.sh   # both must exist
-# install from that bundle, restart the server, then:
-paperclipai --version    # must NOT be 0.0.0-local.a32055fd
+ls /tmp/paperclip-tests/complete.flag        # exists = finished
+grep -hE "Test Files|Tests  " /tmp/paperclip-tests/g*.log
+grep -cE '^ Test Files' /tmp/paperclip-tests/g2.log   # MUST be 2 — see §7.1
 ```
 
-Then duplicate the agent. The toast will read
-`Validation error: <field> — <reason>` instead of the bare string.
+Everything before it is done: typecheck exit 0 with zero `error TS`, and every
+§7.2 targeted suite green (counts in the table below).
 
-### What is still unknown — do not skip this
+### Verified so far
 
-**The root cause of the reported bug was never confirmed.** `runtimeConfig.modelProfiles`
-was diagnosed by reading schema source, and the fix for it is correct and shipped
-— but the failure reproduced on a binary that never contained the fix
-(`0.0.0-local.a32055fd`, 2026-08-30, 185 commits behind), so **the report has
-still not been tested against the fix.** Two outcomes are open:
+| Check | Result |
+| --- | --- |
+| `corepack pnpm run typecheck` | **exit 0**, 0 `error TS` |
+| `corepack pnpm install --frozen-lockfile` | clean; both patches applied (`embedded-postgres`, `acpx`) |
+| Change set 1 — proxy header auth | 3 files, **28/28** |
+| Change sets 3+4 — credential vaults | 4 files, **83/83** |
+| Change set 5 — vault preset | 2 files, **20/20** |
+| Change set 6 — invite guard | **19/19** (§7.2 says 18 — upstream added one) |
+| Change set 10 — duplicate agent | **5/5** and **69/69** (§7.2 says 67 — upstream added two) |
+| `openapi-routes.test.ts` | **5/5** — proves the semantic resolution is right in both directions |
+| Provisioning (codex-home + agent.task) | **17/17** |
+| `server-startup-feedback-export.test.ts` | **18/18** — was red since Session 18 |
 
-1. The duplicate now succeeds → `modelProfiles` was the cause, and §7 of the
-   change-set document can finally be ticked.
-2. It still fails → the new toast names the real field. `icon` and `role` are the
-   likely candidates: both are `z.enum(...)` in `createAgentSchema`, so a stored
-   value retired upstream fails in exactly the same way `modelProfiles` did. The
-   fix would follow the same shape.
+### What was learned — do not lose this
 
-### Why an hour went missing, in one line
+**1. §4.1's "one-line repair" for `server-startup-feedback-export.test.ts` was
+wrong, and the shape of the fix matters more than the fix.** It needed **five**
+mock exports, not one: `agentWakeupRequests`, `documents`, `heartbeatRuns`,
+`issueDocuments`, `issues`. They cannot be predicted — each is found by adding
+the previous one, re-running, and reading the next name out of the error. The
+import throws at *module scope*, so the signature is `Tests: no tests` plus
+`No "<name>" export is defined`, never an assertion failure. If the fork's
+provisioning imports widen again, expect the loop, not a line.
 
-The installed binary was five days old, and nothing in the UI said so. **Decode
-`paperclipai --version` first** — trap 6 of
-[`builds paperclip.md`](CustomCodeDoc/builds%20paperclip.md).
+**2. The provisioning module is NOT in the §4 register**, and it should be. It
+is the fork's largest carried change (`server/src/provisioning/`, five files,
+plus two lines in `server/src/index.ts`) and nothing in the review procedure
+protects it. It survived this merge by luck rather than by check — see the
+Session 19 entry for the specific reason it was never at risk this time.
+
+**3. The pre-merge baseline is worth taking.** Running the known-failing suite
+on the clean tree *before* merging is what let it be classified as pre-existing
+in seconds rather than investigated as merge damage.
 
 ### Open items carried
 
-**None blocking.** All in §8 of
-[`Duplicate agent fix.md`](CustomCodeDoc/Duplicate%20agent%20fix.md).
-
 | Id | Owner | One line |
 | --- | --- | --- |
-| ~~O-1~~ | change set 10 | ~~`duplicateFromAgentId` not stripped by the PATCH route~~ **FIXED**, two tests, both proved real guards. |
-| ~~O-2~~ | change set 10 | ~~UI discards Zod `details`~~ **FIXED 2026-09-04, uncommitted.** `apiErrorMessage()` in `ui/src/lib/validation-error-message.ts`. |
+| **O-6** | this document | Register the provisioning module as change set 11 in §4, with `server/src/index.ts` as a §4.1 collision point. **Not done — proposed only.** |
 | O-3 | upstream, really | No migration strips `modelProfiles` from existing rows; each path sanitises for itself. |
 | O-4 | change sets 3 and 4 | `PAPERCLIP_CODEX_VAULT_ROOT` / `PAPERCLIP_CLAUDE_VAULT_ROOT` override the vault roots but appear in no markdown, `.env.example`, or `docker/`. |
 | O-5 | change set 3 | `/sysops/llm/openrouter/` is **not** a managed vault — just a directory beside the two real roots. |
@@ -105,6 +126,12 @@ from a diff is not.
 4. Re-run the verification commands listed there. Do not trust a recorded "green"
    across a disconnection — the tree may have moved.
 
+> **If you resume mid-merge:** the tree is staged and uncommitted and that is
+> the intended state, not damage. `git status --short | grep -E '^(UU|AA|DU|UD)'`
+> returning nothing means every conflict is resolved. To start over,
+> `git merge --abort`; to discard the whole thing,
+> `git reset --hard pre-merge-backup-W8-20260908a`. **Neither without asking.**
+
 ### While working — the checkpoint rule
 
 **Write the finding down when you find it, not when the task ends.** Specifically,
@@ -117,43 +144,3 @@ checkpoint after any one of these, whichever comes first:
 - [ ] A decision is taken not to do something — record what and why. This is the
       first thing lost in a disconnection and the most expensive to recover.
 - [ ] Roughly every 30 minutes of work regardless.
-
-### Before ending a session — deliberately or not
-
-1. Update the **Current state** table here: branch, HEAD, dirty files, next action.
-2. Add or amend the entry in [`CHANGELOG.md`](CustomCodeDoc/CHANGELOG.md).
-3. Make sure the work item's own document has a **Resume point** with unchecked
-   boxes for whatever is left. Unchecked boxes are the handover.
-4. State explicitly what is **not** verified. A green unit test is not a live
-   confirmation, and the difference must survive the disconnection.
-
-### What goes where
-
-| File | Lifetime | Holds |
-| --- | --- | --- |
-| `SESSION-RESUME.md` (this) | **overwritten** | Only what is true now: branch, dirty tree, next action |
-| [`CHANGELOG.md`](CustomCodeDoc/CHANGELOG.md) | append-only | One dated entry per work item; what changed and its status |
-| Per-change-set docs | append-only | Root cause, reasoning, rejected alternatives, tests, open items |
-| [`Review and Test Changes.md`](CustomCodeDoc/Review%20and%20Test%20Changes.md) | append-only | The standing procedure and the §4 register of what the fork carries |
-
-### RULE 0 — never commit, merge or push without asking
-
-Prepare the work. Run the checks. Report what changed. **Then stop and ask a
-direct question, and wait for the answer.**
-
-This applies to `git commit`, `git merge`, `git rebase`, `git push`, `git reset`
-and anything else that moves a ref or rewrites history. It applies **even when the
-operator's own words sound like permission** — *"let's check this in"*, *"go
-ahead"*, *"push it"* — and **even when the assistant has the rights to do it.**
-The constraint is the operator's review process, not a permissions boundary, so
-nothing in the tooling will enforce it. Full text and the reason: §5.4 and §0.1
-rule 2 of [`Review and Test Changes.md`](CustomCodeDoc/Review%20and%20Test%20Changes.md).
-
-A clean, staged, fully-tested tree with a written-up next action **is** the
-finished deliverable. Handing it over uncommitted is not an unfinished job.
-
-### The rule that matters most
-
-**Reasoning is the perishable part.** A diff survives a disconnection perfectly;
-*why* a value was rejected, which approach was tried and abandoned, and what was
-deliberately left undone do not. Write those down first and the code second.
