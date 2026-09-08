@@ -1,3 +1,4 @@
+import { captureRunIdentity } from "./run-identity.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, max, ne, sql } from "drizzle-orm";
@@ -1942,7 +1943,7 @@ export async function loadGitHubGrantMetadata(
   repositorySelection: "all" | "selected" | "mixed" | "none";
   installationIds: string[];
   installationOwnerLogins: string[];
-  repositories: Array<{ id: string; fullName: string; installationId: string }>;
+  repositories: Array<{ id: string; fullName: string; installationId: string; private?: boolean }>;
   installationUrl: string;
   managementUrl: string;
   appSlug?: string;
@@ -1950,6 +1951,7 @@ export async function loadGitHubGrantMetadata(
   lastAccessRefreshAt: string;
   webhookHealth: "pending";
 }> {
+  let resolvedAppSlug = appSlug;
   const accessRefreshStartedAt = new Date().toISOString();
   const github = async (path: string): Promise<{ data: Record<string, unknown>; hasNext: boolean }> => {
     const response = await request(`https://api.github.com${path}`, {
@@ -1991,11 +1993,17 @@ export async function loadGitHubGrantMetadata(
   const owners = new Set<string>();
   const selections = new Set<"all" | "selected">();
   const managementUrls = new Set<string>();
-  const repositories = new Map<string, { id: string; fullName: string; installationId: string }>();
+  const repositories = new Map<string, { id: string; fullName: string; installationId: string; private?: boolean }>();
   for (const installation of installations) {
     const installationId = githubId(installation.id);
     if (!installationId) continue;
     installationIds.push(installationId);
+    // Older grants predate the broker's appSlug field. GitHub's installation
+    // response identifies this token's app without choosing an environment.
+    if (!resolvedAppSlug && typeof installation.app_slug === "string"
+      && /^[a-z0-9-]{1,100}$/.test(installation.app_slug)) {
+      resolvedAppSlug = installation.app_slug;
+    }
     if (installation.repository_selection === "all" || installation.repository_selection === "selected") {
       selections.add(installation.repository_selection);
     }
@@ -2009,13 +2017,16 @@ export async function loadGitHubGrantMetadata(
       if (!id || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(fullName)) {
         throw unprocessable("GitHub returned invalid repository metadata", { code: "github_bad_response" });
       }
-      repositories.set(id, { id, fullName, installationId });
+      repositories.set(id, {
+        id, fullName, installationId,
+        ...(typeof repository.private === "boolean" ? { private: repository.private } : {}),
+      });
     }
   }
   const repositoryCount = repositories.size;
   if (installationIds.length === 0 || repositoryCount === 0) {
-    const installationUrl = appSlug
-      ? `https://github.com/apps/${appSlug}/installations/new`
+    const installationUrl = resolvedAppSlug
+      ? `https://github.com/apps/${resolvedAppSlug}/installations/new`
       : "https://github.com/settings/installations";
     throw unprocessable("GitHub access is required. Install Paperclip and grant at least one repository before refreshing access.", {
       code: "github_installation_required",
@@ -2023,8 +2034,8 @@ export async function loadGitHubGrantMetadata(
       managementUrl: "https://github.com/settings/installations",
     });
   }
-  const installationUrl = appSlug
-    ? `https://github.com/apps/${appSlug}/installations/new`
+  const installationUrl = resolvedAppSlug
+    ? `https://github.com/apps/${resolvedAppSlug}/installations/new`
     : "https://github.com/settings/installations";
   return {
     userId,
@@ -2040,7 +2051,7 @@ export async function loadGitHubGrantMetadata(
     managementUrl: managementUrls.size === 1
       ? managementUrls.values().next().value!
       : "https://github.com/settings/installations",
-    ...(appSlug ? { appSlug } : {}),
+    ...(resolvedAppSlug ? { appSlug: resolvedAppSlug } : {}),
     accessRevision: randomUUID(),
     lastAccessRefreshAt: accessRefreshStartedAt,
     webhookHealth: "pending",
@@ -2822,7 +2833,8 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
   }
 
   async function loadBrokerRunContext(input: { companyId: string; agentId: string; runId: string }) {
-    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.runId));
+    const [initialRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.runId));
+    const run = initialRun?.activeIdentityContextId ? (await captureRunIdentity(db, input)).run : initialRun;
     if (!run || run.companyId !== input.companyId || run.agentId !== input.agentId) {
       throw forbidden("Agent run context does not match the authenticated actor");
     }
@@ -2831,7 +2843,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
     }
     const snapshot = asRecord(run.contextSnapshot);
     const paperclipIssue = asRecord(snapshot.paperclipIssue);
-    const responsibleUserId = runSnapshotString(snapshot, "responsibleUserId", "responsible_user_id")
+    const responsibleUserId = run.activeIdentityContextId ? run.responsibleUserId : runSnapshotString(snapshot, "responsibleUserId", "responsible_user_id")
       ?? runSnapshotString(paperclipIssue, "responsibleUserId", "responsible_user_id")
       ?? run.responsibleUserId;
     if (!responsibleUserId) {
@@ -4185,6 +4197,14 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
           eq(companySecretBindings.targetId, connection.id),
         ),
       );
+    // A metadata edit or pause/resume must retain declarations for every
+    // active personal/dedicated grant, not just connection-owned credentials.
+    const activeGrants = await dbClient.select({ refs: connectionGrants.credentialSecretRefs })
+      .from(connectionGrants).where(and(
+        eq(connectionGrants.companyId, connection.companyId),
+        eq(connectionGrants.connectionId, connection.id),
+        eq(connectionGrants.status, "active"),
+      ));
     const rawBindings = [
       ...connection.credentialRefs.map((ref) => ({
         secretId: ref.secretId,
@@ -4194,7 +4214,7 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         required: true,
         label: null,
       })),
-      ...[...connection.credentialSecretRefs, ...grantSecretRefs].map((ref) => ({
+      ...[...connection.credentialSecretRefs, ...grantSecretRefs, ...activeGrants.flatMap((grant) => grant.refs)].map((ref) => ({
         secretId: ref.secretId,
         configPath: ref.configPath,
         projectionClass: ref.projectionClass ?? "unclassified",
@@ -13870,6 +13890,11 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         );
       }
 
+      if (runContext.run.activeIdentityContextId && (
+        connection.config.sourceTemplateKey === "github" || connection.transportConfig?.sourceTemplateKey === "github"
+      )) {
+        await fail(409, "Use managed git, gh, or GitHub tools for this run", "denied", "managed_github_invocation_required");
+      }
       const requestedSubject = input.body.subject;
       if (requestedSubject?.type === "user" && requestedSubject.userId !== runContext.responsibleUserId) {
         await fail(403, "The agent run cannot act as the requested user", "denied", "subject_not_permitted", {

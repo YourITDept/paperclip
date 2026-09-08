@@ -12,6 +12,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROUTES_DIR = path.resolve(__dirname, "../routes");
 
 const apiPrefixes: Record<string, string> = {
+  "pipelines.ts": "/api",
+  "cases.ts": "/api",
+  "smoke-lab.ts": "/api",
   "access.ts": "/api",
   "activity.ts": "/api",
   "adapters.ts": "/api",
@@ -68,13 +71,16 @@ const apiPrefixes: Record<string, string> = {
 const ROUTE_LITERAL_PATTERN = /router\.(get|post|put|patch|delete)\(\s*["'`]([^"'`]+)["'`]/g;
 const ROUTER_METHOD_PATTERN = /router\.(get|post|put|patch|delete)\(/;
 const HTTP_METHODS = new Set(["get", "put", "post", "delete", "options", "head", "patch", "trace"]);
-const explicitOpenApiCoverageExclusions = new Set([
-  // Pipeline routes are experimental and not yet represented in the public OpenAPI document.
-  "pipelines.ts",
-  // Case routes are experimental (enableCases flag) and not yet in the public OpenAPI document.
-  "cases.ts",
-  // Smoke lab routes are experimental and not yet represented in the public OpenAPI document.
-  "smoke-lab.ts",
+// SEMANTIC MERGE, 2026-09-08 (Session 19). Upstream #13003 emptied this set and
+// moved its three entries — pipelines.ts, cases.ts, smoke-lab.ts — up into
+// `apiPrefixes`, so those routes are now REQUIRED to appear in the OpenAPI
+// document rather than skipped. That change is taken as-is: they are upstream's
+// routes and upstream's decision.
+//
+// The fork's two entries stay, because the reason for them is unchanged and is
+// the opposite of upstream's: these routes are deliberately NOT in the
+// published contract. Do not "finish" upstream's change by emptying the set.
+const explicitOpenApiCoverageExclusions = new Set<string>([
   // Fork-carried: the Codex/Claude credential-vault routes are instance-admin
   // endpoints this fork adds (CustomCodeDoc §4 change sets 3 and 4). They are
   // deliberately absent from the public OpenAPI document — that document is
@@ -294,6 +300,7 @@ describe("openapi routes", () => {
     const { spec } = loadSpecRoutes();
 
     expect(spec.paths["/api/openapi.json"].get.security).toEqual([]);
+    expect(spec.paths["/runtime-tools/github/credentials"].post.security).toEqual([{ RuntimeToolsBearerAuth: [] }]);
     expect(spec.paths["/api/plugins/install"].post.security).toEqual([
       { BoardSessionAuth: [] },
       { BoardApiKeyAuth: [] },

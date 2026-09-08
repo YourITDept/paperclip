@@ -217,6 +217,24 @@ vi.mock("@paperclipai/db", () => ({
   companies: {},
   companyMemberships: {},
   instanceUserRoles: {},
+  // Fork-carried (CustomCodeDoc §4.1), repaired 2026-09-08 (Session 19).
+  //
+  // `server/src/index.ts` imports `startProvisioningWorker`, and that module
+  // graph reaches `issues.ts` → `successful-run-handoff-state.ts`, which builds
+  // a `sql` fragment from `heartbeatRuns` at MODULE SCOPE. A table missing from
+  // this mock therefore throws at IMPORT time, before a single test runs — the
+  // signature is `Tests: no tests` plus `No "<name>" export is defined`, not an
+  // assertion failure.
+  //
+  // §4.1 recorded this as a one-line repair needing only `heartbeatRuns`. It is
+  // not: the five below were found by adding one, re-running, and reading the
+  // next name out of the error. If the fork's provisioning imports widen again,
+  // expect the same loop rather than a single addition.
+  agentWakeupRequests: {},
+  documents: {},
+  heartbeatRuns: {},
+  issueDocuments: {},
+  issues: {},
 }));
 
 vi.mock("../app.js", () => ({

@@ -96,7 +96,8 @@
     "check:semantic-action-catalog": "pnpm run build:typescript && node scripts/generate-semantic-action-catalog.mjs --check",
     "check:protocol": "pnpm run typecheck:typescript && pnpm run check:protocol-manifest && pnpm run test:typescript && pnpm run check:replay-goldens",
     "check:runner": "pnpm run typecheck:rust && pnpm run test:rust && pnpm run check:conformance-parity && pnpm run check:replay-parity",
-    "check:all": "pnpm run check:eval-kernel && pnpm run check:protocol && pnpm run check:runner",
+    "check:all": "pnpm run check:eval-kernel && pnpm run check:protocol && pnpm run check:runner && pnpm run check:api-authority",
+    "check:api-authority": "node scripts/check-api-authority.mjs",
     "generate:replay-goldens": "pnpm run build:typescript && node scripts/generate-replay-goldens.mjs",
     "check:replay-goldens": "pnpm run build:typescript && node scripts/generate-replay-goldens.mjs --check",
     "check:browser-tokens": "node scripts/check-browser-tokens.mjs",
@@ -158,10 +159,11 @@
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.70.0",
     "@agentclientprotocol/codex-acp": "1.6.2",
+    "@openai/codex": "0.153.4",
     "acpx": "0.13.1",
     "ajv": "^8.20.0",
     "json-schema-to-ts": "^3.1.1",
-    "opencode-ai": "1.18.17",
+    "opencode-ai": "1.18.29",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1"
   },
