@@ -1406,6 +1406,8 @@ export function TaskChatThread(props: TaskChatThreadProps) {
             ? `The run was cancelled ${responseBoundary}.`
             : source.status === "interrupted"
               ? `The run was interrupted ${responseBoundary}.`
+              : code === "native_provider_model_rejected"
+                ? "The provider rejected the selected model. Check the model ID and your account's access, save the agent configuration, then retry. View the run for the provider's full error."
               : code === "provider_frame_too_large"
                 ? "Provider output exceeded the safe limit."
                 : source.status === "timed_out"
@@ -2304,10 +2306,16 @@ export function TaskChatThread(props: TaskChatThreadProps) {
     [interruptingQueuedRunId, onInterruptQueued],
   );
 
+  const reopenToolReview = useCallback((interactionId: string) => {
+    setSelectedPendingKey(`interaction:${interactionId}`);
+    setTakeoverMode("open");
+  }, []);
+
   const renderInteraction = useCallback(
     (item: TaskChatInteractionItem) => (
       <TaskChatInteractionCard
         item={item}
+        onReviewRequest={reopenToolReview}
         planDocument={planDocument}
         showPlanPreview={
           !threadOwnsPlanPreview(
@@ -2347,6 +2355,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
       planDocumentSourceRunId,
       settledRunIds,
       tailRunId,
+      reopenToolReview,
     ],
   );
 
@@ -2394,6 +2403,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
       ? {
           id: selectedPendingInput.key,
           label: selectedPendingInput.label,
+          hideLabel: selectedPendingInput.kind === "durable" && selectedPendingInput.interaction.kind === "request_confirmation" && Boolean(selectedPendingInput.interaction.payload.toolAction),
           pendingCount: pendingComposerInputs.length,
           content: takeoverContent,
           onDismiss: () => setTakeoverMode("normal"),
