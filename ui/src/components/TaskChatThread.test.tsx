@@ -141,6 +141,32 @@ function render(ui: ReactElement) {
   );
 }
 
+it("coordinates first reveal while keeping the composer and visible history mounted through refresh", async () => {
+  const props = { issueId: "coordinated-issue", comments: [], onAdd: async () => {} };
+  render(<TaskChatThread {...props} initialHistoryPending />);
+  const composer = container.querySelector('[data-testid="mock-editor"]');
+  expect(composer).not.toBeNull();
+  expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
+  render(<TaskChatThread {...props} initialHistoryPending={false} />);
+  await act(async () => { await new Promise((resolve) => requestAnimationFrame(resolve)); });
+  expect(container.querySelector('[aria-busy="false"]')).not.toBeNull();
+  expect(container.querySelector('[data-testid="mock-editor"]')).toBe(composer);
+  render(<TaskChatThread {...props} initialHistoryPending />);
+  expect(container.querySelector('[data-testid="task-chat-history-loading"]')).toBeNull();
+  expect(container.querySelector('[data-testid="mock-editor"]')).toBe(composer);
+});
+
+it("keeps an acknowledged optimistic bubble mounted with its canonical comment target", () => {
+  const comment = { companyId: "company", issueId: "issue", authorAgentId: null, presentation: null, metadata: null, updatedAt: new Date("2026-09-09T12:00:00Z"), id: "optimistic-one", clientId: "optimistic-one", body: "Keep this message in place", authorType: "user" as const, authorUserId: "board", createdAt: new Date("2026-09-09T12:00:00Z") };
+  render(<TaskChatThread comments={[comment]} onAdd={async () => {}} />);
+  const row = container.querySelector('[data-thread-anchor="optimistic-one"]');
+  expect(row).not.toBeNull();
+  render(<TaskChatThread comments={[{ ...comment, id: "canonical-one" }]} onAdd={async () => {}} />);
+  expect(container.querySelector('[data-thread-anchor="optimistic-one"]')).toBe(row);
+  expect(row?.id).toBe("comment-canonical-one");
+  expect(container.textContent?.match(/Keep this message in place/g)).toHaveLength(1);
+});
+
 function fakeScrollGeometry(
   element: HTMLElement,
   { scrollHeight = 1000, clientHeight = 400, scrollTop = 600 } = {},
@@ -1030,6 +1056,8 @@ describe("TaskChatThread runtime transcript selection", () => {
     );
 
     expect(container.textContent).toContain("Work was in progress.");
+    expect(container.querySelector('[data-testid="task-chat-collapsible-marker"] button')?.classList).toContain("text-muted-foreground");
+    expect(container.querySelector('[data-testid="task-chat-collapsible-marker"] .text-destructive')).toBeNull();
     expect(
       container.querySelector('[data-testid="task-chat-collapsible-marker"]')
         ?.textContent,
@@ -2957,5 +2985,27 @@ describe("TaskChatThread live transcript", () => {
     // The pill has settled to its "Worked" state rather than flipping back to a
     // spinner while it waits for the reply comment.
     expect(container.textContent).toContain("Worked");
+  });
+});
+
+describe("TaskChatThread composer execution controls", () => {
+  it.each(["process", "paperclip_runner"])("passes the task's stop action through for %s execution", async (adapterType) => {
+    const onStop = vi.fn(async () => {});
+    const run = {
+      id: "task-run", status: "running", runtimeMode: adapterType === "process" ? "legacy" as const : "native" as const,
+      invocationSource: "issue", triggerDetail: null, startedAt: "2026-09-09T12:00:00Z", finishedAt: null,
+      createdAt: "2026-09-09T12:00:00Z", agentId: "agent-1", agentName: "Alex", adapterType,
+    };
+    render(<TaskChatThread comments={[]} onAdd={async () => {}} issueStatus="in_progress" activeRun={run} onCancelRun={onStop} stopScope="subtree" />);
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="task-chat-composer-stop"]')!;
+    expect(button.title).toBe("Stop and pause subtree");
+    await act(async () => { button.click(); });
+    expect(onStop).toHaveBeenCalledOnce();
+    render(<TaskChatThread comments={[]} onAdd={async () => {}} issueStatus="in_progress" activeRun={run} onCancelRun={onStop} stopPending />);
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="task-chat-composer-stop"]')?.disabled).toBe(true);
+  });
+  it("does not offer Stop for settled work even when a callback is available", () => {
+    render(<TaskChatThread comments={[]} onAdd={async () => {}} issueStatus="todo" onCancelRun={vi.fn()} />);
+    expect(container.querySelector('[data-testid="task-chat-composer-stop"]')).toBeNull();
   });
 });
