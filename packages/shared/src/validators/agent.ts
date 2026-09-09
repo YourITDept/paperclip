@@ -98,6 +98,7 @@ export const createAgentSchema = z.object({
   // round trip. The server permits the no-claim bind only for a user actor and
   // only when that owner already has a stored value. It carries no token.
   applyStoredClaudeLogin: z.boolean().optional(),
+  // FORK: change set 10 — see CustomCodeDoc/Duplicate agent fix.md §5.2.
   // The optional duplicate source. It is not an agent column: the server uses it
   // to re-inject `adapterConfig.env` values the client could not send back.
   //
@@ -112,6 +113,12 @@ export const createAgentSchema = z.object({
   // and which the source already has, and only for a caller allowed to read that
   // agent's configuration. No value is ever returned to the client.
   duplicateFromAgentId: z.string().guid().optional(),
+  // Narrow intent flag set by the onboarding wizard when it hires the very first
+  // agent (the chief of staff). It is not an agent column: the server consumes
+  // it to seed the server-owned chief-of-staff persona over the agent's entry
+  // instruction file instead of the generic default, and honors it only for
+  // board-authored requests. Mirrors onboardingFirstTask on issue create.
+  onboardingFirstAgent: z.boolean().optional(),
 });
 
 export type CreateAgent = z.infer<typeof createAgentSchema>;
@@ -142,7 +149,7 @@ export const createAgentHireSchema = createAgentSchema.extend({
 export type CreateAgentHire = z.infer<typeof createAgentHireSchema>;
 
 export const updateAgentSchema = objectWithoutDefaults(
-  createAgentSchema.omit({ permissions: true }),
+  createAgentSchema.omit({ permissions: true, onboardingFirstAgent: true }),
 )
   .partial()
   .extend({

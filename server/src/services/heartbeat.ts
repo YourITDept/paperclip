@@ -1,6 +1,8 @@
 import { initializeRunIdentity } from "./run-identity.js";
 import { githubBrokerEnvironment } from "@paperclipai/adapter-utils/github-launcher";
 import { cleanupGitHubOperationLaunchers, prepareGitHubOperationLaunchers, startAdapterExecutionTargetPaperclipBridge } from "@paperclipai/adapter-utils/execution-target";
+import { agentService } from "./agents.js";
+import { normalizeLegacyRunnerProvider } from "@paperclipai/adapter-utils";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
@@ -7230,6 +7232,18 @@ export async function buildPaperclipWakePayload(input: {
           source: readNonEmptyString(agentMessage.source),
           pluginKey: readNonEmptyString(agentMessage.pluginKey),
           sessionId: readNonEmptyString(agentMessage.sessionId),
+          ...(Array.isArray(agentMessage.untrustedToolResults) ? {
+            untrustedToolResults: agentMessage.untrustedToolResults.slice(0, 8).map((value) => {
+              const result = parseObject(value);
+              return {
+                actionRequestId: sanitizeAgentSessionMessageText(result.actionRequestId) ?? "",
+                toolName: sanitizeAgentSessionMessageText(result.toolName) ?? "",
+                resultSummary: sanitizeAgentSessionMessageText(result.resultSummary) ?? "",
+                error: sanitizeAgentSessionMessageText(result.error),
+                declineReason: sanitizeAgentSessionMessageText(result.declineReason),
+              };
+            }),
+          } : {}),
         }
       : null,
     childIssueSummaries: Array.isArray(
@@ -20190,7 +20204,9 @@ export function heartbeatService(
                 issueId: issueRef.id,
                 runId: run.id,
                 agentId: agent.id,
-                interactionIds: interactionId ? [interactionId] : [],
+                interactionIds: Array.isArray(context.interactionIds)
+                  ? [...new Set([...(interactionId ? [interactionId] : []), ...context.interactionIds.filter((id): id is string => typeof id === "string")])]
+                  : interactionId ? [interactionId] : [],
               });
             const runnerAdapterConfig = parseObject(agent.adapterConfig);
             const managedProfile =
@@ -23593,8 +23609,19 @@ export function heartbeatService(
     let issueId =
       readNonEmptyString(enrichedContextSnapshot.issueId) ?? issueIdFromPayload;
 
-    const agent = await getAgent(agentId);
+    let agent = await getAgent(agentId);
     if (!agent) throw notFound("Agent not found");
+    if (agent.adapterType === "paperclip_runner") {
+      const oldConfig = parseObject(agent.adapterConfig);
+      const nextConfig = normalizeLegacyRunnerProvider(oldConfig);
+      if (nextConfig !== oldConfig) {
+        await agentService(db).update(agent.id, { adapterConfig: nextConfig }, {
+          recordRevision: { source: "normalize_runner_provider", createdByAgentId: null, createdByUserId: null },
+        });
+        await logActivity(db, { companyId: agent.companyId, actorType: "system", actorId: "heartbeat", action: "agent.updated", entityType: "agent", entityId: agent.id, details: { provider: "codex", reason: "native_codex_provider" } });
+        agent = (await getAgent(agentId))!;
+      }
+    }
 
     const agentDebug = parseObject(parseObject(agent.runtimeConfig).debug);
     const runDebug = parseObject(enrichedContextSnapshot.debug);
