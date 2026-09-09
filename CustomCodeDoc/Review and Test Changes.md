@@ -306,7 +306,7 @@ RETIRED, so the numbered references throughout §8 still resolve. Do not
 | 2 | ~~**`PAPERCLIP_CODEX_HOME`** — relocates the Paperclip-*managed* Codex home without opting out of management~~ **RETIRED in v6 — see §4.2** | [`Codex-changes-instructions.md`](CustomCodeDoc/Codex-changes-instructions.md) (historical) | none — removed from `packages/adapter-utils/src/server-utils.ts`, `packages/adapter-utils/src/acpx-engine/execute.ts`, `packages/adapters/codex-local/src/server/{execute,codex-home,acp,test}.ts` |
 | 3 | **Codex credential vaults** — provision `/sysops/llm/codex/<name>`, sign in, sign out, delete, from Settings | [`Codex device login web service.md`](CustomCodeDoc/Codex%20device%20login%20web%20service.md) | `server/src/services/codex-vault-login-service.ts`, `server/src/routes/codex-vaults.ts`, `ui/src/pages/InstanceCodexVaults.tsx`, `ui/src/api/codexVaults.ts`, **and the nav entries in `ui/src/components/CompanySettingsSidebar.tsx` AND `…Sidebar.production.tsx`** (see §4.1), `packages/adapters/codex-local/src/server/{codex-vault,host-login-pty}.ts` |
 | 4 | **Claude credential vaults** — the sibling feature, `/sysops/llm/claude/<name>` and `CLAUDE_CONFIG_DIR` | [`Claude device login web service.md`](CustomCodeDoc/Claude%20device%20login%20web%20service.md) | `server/src/services/claude-vault-login-service.ts`, `server/src/routes/claude-vaults.ts`, `ui/src/pages/InstanceClaudeVaults.tsx`, `ui/src/api/claudeVaults.ts`, **and the nav entries in both sidebars** (see §4.1), `packages/adapters/claude-local/src/server/{claude-vault,claude-host-login-pty}.ts` |
-| 5 | **Create agent from a login vault** — a button that opens New Agent with the runtime and the vault directory prefilled. **DEGRADED 2026-09-08 (Session 20): the runtime still prefills; the vault directory cannot be set at create time at all** (the new flow has no free-form env field — set it afterwards in Agent detail) — upstream #13011 replaced `NewAgent.tsx` with a wrapper around `NewAgentSetup`, which reads `?adapterType=` but not the fork's `?env=`. `parseNewAgentEnvPreset` is orphaned; `verify-fork.sh` prints a WARN. Open item O-7 | [`Create agent from a login vault.md`](CustomCodeDoc/Create%20agent%20from%20a%20login%20vault.md) | `ui/src/lib/new-agent-preset.ts`, `ui/src/components/CreateAgentFromLoginButton.tsx`, `ui/src/pages/NewAgent.tsx` |
+| 5 | **Create agent from a login vault** — a button that opens New Agent with the runtime and the vault directory prefilled. **RESTORED 2026-09-09 (Session 21), closing O-7.** The operator ported the preset into upstream's new flow: `NewAgentSetup` now calls `parseNewAgentEnvPreset`, seeds the connection from it, skips the connect step when a preset is present, and `AgentBasicsDialog` collapses to one step when the adapter is preset. `verify-fork.sh`'s WARN is gone; the guard prints `cs5 preset consumed → wired`. Suite is 48 (was 45 upstream-only). | [`Create agent from a login vault.md`](CustomCodeDoc/Create%20agent%20from%20a%20login%20vault.md) | `ui/src/lib/new-agent-preset.ts`, `ui/src/components/CreateAgentFromLoginButton.tsx`, `ui/src/components/new-agent/NewAgentSetup.tsx`, `ui/src/components/new-agent/AgentBasicsDialog.tsx` |
 | 6 | **Invite auto-accept guard** — `Boolean(invite) &&` as the first term of `shouldAutoAcceptHumanInvite` | [`Reviewing onboarding process and error messages.md`](CustomCodeDoc/Reviewing%20onboarding%20process%20and%20error%20messages.md), and `ReverseProxyCustomChanges.md` §0.1 #1 | `ui/src/pages/InviteLanding.tsx` |
 | 7 | ~~**Startup banner** — the Codex Home and OpenRouter rows~~ **RETIRED in v6 — see §4.2** | — | none — rows and helpers removed from `server/src/startup-banner.ts`; `startup-banner.test.ts` deleted |
 | 8 | **Local packaging and verification scripts** | [`builds paperclip.md`](CustomCodeDoc/builds%20paperclip.md), and §7.0 for `verify-fork.sh` | `scripts/pack-local.sh`, `scripts/reset-local.sh`, `scripts/verify-fork.sh`, `releases/` |
@@ -396,6 +396,20 @@ are almost always kept:
   Guarded now by `verify-fork.sh` (§7.0), which asserts both names are present
   in **both** sidebars. Whenever upstream adds a `.production` variant of a file
   the fork has patched, assume the patch is missing from the new one.
+
+- `ui/src/components/Layout.production.tsx` — the fork's agent contextual sidebar.
+  Added as a collision point 2026-09-09 (Session 21). Upstream #13011 deleted
+  `AgentDetail`'s in-page tab bar because the **streamlined** shell's sidebar
+  replaces it; this fork defaults `enableStreamlinedUi` off, so `ProductionLayout`
+  renders instead and had no agent case at all. The result was that every agent
+  section — Instructions, Skills, Runtime, Secrets, Tools, Permissions, API Keys,
+  Revisions — became **unreachable by clicking**, while every route still resolved
+  and every suite stayed green. Same shape as the Session 19 sidebar loss, one
+  layout family over. Guarded by `ui/src/components/Layout.production.test.tsx`.
+
+  **The standing lesson, now twice:** whenever upstream builds a feature into the
+  streamlined shell only, check the `.production` twin. The fork lives in the
+  half upstream treats as legacy.
 
 - `server/src/index.ts` — change set 11's three lines: the
   `startProvisioningWorker` import (~:94), the call that starts it (~:1824), and
@@ -855,7 +869,7 @@ corepack pnpm exec vitest run server/src/__tests__/codex-vault-login-service.tes
 corepack pnpm exec vitest run packages/adapters/codex-local/src/server/codex-home.test.ts \
   packages/adapter-utils/src/server-utils.test.ts
 
-# change set 5 — create agent from a vault
+# change set 5 — create agent from a vault. 48/48 (was 45; O-7's port added cases)
 corepack pnpm exec vitest run ui/src/lib/new-agent-preset.test.ts ui/src/pages/NewAgent.test.tsx
 
 # change set 6 — invite auto-accept guard (19/19 expected; was 18 before
@@ -883,7 +897,7 @@ corepack pnpm exec vitest run --project @paperclipai/server \
   server/src/__tests__/provisioning-membership-remove.test.ts
 
 # change set 10 also adds a field to createAgentSchema, which feeds the generated
-# OpenAPI document. 5/5 expected. This suite is ALSO the canary for the §4.1
+# OpenAPI document. 6/6 expected (was 5; upstream added a case, Session 21). This suite is ALSO the canary for the §4.1
 # semantic collision resolved in Session 19 — it fails in one direction if the
 # fork's vault exclusions are dropped, and in the other if upstream's three
 # entries are wrongly re-added.
@@ -1116,13 +1130,152 @@ and an absence does not look like contamination; it looks like a broken
 code path. When an assertion fails because something was never called, check
 `env | grep PAPERCLIP_` for a variable that would have turned it off.
 
+##### 2b-4. `PAPERCLIP_HOME` — the cs10 canary, and it looks exactly like a merge regression
+
+**Found 2026-09-09 (Session 21), during the #13068 merge.**
+`server/src/__tests__/agent-permissions-routes.test.ts` — the §4.1 canary for the
+fork's change in `server/src/routes/agents.ts` — reported **18 failed / 51 passed
+of 69**, all of the form:
+
+```
+Adapter "pi_local" is not available on this instance.
+Available adapters: claude_local, codex_local
+```
+
+**This is the worst tell so far, because it arrives on the one suite whose job is
+to go red when the merge dropped a fork hunk.** The obvious reading is that the
+merge broke change set 10. It did not.
+
+The container exports `PAPERCLIP_HOME=/shared/paperclip` — the **live instance
+state** — and [`adapter-plugin-store.ts:104`](server/src/services/adapter-plugin-store.ts#L104)
+reads `$PAPERCLIP_HOME/adapter-settings.json` **directly from disk, with no mock
+and no fixture**. The operator has 14 adapter types disabled there, so
+`assertSelectableAdapterType` ([`agents.ts:2048`](server/src/routes/agents.ts#L2048))
+refuses to create a `pi_local` or `process` agent and 18 upstream-authored tests
+fail on a config file that has nothing to do with the merge.
+
+Verified both directions:
+
+```bash
+# fails 18/69 — reads the operator's live disabled list
+corepack pnpm --filter ./server exec vitest run src/__tests__/agent-permissions-routes.test.ts
+# passes 69/69 — hermetic home
+env PAPERCLIP_HOME=/tmp/scratch-home corepack pnpm --filter ./server exec vitest run \
+  src/__tests__/agent-permissions-routes.test.ts
+```
+
+**Why it had not fired before, and why `verify-fork.sh` was the place it did.**
+Upstream's own runner already knows: [`run-vitest-stable.mjs:287`](scripts/run-vitest-stable.mjs#L287)
+overrides `PAPERCLIP_HOME` to a sandbox path before spawning vitest. The §7.1
+full-suite path goes through that script and is therefore immune. **§7.2's
+targeted suites call `vitest` directly and are not.** So the same code passes in
+one lane and fails in the other, which is precisely the kind of split that makes
+a green full run and a red targeted run look like a real regression.
+
+Fixed in `verify-fork.sh` by **redirecting rather than unsetting** —
+`PAPERCLIP_HOME="$OUT/paperclip-home"`. Unsetting falls back to
+`~/.paperclip` ([`home-paths.ts:19`](packages/shared/src/home-paths.ts#L19)),
+which is also real state on this host.
+
+> **Do not "fix" this by editing `/shared/paperclip/adapter-settings.json`.** That
+> file is the operator's live instance configuration, and the disabled list is
+> deliberate. The test environment is what was wrong, not the deployment.
+
+##### 2b-5. `PAPERCLIP_PROVISIONING_WORKER_ENABLED` — an upstream test failing for a fork reason
+
+**Found 2026-09-09 (Session 21).** The first member of this class that leaks
+through **fork-carried code**, which makes it the template for the next one.
+
+`server/src/__tests__/server-startup-feedback-export.test.ts` reported
+`expected "vi.fn()" to be called 1 times, but got 0 times` on two upstream tests:
+*"keeps routine ticks and setup cleanup active when heartbeat scheduling is
+suppressed"* and *"keeps external object refresh active when heartbeat scheduling
+is disabled"*.
+
+The mechanism: the container exports `PAPERCLIP_PROVISIONING_WORKER_ENABLED=true`,
+so change set 11's worker starts inside `startServer()` and registers its **own
+`setInterval` drain loop**. The test spies on `globalThis.setInterval` and keeps
+the callback from the *last* registration it sees, so the fork's loop displaces
+the routine-tick callback the test then invokes. The assertion that follows fires
+against a callback that was never the one under test.
+
+Verified: with the variable cleared, **18/18**.
+
+**Read the shape, not the variable.** The previous five leaked a deployment value
+into *upstream* code. This one is only reachable because the fork added two lines
+to `index.ts` — so a variable that is entirely correct for the deployment makes an
+**upstream test fail for a fork reason**, and the failure names neither the
+variable nor the fork. Expect more of these as change set 11 grows: any upstream
+test that counts, orders, or captures a global side effect of `startServer()` is
+now sensitive to whether the fork's worker started.
+
+> **Why the scrub rather than the code fix.** Making the worker inert under
+> `NODE_ENV=test` would fix it at the source, but change set 11 is deliberately
+> three lines in one upstream file (§4.1) and widening it to earn a test guard is
+> the wrong trade. `env -u` is free. Revisit if a third test trips on it.
+
+##### 2b-6. `PAPERCLIP_ADAPTERS` — the class stops leaking and starts WRITING
+
+**Found 2026-09-09 (Session 21), immediately after 2b-5, and it is the most
+important entry in this section.**
+
+Every member up to here contaminated a test *in memory*, for one process, and
+vanished when the process exited. This one **persists to disk**.
+[`server/src/index.ts:1820`](server/src/index.ts#L1820) reconciles
+`PAPERCLIP_ADAPTERS` into `$PAPERCLIP_HOME/adapter-settings.json` during
+`startServer()`. So **any** test that reaches `startServer()` writes the
+deployment's curated disabled list into whatever home the run is using — and then
+a later suite in the same run reads it back and fails with
+`Adapter "pi_local" is not available on this instance`.
+
+That is #2b-4's symptom exactly, one run later, **with the environment variable
+already scrubbed and nothing left to blame.** Redirecting `PAPERCLIP_HOME` to a
+scratch directory does not save you: the write simply lands in the scratch
+directory instead, and survives into the next run.
+
+**How it was found is the part to remember.** Repairing the db mock (§8 Session 21,
+Finding 8) let `startServer()` get *further than it had ever got* in that suite —
+far enough to perform the reconcile for the first time. `cs10 agent permissions`,
+which had just been fixed and verified green, went red in the very next run.
+**A fix in one suite manufactured a failure in another, through a file on disk.**
+Nothing in either suite's diff explains it.
+
+Both halves are required:
+
+```bash
+-u PAPERCLIP_ADAPTERS -u PAPERCLIP_ADAPTERS_FILE   # do not let the reconcile have input
+rm -rf "$OUT/paperclip-home"                       # and do not inherit last run's write
+```
+
+**The generalised rule this earns.** When a suite reads state the application can
+also *write*, scrubbing the input is half a fix. Ask additionally: *what in this
+run can create the state I just cleared?* For the `PAPERCLIP_*` class specifically,
+`grep -rn "writeSettings\|writeFileSync" server/src/services/*store*.ts` names the
+persisters, and any one of them reachable from `startServer()` is a candidate.
+
 ##### 2c. Treat this as a class, not two bugs
 
 The container exports ~24 `PAPERCLIP_*` variables for the live deployment and the
-suite assumes a clean environment. **Four have bitten so far** —
+suite assumes a clean environment. **Eight have bitten so far** —
 `PAPERCLIP_CODEX_HOME` (retired in v6, no longer reachable),
-`PAPERCLIP_PUBLIC_URL`, `PAPERCLIP_TELEMETRY_DISABLED`, and
-`PAPERCLIP_NO_BROWSER` — leaving three live.
+`PAPERCLIP_PUBLIC_URL`, `PAPERCLIP_TELEMETRY_DISABLED`,
+`PAPERCLIP_NO_BROWSER`, `PAPERCLIP_HOME`,
+`PAPERCLIP_PROVISIONING_WORKER_ENABLED`, `PAPERCLIP_ADAPTERS` and
+`PAPERCLIP_ADAPTERS_FILE` — leaving seven live.
+
+> **The class has two shapes now, and the second is worse.** Shape one: the
+> variable is *read* and contaminates one process. Shape two (#2b-6): the variable
+> is *reconciled to disk*, so it contaminates every later suite in the run and the
+> next run too, long after the variable itself is gone.
+
+> **The fifth changed what the class means.** The first four contaminated a
+> *value* or suppressed an *action*. `PAPERCLIP_HOME` points a suite at the live
+> instance's own state files, so the failure is not a wrong constant but a real
+> configuration the deployment genuinely has. And it landed on the cs10 canary —
+> the suite whose whole purpose is to signal a lost fork hunk. **An env leak can
+> impersonate exactly the failure the register exists to detect.** Re-run the
+> file with a hermetic `PAPERCLIP_HOME` before concluding a merge dropped
+> anything.
 
 > **The prediction has now missed three times in a row.** Earlier versions of
 > this section named `PAPERCLIP_DEPLOYMENT_MODE`, `PAPERCLIP_PROXY_AUTH_ENABLED`,
@@ -1352,6 +1505,292 @@ finds a `pnpm-workspace.yaml`. Loud beats silent; the old behaviour was a
 > **Numbering note.** The header at the top of this file calls the session log
 > "§7". It is this section, **§8** — §7 is the test procedure. Kept as-is so old
 > cross-references still resolve; read "§7 session log" as this section.
+
+### 2026-09-09 — Session 21: upstream merge into `W8-20260909a` (5 commits)
+
+**Who:** Claude (Opus 5) with chris@anderson-family.com
+**Branch:** `W8-20260909a` @ `1bf2c3176` + upstream `5acf56658` (merge base `7ed122911`)
+**Merge:** staged with `--no-ff --no-commit`, **left uncommitted per §5.4.**
+**Rollback tag:** `pre-merge-backup-W8-20260909a` → `1bf2c3176`
+
+**Incoming:** 5 commits, 191 files staged. One new migration, `0249`. Nine
+deletions, all upstream's own onboarding modules (`FrontDoor`, `useCompanyMission`,
+`ceo-instructions`, `onboarding-goal`, `onboarding-mission`); §6.4 q2 clear —
+every consumer is upstream's `OnboardingWizard.tsx`, rewritten in the same commit,
+and the fork was byte-identical to the merge base in all of them.
+
+> **A scoping trap worth recording.** The operator's compare URL showed upstream
+> master as **one** commit ahead. It was one ahead of `W8-20260908d`, a branch
+> that is **not an ancestor of this one**. From `W8-20260909a` the merge is five.
+> Check `git log --oneline HEAD..FETCH_HEAD` against the branch you are actually
+> on, not against the branch a compare link names.
+
+#### Result: everything green, and no fork-caused failure
+
+`./scripts/verify-fork.sh targeted` — **exit 0, 31 PASS, 0 FAIL, 0 WARN** (re-run after O-8; the three extra rows are the new fork-default guards).
+
+| Check | Result |
+| --- | --- |
+| Guards (18) | all PASS — and `cs5 preset consumed → wired`, no longer a WARN |
+| `typecheck` | **exit 0**, 0 `error TS` |
+| cs1 proxy header auth | 28 (baseline 28) |
+| cs3+4 credential vaults | 83 (baseline 83) |
+| cs3/4 sidebar parity | 4 (baseline 4) |
+| cs5 vault preset | **48** (was 20 in the script, 45 in §7.2 — baseline updated) |
+| cs6 invite guard | 19 (baseline 19) |
+| cs10 duplicate payload | 5 (baseline 5) |
+| cs10 agent permissions | **69** (baseline 69) — see Finding 2 |
+| cs3/4 openapi contract | **6** (was 5 — upstream added a case; baseline updated) |
+| cs11 provisioning | 27 (baseline 27) |
+
+#### The conflicts: two, both adjacency, both change set 10
+
+`merge-tree` predicted both before anything was touched (§5.2 step 4).
+
+1. `packages/shared/src/validators/agent.ts` — the fork's `duplicateFromAgentId`
+   and upstream's new `onboardingFirstAgent` land at the same insertion point in
+   `createAgentSchema`. Kept both.
+2. `server/src/routes/agents.ts` — the same collision, twice, in the **hire** and
+   **create** destructuring lists. Kept both on both paths.
+
+**The preview overstated the risk, and that is worth knowing.** Upstream rewrote
+this file +259/−130, concentrated at 4084–4325 — exactly where §4.1 warns the
+fork's hire-path call site tends to get dropped. The reasonable prediction from
+the diffstat was a semantic conflict. In fact git auto-merged *around* the fork's
+hunks and failed only on the two destructuring lists; both
+`restoreDuplicateSourceEnv` call sites survived untouched. Verified after
+resolution: 3 occurrences (definition + hire + create), and all four destructured
+names are consumed downstream (fork's at :4130/:4420, upstream's at :4253/:4498).
+
+#### Finding 1 — a FIFTH member of the §7.5 #2 env-leak class: `PAPERCLIP_HOME`
+
+Recorded in full at §7.5 #2b-4. The short version: the cs10 canary reported
+18/69 failed with `Adapter "pi_local" is not available on this instance`, which
+reads exactly like the merge dropping a change-set-10 hunk. It was
+`PAPERCLIP_HOME=/shared/paperclip` — the live instance state — being read
+straight off disk by `adapter-plugin-store.ts`, where the operator has 14 adapter
+types disabled. Hermetic `PAPERCLIP_HOME` → **69/69**.
+
+**Two things make this the most dangerous member of the class so far.** It
+impersonates the exact failure the §4.1 register exists to detect. And it fires
+in §7.2 but not §7.1, because upstream's `run-vitest-stable.mjs` already
+sandboxes `PAPERCLIP_HOME` and `verify-fork.sh`'s targeted lane calls `vitest`
+directly — so the full suite would have stayed green while the targeted lane
+screamed.
+
+Fixed in `verify-fork.sh` by redirecting to `$OUT/paperclip-home` rather than
+unsetting; unsetting falls back to `~/.paperclip`, also real state here.
+
+#### Finding 2 — §7.5 #3 recurred, patch-hash variant, third time
+
+`--frozen-lockfile` refused with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH` on
+`patchedDependencies`. The merge changed two patch files —
+`patches/@agentclientprotocol__claude-agent-acp@0.70.0.patch` and
+`patches/acpx@0.13.1.patch` — without upstream regenerating the lockfile.
+Regenerated with `--no-frozen-lockfile`; the diff is **14 lines and exactly the
+two patch hashes**, matching Session 20's 17-line signature. The fork carries no
+patch changes, so this is purely upstream's.
+
+#### Finding 3 — O-7 is closed; change set 5 is no longer degraded
+
+The operator ported the `?env=` preset into upstream's new flow before this merge
+(`c5560d16f`). `NewAgentSetup` now parses the preset, seeds the connection from
+it, and skips the connect step when one is present; `AgentBasicsDialog` collapses
+to a single step when the adapter is preset. §4's change set 5 row is updated and
+the guard prints `wired` instead of the Session 20 WARN. Suite went 45 → 48.
+
+#### Finding 4 — the fork lost, and regained, all agent navigation
+
+Not this merge — the previous one. Upstream #13011 deleted `AgentDetail`'s
+in-page tab bar, correct for the streamlined shell whose contextual sidebar
+replaces it. This fork defaults `enableStreamlinedUi` **off**, so `ProductionLayout`
+renders instead, and it had no agent case in its `secondarySidebar` resolver.
+Every agent section became unreachable by clicking while every route still
+resolved and every suite stayed green. Fixed in `Layout.production.tsx`, guarded
+by a new `Layout.production.test.tsx` (7 tests), and `ui/src/components/Layout.production.tsx`
+is now a §4.1 collision point.
+
+**This is the Session 19 sidebar loss again, one layout family over.** The
+standing rule is now in §4.1: when upstream builds something into the streamlined
+shell only, check the `.production` twin.
+
+#### O-8 — `enableNativeRunner` held OFF (decided and applied, same session)
+
+#13068 flipped this to **on by default for self-hosted**, which is us. The
+operator's instruction: not yet — Paperclip Runner gets exercised in a dedicated
+Rust environment first. Applied as **fork change #4**, documented in
+[`ReverseProxyCustomChanges.md`](CustomCodeDoc/ReverseProxyCustomChanges.md) §0.1 #4,
+across the same four coupled sites as #3.
+
+**It cost six test assertions, and the reason is structural.**
+`enableNativeRunner` was the **only** flag with `selfHostedDefault: true` and
+`cloudDefault: false`, so turning it off empties the guarded set that #13068's new
+`applyCloudCatalogDefaults` exists to serve — making that helper dead code on this
+fork by upstream's own comment. Accepted: it is Cloud-only logic on a self-hosted
+instance. All six are marked `FORK #4` in
+`server/src/__tests__/instance-settings-cloud-defaults.test.ts`.
+
+#### Finding 5 — a fork default was ALREADY red from this merge, and nothing caught it
+
+Found only because O-8 sent us into that file.
+`instance-settings-cloud-defaults.test.ts` — **new in #13068** — asserts
+`expect(experimental.enableStreamlinedUi).toBe(true)`. Fork change **#3** makes it
+`false`. It arrived failing with the merge and:
+
+- `typecheck` is clean — it is an assertion, not a type;
+- no §7.2 targeted suite covers that file;
+- `verify-fork.sh` greps the **source** for the fork's values, not upstream's
+  assertions *about* those values.
+
+**A new upstream test file can encode upstream's defaults and silently contradict a
+fork default.** The register protects fork *code*; it did not protect fork
+*semantics* against a test upstream had not written yet.
+
+Closed two ways: the assertion is marked `FORK #3`, and `verify-fork.sh` gained a
+`fork_default_off` guard asserting all three sites for each of
+`enableStreamlinedUi`, `enableStreamlinedLeftNavigation` and `enableNativeRunner`.
+**There was no guard for the fork's flag defaults at all before this session** —
+which is why #4's collision had to be found by hand.
+
+#### Finding 6 — §7.5 #7 recurred, and it was mine
+
+I edited `verify-fork.sh` while a run was executing it. Bash tracks position by
+byte offset, so the run died mid-suite with
+`syntax error near unexpected token '§7.5'` and `EMORY (§7.5 #5), not types."` —
+the tail of a line the shift had cut into. The file on disk was valid the whole
+time (`bash -n` passed); only the in-flight process was corrupted. Re-ran clean.
+
+The trap is already documented and was already attributed to a previous session.
+It cost one run to hit it again. **Treat "do not edit the script mid-run" as
+covering the moment you decide to add a guard**, which is exactly when the
+temptation arrives.
+
+#### Full suite (§7.1) — SECOND run, after the env fixes. This is the authoritative one
+
+The first run's numbers are below for contrast; these supersede them.
+
+| Group | Result | Scored |
+| --- | --- | --- |
+| `general-server` | 9 failed, 513 passed, 2 skipped (524) | **FAIL vs baseline 8** — see below |
+| `general-workspaces-a` — UI | **565 / 565** | PASS (baseline 0) |
+| `general-workspaces-a` — CLI | **62 / 62** | PASS |
+| `general-workspaces-b` | 1 failed, 164 passed (165) | PASS (baseline 1 — `github-launcher`) |
+| serialized, per file | **0 failed of 144** | PASS |
+| targeted lane, guards, typecheck | all PASS, 0 `error TS` | PASS |
+
+**`server-startup-feedback-export.test.ts` is gone from the failing set** — the
+db-mock repair held under the group runner, not just in isolation.
+
+**The 9th is a flake, and the new scoring is what surfaced it.**
+`provisioning-membership-remove.test.ts` — **fork-carried, change set 11's own
+suite** — failed with
+`duplicate key value violates unique constraint "companies_issue_prefix_idx"` on
+prefix `T53`. Re-run alone on an idle machine per §7.4 trap 4: **10 / 10**.
+Classification: **Environmental** (embedded-Postgres fixture collision in a shared
+database), not fork-caused and not caused by the env scrub — it also passed in the
+targeted lane in the same session (cs11 27/27).
+
+> **Baseline stays at 8, deliberately.** The standing set is 8; the 9th is a
+> collision that appears under load. Raising the baseline to 9 would hide a real
+> ninth failure the day one arrives. Expect `general-server` to score FAIL
+> occasionally with this one file named — recognise it, re-run it alone, move on.
+
+**Note what the scoring bought.** Before Finding 7 this run would have printed
+`9 failed` and exited **0**. Instead it exited 1, named the group, and forced the
+classification that identified a fork-carried suite flaking. That is the whole
+value of the change.
+
+#### Full suite (§7.1) — FIRST run, before the env fixes
+
+`./scripts/verify-fork.sh full` — **exit 0**, and that exit code was wrong. Read
+the group numbers, not the status.
+
+| Group | Result | Session 20 |
+| --- | --- | --- |
+| `general-server` | 9 failed, 513 passed, 2 skipped (524) | 15 failed, 505 passed (522) |
+| `general-workspaces-a` — UI | **565 / 565** | 566 / 566 |
+| `general-workspaces-a` — CLI | **62 / 62** | 62 / 62 |
+| `general-workspaces-b` | 1 failed, 164 passed (165) | 1 failed, 92 passed (93) |
+| serialized, per file | **0 failed of 144** | 140 passed, 3 failed of 143 |
+
+`workspaces-b` ran 165 files against Session 20's 93 — materially more coverage,
+not a smaller failure. The UI's 565 vs 566 is #13068 deleting four onboarding test
+files and adding others.
+
+#### Finding 7 — `verify-fork.sh full` exited 0 with ten failing files
+
+**The §7.1 group results were printed and never scored.** The loop ran the three
+groups, grepped `Test Files`, echoed the line, and called `check` only for
+"workspaces-a ran both projects". Nothing touched `$FAILED`, so ten failing
+files — one of them fork-caused — produced a green exit and a summary of
+`0 FAIL, 0 WARN`.
+
+**And `serialized 0 failed of 144` did not contradict it.** The serialized set is
+`selectedSerializedSuites` from `run-vitest-stable.mjs`, a curated subset that
+does **not** include `server-startup-feedback-export.test.ts`. Both numbers were
+true and the conclusion drawn from them would have been false.
+
+Fixed: each group's failing-file count is now scored against a baseline
+(`general-server` 8, `workspaces-a` 0, `workspaces-b` 1), FAILing above it and
+noting below it. **The lesson is not the bug, it is that a green
+`verify-fork.sh full` had never been evidence of a passing full suite** — and
+nobody had checked, because the script was written to make the numbers easy to
+read rather than to judge them.
+
+#### Finding 8 — the §4.1 db-mock canary broke again, and only `full` could see it
+
+`server-startup-feedback-export.test.ts`, 13 of 18 failing:
+`No "companyLogos" export is defined on the "@paperclipai/db" mock`. Exactly the
+recurrence §4.1 predicted — #13063's connection-reviews work widened change set
+11's import graph, and the mock must name every table that graph touches at module
+scope. One addition closed all thirteen; the "add one, re-run, read the next name"
+loop terminated in a single pass this time.
+
+**The two survivors were a different bug wearing the same suite.** After the mock
+fix, 2 of 18 still failed with `called 1 times, but got 0` — the sixth env leak
+(§7.5 #2b-5), not a mock gap. Worth separating: one suite, two unrelated causes,
+and the second only becomes visible once the first is fixed.
+
+**Why a targeted run never caught either.** That file was in no §7.2 suite; it ran
+only inside `full`. It is now `suite "cs11 startup wiring (db mock)" 18` in the
+targeted lane, so the next graph-widening shows up in fifteen minutes rather than
+ninety.
+
+#### Classification of the ten (§7.4)
+
+Nine of ten are byte-identical to upstream `5acf56658`, and none of their subjects
+appears in the 86 files the fork carries — no `cursor-local`, `workspace-runtime`,
+`local-service-supervisor`, `cli-invocation-safety`, `cloud-connector-enrollment`
+or `github-launcher`. **Byte-identity used as the substitute for a scratch
+worktree, stated as the argument it is.** The tenth,
+`server-startup-feedback-export.test.ts`, is fork-modified, named the fork's own
+mock in its error, and is now fixed.
+
+#### Superseded — what "for the operator to decide" said before O-8 closed
+
+#### For the operator to decide — not a merge resolution
+
+#13068 flips `enableNativeRunner` to **on by default for self-hosted**
+(`instance-settings.ts` `?? false` → `?? true`, and the bare default `false` →
+`true`). This fork is self-hosted. Upstream's own risk note: `pnpm dev` then
+builds the Rust runner daemon unless `PAPERCLIP_RUNNER_BINARY` is set — the
+container has Rust 1.98.0, so it can. Whether the fork adds a **fourth**
+default-override beside change #3's two streamlined keys is a decision, not a
+conflict. Untouched so far; upstream's value is live in the staged tree.
+
+Note also that the auto-merge of `instance-settings.ts` put upstream's
+`enableNativeRunner` edit on the lines **immediately adjacent** to fork change #3.
+Verified after merging: all six streamlined-default sites still read `false`.
+
+#### Left in the working tree, uncommitted (§5.4)
+
+| File | Why |
+| --- | --- |
+| 191 staged merge files + `MERGE_HEAD` | the merge, held for review |
+| `pnpm-lock.yaml` | 14 lines, the two patch hashes — Finding 2 |
+| `scripts/verify-fork.sh` | `PAPERCLIP_HOME` scrub (Finding 1) + cs5/openapi baselines |
+| `CustomCodeDoc/Review and Test Changes.md` | this entry, §7.5 #2b-4, §4 cs5, §4.1 |
+| `CustomCodeDoc/SESSION-RESUME.md` | rewritten to current state |
 
 ### 2026-09-08 — Session 20: upstream merge into `W8-20260908c` (14 commits)
 

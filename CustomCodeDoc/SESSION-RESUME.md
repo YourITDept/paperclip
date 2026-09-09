@@ -10,147 +10,163 @@ It is the one file in this directory that is not append-only.
 
 ---
 
-## Current state — updated 2026-09-09 00:05
+## Current state — updated 2026-09-09 16:05
 
 | | |
 | --- | --- |
-| **Branch** | `W8-20260908c` |
-| **HEAD** | `ad3ed43fe` "Changed for merge" · merge commit `c31befe27` |
-| **Working tree** | **Dirty — documentation only.** The merge is committed (`c31befe27`). Full suite complete. |
-| **Active work item** | Session 20 — upstream merge (14 commits, upstream tip `7ed122911`) |
-| **Its document** | [`Review and Test Changes.md`](CustomCodeDoc/Review%20and%20Test%20Changes.md) §8, Session 20 |
-| **Rollback tag** | `pre-merge-backup-W8-20260908c` → `a134c5d83` |
+| **Branch** | `W8-20260909a` |
+| **HEAD** | `1bf2c3176` "Merge branch 'W8-20260908c' …" |
+| **Working tree** | **Mid-merge, staged, uncommitted.** `MERGE_HEAD` = `5acf56658`. This is the intended state, not damage. |
+| **Active work item** | Session 21 — upstream merge (5 commits, upstream tip `5acf56658`) |
+| **Its document** | [`Review and Test Changes.md`](CustomCodeDoc/Review%20and%20Test%20Changes.md) §8, Session 21 |
+| **Rollback tag** | `pre-merge-backup-W8-20260909a` → `1bf2c3176` |
 
-> **This file was stale again** (it claimed `W8-20260908a` / `bcede974a`). Git
-> won, per the protocol below. The operator has since committed the sidebar fix
-> (`9f2672b46`) and `membership.remove` (`6e79cd1b9`).
+> **The previous copy of this file was stale** (it claimed `W8-20260908c` /
+> `ad3ed43fe`). Git won, per the protocol below. Since then the operator cut
+> `W8-20260909a` and committed `c5560d16f` (the agent-nav fix and the O-7 port).
 
-### What is staged
+### Testing is COMPLETE — targeted green, full suite classified
 
-`git merge --no-ff --no-commit FETCH_HEAD`, authorised 2026-09-08.
-**14 commits, 350 files, +29937/−5967** — about four times the previous merge.
+**Targeted** (`./scripts/verify-fork.sh targeted`) — **exit 0, all PASS.**
+22 guards, typecheck 0 `error TS`, and 10 change-set suites at baseline:
+cs1 28 · cs3+4 83 · parity 4 · cs5 48 · cs6 19 · cs10 5 and 69 · openapi 6 ·
+cs11 27 · **cs11 startup wiring (db mock) 18** (new to this lane).
 
-| File | Kind | Resolution |
+**Full** (`./scripts/verify-fork.sh full`) — **exit 1, and correctly so.**
+
+| Group | Result | Scored |
 | --- | --- | --- |
-| `ui/src/pages/NewAgent.tsx` | **semantic** | Took upstream's. See below |
-| `ui/src/pages/NewAgent.test.tsx` | **semantic** | Took upstream's |
-| `pnpm-lock.yaml` | regenerate | Not a conflict — a `patchedDependencies` HASH mismatch. See below |
+| `general-server` | 9 failed, 513 passed, 2 skipped (524) | FAIL vs baseline 8 |
+| `general-workspaces-a` UI / CLI | **565/565** · **62/62** | PASS |
+| `general-workspaces-b` | 1 failed, 164 passed (165) | PASS (baseline 1) |
+| serialized, per file | **0 failed of 144** | PASS |
 
-### CHANGE SET 5 IS DEGRADED — the thing to decide next
+**Nothing here is a fork defect.** Of `general-server`'s 9: eight are standing
+upstream failures (byte-identical to `5acf56658`; none of their subjects is among
+the 86 files the fork carries), and the ninth —
+`provisioning-membership-remove.test.ts`, fork-carried — is an embedded-Postgres
+prefix collision that passes **10/10** alone. Baseline stays 8 on purpose so a
+genuine ninth is not hidden.
 
-Upstream #13011 replaced the fork's 500-line `NewAgent.tsx` with a **14-line
-wrapper** around a new `NewAgentSetup` (1149 lines), and deleted the §4.1 canary
-test. The operator chose *take upstream's page, port later*.
+### Changes being kept — the review inventory
 
-Consequence, live now, and it is **worse than "the operator types it"** — that
-was the first reading and it was wrong. The vault button still navigates and
-still selects the runtime via `?adapterType=`, but:
+Everything below is **uncommitted and staged for review in the IDE**. Read the
+*unstaged* half of the `MM`/`AM` files separately from the staged half: the staged
+half is upstream's merge content, the unstaged half is the fork's change on top.
 
-- `parseNewAgentEnvPreset` is orphaned — nothing reads `?env=CODEX_HOME=…`; and
-- **the new setup flow has no free-form environment field at all.**
-  `NewAgentSetup.tsx:329` sets `envBindings: nextConnection?.env ?? {}` — env
-  comes *only* from a selected connection. There is nowhere to type a vault
-  path during creation.
+#### 1. The merge itself — 191 files, staged, `MERGE_HEAD` = `5acf56658`
 
-So a vault-bound agent **cannot be created in one step any more.** The
-capability is not lost — `AgentConfigForm` still carries the env editor and is
-still rendered from `AgentDetail.tsx` — but the flow is now: create the agent,
-then open Agent detail and set `CODEX_HOME` / `CLAUDE_CONFIG_DIR` by hand.
+Upstream `paperclipai/master`, 5 commits (#12950, #13062, #13064, #13063, #13068).
+Two conflicts, both adjacency, both change set 10, both kept-both. One new
+migration, `0249`.
 
-**Upstream has not converged on this.** Its new `SETUP_CREDENTIAL_KEYS`
-(`ui/src/lib/agent-setup-fields.ts`) maps adapters to **API keys**
-(`CURSOR_API_KEY`, `GEMINI_API_KEY`, …) and does not list `codex_local` or
-`claude_local` at all. A vault *directory* is a different concern, so
-"retire change set 5 and use upstream's flow" is **not** available on the
-evidence — retiring it would lose a capability upstream does not provide.
+#### 2. Fork change #4 (O-8) — Paperclip Runner held OFF
 
-**The cs5 suite reports 45 passing and that number means nothing about the fork's
-half** — it is upstream's tests. `verify-fork.sh` now prints a WARN for this
-exact case rather than letting a green suite hide it.
+**Why:** #13068 flipped `enableNativeRunner` on by default for self-hosted.
+Paperclip Runner is an experimental second execution path — a Rust daemon whose
+ADR is still `Status: Proposed`. The operator wants it exercised in a dedicated
+Rust environment first. Also stops `pnpm dev` building runnerd.
 
-The port target, when it is decided, is
-`ui/src/components/new-agent/NewAgentSetup.tsx` — a 1149-line file upstream is
-actively rewriting, which is the argument for deciding it deliberately rather
-than during a merge.
+| File | Δ | What |
+| --- | --- | --- |
+| `packages/shared/src/validators/instance.ts` | +6 −1 | schema default → `false` |
+| `packages/shared/src/feature-catalog.ts` | +7 −4 | `selfHostedDefault` → `false` (must match the schema) |
+| `server/src/services/instance-settings.ts` | +4 −2 | read-time `?? false` + parse-failure fallback |
+| `server/src/__tests__/instance-settings-cloud-defaults.test.ts` | +32 −6 | 6 assertions marked `FORK #4`, 1 marked `FORK #3` |
+
+Full reasoning: [`ReverseProxyCustomChanges.md`](CustomCodeDoc/ReverseProxyCustomChanges.md) §0.1 #4.
+**Reversible** — restore `true` at all four sites and the six assertions.
+
+#### 3. `scripts/verify-fork.sh` — six fixes, all from this session's failures
+
+| Fix | Why it is being kept |
+| --- | --- |
+| `PAPERCLIP_HOME` redirected in the scrub | 5th env leak. Made the cs10 canary report 18/69 failed — indistinguishable from the merge dropping a fork hunk. §7.5 #2b-4. |
+| `PAPERCLIP_PROVISIONING_WORKER_ENABLED` unset | 6th. Change set 11's worker registers a `setInterval` that displaces the callback an upstream test captures. §7.5 #2b-5. |
+| `PAPERCLIP_ADAPTERS` / `_FILE` unset **+ scratch home wiped per run** | 7th/8th, and the only ones that **write to disk**: `startServer()` reconciles them into `adapter-settings.json`, poisoning later suites and the next run. Both halves needed. §7.5 #2b-6. |
+| `-u` flags ordered before the `VAR=VAL` | `env` stops option parsing at the first assignment; a `-u` after it becomes the command and every suite reports `0 passed`. Broke it, fixed it, wrote the constraint into the file. |
+| `fork_default_off` guard ×3 | **There was no guard for the fork's flag defaults at all.** |
+| §7.1 groups scored; `cs11 startup wiring` added to the targeted lane | `full` used to exit **0** with ten failing files. The db-mock canary ran only in the 90-minute lane. |
+
+#### 4. `pnpm-lock.yaml` (+7 −7) — generated, not authored
+
+Two `patchedDependencies` hashes. Upstream changed two patch files without
+regenerating; `--frozen-lockfile` refuses until this is done. Third recurrence of
+§7.5 #3. **RULE 0 counts generated files — this is still yours to review.**
+
+#### 5. Documentation
+
+| File | Δ | What |
+| --- | --- | --- |
+| `Review and Test Changes.md` | +265 −6 | §8 Session 21, §7.5 #2b-4 (the fifth env leak), §4 cs5 restored, §4.1 gains `Layout.production.tsx` |
+| `ReverseProxyCustomChanges.md` | +79 | fork change #4, and a correction to #3's stale "no runtime consumers" claim |
+| `SESSION-RESUME.md` | +85 −111 | this file |
+
+#### Not changed, deliberately
+
+- `/shared/paperclip/adapter-settings.json` — live instance state. It disables 14
+  adapter types, which is what made the cs10 canary look broken. The *test
+  environment* was wrong, not the deployment.
+- Upstream's `enableNativeRunner` behaviour itself — only the default moved. An
+  explicit stored `true` still wins, and the Settings toggle works normally.
 
 ### The very next action
 
-**Testing is COMPLETE. Nothing blocks a deployment test.**
+**A decision, then a deployment test.** Nothing blocks either.
 
-The remaining work is a decision, not a task: **O-7**, change set 5. Port the
-env preset into `ui/src/components/new-agent/NewAgentSetup.tsx`, or accept the
-two-step create-then-edit flow permanently. Retiring it is not available —
-upstream's credential mechanism does not cover vault directories.
+1. Review the staged merge **and the O-8 override** in the IDE, then commit.
+   **RULE 0 — the operator commits, not the assistant.**
+2. Optionally run `./scripts/verify-fork.sh full` (~90 min) before deploying.
 
-Uncommitted, for review:
-
-```
-M CustomCodeDoc/Review and Test Changes.md    Session 20 entry, §7.5 #3 + #7, cs5 DEGRADED
-M CustomCodeDoc/SESSION-RESUME.md             this file
-```
-
-### Final result — full suite, 2026-09-08
-
-| Check | Result |
-| --- | --- |
-| Guards (14) | **all PASS**, one WARN (cs5 degraded, expected) |
-| `typecheck` | **exit 0**, 0 `error TS` |
-| §7.2 change-set suites (9) | **all PASS** — cs1 28, cs3+4 83, parity 4, cs5 45, cs6 19, cs10 5 + 69, openapi 6, cs11 27 |
-| `general-server` | 15 failed, 505 passed, 2 skipped (522) |
-| `general-workspaces-a` — UI | **566 / 566** |
-| `general-workspaces-a` — CLI | **62 / 62** |
-| `general-workspaces-b` | 1 failed, 92 passed |
-| serialized, per file | **140 passed, 3 failed of 143** |
-
-**No fork-caused failures.** The `general-server` failing set is **identical** to
-Session 19 — not one new, not one gone. All 16 failures reproduce individually
-on an idle machine (so none is contention), and all 14 implicated files are
-**byte-identical to upstream `7ed122911`** — including `heartbeat.ts`, which
-upstream rewrote across 5 commits in this merge.
-
-**The CLI project went 1 failure → 62/62**, confirming Session 19's
-`PAPERCLIP_NO_BROWSER` scrub actually fixed it.
+> **O-8 is decided and applied.** `enableNativeRunner` is held OFF as fork change
+> #4 (ReverseProxyCustomChanges §0.1 #4). Paperclip Runner gets tested in a
+> dedicated Rust environment before the fork adopts it.
 
 ### Deploying this build
 
-Three new migrations (`0246`–`0248`). `PAPERCLIP_MIGRATION_AUTO_APPLY=true` is
-set, so watch the boot log first. Then two fork-specific checks:
+One new migration (`0249`). `PAPERCLIP_MIGRATION_AUTO_APPLY=true` is set, so
+watch the boot log first. Then the two standing fork-specific checks:
 
 - `provisioning: worker enabled` in the log (change set 11 — its loss is silent)
 - Codex/Claude login tabs visible in Settings (Session 19 shipped a regression
   here that went unnoticed for a week)
 
-### Two mistakes made this session — both now fixed in the script
+And one new to this build:
 
-1. **Never edit `verify-fork.sh` while a run is executing it.** Bash tracks
-   position by byte offset, so inserting lines mid-file makes the remainder
-   execute garbled text. A 90-minute run was killed rather than trusted.
-   Run a copy (`cp scripts/verify-fork.sh /tmp/…`) if the script must change.
-2. **A copy must still resolve the repo root.** `cd "$(dirname "$0")/.."` from
-   `/tmp` resolves to `/`; pnpm then walks the whole filesystem and every suite
-   reports `Command "vitest" not found` or 0 tests — which looks **exactly** like
-   §7.5 #1's missing-plugin-sdk signature and sends you to the wrong place. The
-   script now resolves the root robustly and exits 2 with a clear message if it
-   cannot.
+- **Open an agent and confirm the left nav lists Instructions / Skills / Runtime
+  / Secrets / Tools / Permissions / API Keys / Revisions.** Session 21 Finding 4
+  — that nav was absent in the production shell after #13011, with every route
+  still resolving and every suite still green.
 
-### Findings so far
+### Findings this session
 
-**Trap #3 in a new form.** `--frozen-lockfile` failed on `patchedDependencies`.
-The entry *names* matched on all three sides — it was the **hashes**: upstream
-edited two patch files (`acpx@0.13.1` +142 lines,
-`@agentclientprotocol/codex-acp@1.6.2` +10) without regenerating the lockfile.
-The fork carries no patch changes, so it is purely upstream's. Regenerated with
-`--no-frozen-lockfile`; the diff is 17 lines and exactly those two hashes.
+**A fifth `PAPERCLIP_*` env leak, and the worst-behaved one yet.**
+`PAPERCLIP_HOME=/shared/paperclip` is the live instance state, read straight off
+disk by `adapter-plugin-store.ts`. It made the **cs10 canary** report 18/69
+failed — impersonating exactly the "merge dropped a fork hunk" signal that suite
+exists to raise. Hermetic home → 69/69. Full account at §7.5 #2b-4.
 
-**Trap #5's abandoned processes are still happening.** A 9-hour-old
-`paperclip-company-cli-e2e` held 714 MB and **ignored SIGTERM**, exactly as the
-trap records. Cleared with `kill -9` before the run.
+**The scoping trap.** The compare URL said upstream was one commit ahead; that
+was relative to `W8-20260908d`, not an ancestor of this branch. From here it is
+five. Always check `git log --oneline HEAD..FETCH_HEAD`.
+
+**A fork default arrived red and nothing caught it.** #13068's new
+`instance-settings-cloud-defaults.test.ts` asserts `enableStreamlinedUi` is
+`true`; fork change #3 makes it `false`. Typecheck is clean, no §7.2 suite covers
+the file, and the guards grep the source rather than upstream's assertions about
+it. Found only because O-8 sent us into that file. `verify-fork.sh` now carries a
+`fork_default_off` guard for all three flag defaults — **there was none before.**
+
+**I hit §7.5 #7 myself:** edited `verify-fork.sh` mid-run and garbled the running
+copy. One wasted run. The temptation arrives exactly when you decide to add a
+guard.
 
 ### Open items carried
 
 | Id | Owner | One line |
 | --- | --- | --- |
-| **O-7** | change set 5 | Decide the port into `NewAgentSetup.tsx`, or retire the `?env=` half. **Degraded until then**, with a WARN in the guards. |
+| ~~O-8~~ | fork defaults | **CLOSED 2026-09-09.** `enableNativeRunner` held OFF as fork change #4. Revisit after the Rust environment test. |
+| ~~O-7~~ | change set 5 | **CLOSED 2026-09-09.** The preset is ported into `NewAgentSetup`; the guard prints `wired`. |
 | O-3 | upstream, really | No migration strips `modelProfiles` from existing rows. |
 | O-4 | change sets 3 and 4 | `PAPERCLIP_CODEX_VAULT_ROOT` / `PAPERCLIP_CLAUDE_VAULT_ROOT` appear in no markdown, `.env.example`, or `docker/`. |
 | O-5 | change set 3 | `/sysops/llm/openrouter/` is **not** a managed vault. |
@@ -173,11 +189,12 @@ from a diff is not.
 4. Re-run the verification commands listed there. Do not trust a recorded "green"
    across a disconnection — the tree may have moved.
 
-> **If you ever resume mid-merge** (not the case now — this one is committed):
-> a staged, uncommitted tree is the intended state, not damage.
+> **You are resuming mid-merge right now.** A staged, uncommitted tree is the
+> intended state, not damage.
 > `git status --short | grep -E '^(UU|AA|DU|UD)'` returning nothing means every
-> conflict is resolved. To start over, `git merge --abort`; to discard the whole
-> thing, `git reset --hard pre-merge-backup-<branch>`. **Neither without asking.**
+> conflict is resolved — it does, as of this writing.
+> To start over, `git merge --abort`; to discard the whole thing,
+> `git reset --hard pre-merge-backup-W8-20260909a`. **Neither without asking.**
 
 ### While working — the checkpoint rule
 

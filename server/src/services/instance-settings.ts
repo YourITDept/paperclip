@@ -224,7 +224,8 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
   if (parsed.success) {
     return {
       enableEnvironments: parsed.data.enableEnvironments ?? false,
-      enableNativeRunner: parsed.data.enableNativeRunner ?? true,
+      // FORK #4 (O-8): upstream is `?? true`. See ReverseProxyCustomChanges.md.
+      enableNativeRunner: parsed.data.enableNativeRunner ?? false,
       enableManagedSandboxOnly: parsed.data.enableManagedSandboxOnly ?? false,
       enableIsolatedWorkspaces: parsed.data.enableIsolatedWorkspaces ?? false,
       // FORK: upstream is `?? true` for both. See ReverseProxyCustomChanges.md #3.
@@ -265,7 +266,8 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
   }
   return {
     enableEnvironments: false,
-    enableNativeRunner: true,
+    // FORK #4 (O-8): upstream is `true`.
+    enableNativeRunner: false,
     enableManagedSandboxOnly: false,
     enableIsolatedWorkspaces: false,
     // FORK: upstream is `true` for both streamlined keys. See #3.

@@ -56,10 +56,13 @@ export const INSTANCE_FEATURE_CATALOG: Record<InstanceFeatureKey, FeatureCatalog
       "Allow explicitly configured local Codex, OpenCode, and qualified ACPX agents to use the experimental Rust Paperclip Runner, including authenticated sandbox ingress when required. Onboarding remains on legacy adapters.",
     tier: "managed",
     cloudDefault: false,
-    // On by default for self-hosted instances. Requires a Rust toolchain (or
-    // PAPERCLIP_RUNNER_BINARY) for `pnpm dev`, which builds runnerd whenever
-    // this is on.
-    selfHostedDefault: true,
+    // Upstream defaults this on for self-hosted, noting it requires a Rust
+    // toolchain (or PAPERCLIP_RUNNER_BINARY) for `pnpm dev`, which builds runnerd
+    // whenever this is on.
+    // FORK #4 (O-8, 2026-09-09): off. Must equal the schema default —
+    // feature-catalog.test.ts "keeps selfHostedDefault in sync with the schema
+    // defaults" fails otherwise, so this moves with validators/instance.ts.
+    selfHostedDefault: false,
   },
   enableManagedSandboxOnly: {
     title: "Managed Environment Only",

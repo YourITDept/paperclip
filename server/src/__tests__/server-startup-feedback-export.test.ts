@@ -242,6 +242,7 @@ vi.mock("@paperclipai/db", () => ({
   heartbeatRuns: {},
   issueDocuments: {},
   issues: {},
+  companyLogos: {},
 }));
 
 vi.mock("../app.js", () => ({

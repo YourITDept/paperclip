@@ -70,6 +70,7 @@ each one after every re-branch.
 | 1 | Invite auto-accept guarded on the invite having loaded | [`ui/src/pages/InviteLanding.tsx`](ui/src/pages/InviteLanding.tsx) | the named test in #1 below |
 | 2 | **TEMPORARY** — Connectors hidden from the sidebar nav | [`ui/src/lib/fork-flags.ts`](ui/src/lib/fork-flags.ts), [`ui/src/components/Sidebar.tsx`](ui/src/components/Sidebar.tsx), [`ui/src/components/Sidebar.production.tsx`](ui/src/components/Sidebar.production.tsx) | the named test in #2 below |
 | 3 | Streamlined UI + Streamlined Left Navigation default OFF | [`packages/shared/src/validators/instance.ts`](packages/shared/src/validators/instance.ts), [`packages/shared/src/feature-catalog.ts`](packages/shared/src/feature-catalog.ts), [`server/src/services/instance-settings.ts`](server/src/services/instance-settings.ts) | the named tests in #3 below |
+| 4 | Paperclip Runner (`enableNativeRunner`) default OFF | [`packages/shared/src/validators/instance.ts`](packages/shared/src/validators/instance.ts), [`packages/shared/src/feature-catalog.ts`](packages/shared/src/feature-catalog.ts), [`server/src/services/instance-settings.ts`](server/src/services/instance-settings.ts) | the named tests in #4 below |
 
 #### 1. Invite auto-accept must be guarded on `Boolean(invite)`
 
@@ -220,6 +221,84 @@ lost.
 
 **To revert.** Restore `true` at all four sites (the catalog included, or the
 sync test fails) and restore the four test assertions.
+
+> **One claim in #3 above is now stale.** It says `selfHostedDefault`/`cloudDefault`
+> "have no runtime consumers outside the catalog". Upstream #13068 added
+> `applyCloudCatalogDefaults`, which reads **both** at runtime to re-assert a Cloud
+> default for flags that are on for self-hosted and off for Cloud. On a self-hosted
+> instance it is still inert, but the pair is no longer documentation-only.
+
+#### 4. Paperclip Runner (`enableNativeRunner`) default OFF
+
+**Added 2026-09-09 (Session 21), closing O-8, at the operator's instruction.**
+
+**Why.** Upstream #13068 flipped this flag from off to **on by default for
+self-hosted instances**. Paperclip Runner is a second execution path — a Rust
+daemon (`paperclip-runnerd`) that hosts provider sessions outside the Node server
+— and its ADR ([`doc/architecture/paperclip-runner.md`](doc/architecture/paperclip-runner.md))
+is still `Status: Proposed` with a "Required proof before general availability"
+checklist that reads as open work. The operator wants it exercised in a dedicated
+Rust environment first, so the fork holds the previous default.
+
+**The practical cost of leaving it on**, which is the other half of the reason:
+`pnpm dev` builds the Rust daemon whenever the flag resolves on
+([`scripts/dev-runner.ts:576`](scripts/dev-runner.ts#L576)), and
+`getNativeRunnerRequired()` *conservatively prepares it* when it cannot determine
+the requirement. `PAPERCLIP_RUNNER_BINARY` short-circuits that build.
+
+**What this does NOT change.** Nothing migrates. Rollout has three gates
+(ADR §Rollout): the flag, an agent explicitly selecting `paperclip_runner`, and a
+provider from the qualified catalog. Compatibility invariants 1–5 keep every
+direct adapter direct. An explicit stored `true` still wins — the toggle in
+Settings → Instance → Experimental works normally.
+
+> **Belt and braces already present.** `/shared/paperclip/adapter-settings.json`
+> on this instance lists `paperclip_runner` in `disabledTypes`, and
+> `assertSelectableAdapterType` checks the flag first, then that set. The adapter
+> was already refused before this change; #4 restores the *default*, which is what
+> a rebuilt or fresh instance gets.
+
+**Where the default lives — the same four coupled sites as #3.**
+
+| Site | Change |
+| --- | --- |
+| [`validators/instance.ts:49`](packages/shared/src/validators/instance.ts#L49) | `z.boolean().default(true)` → `.default(false)` |
+| [`instance-settings.ts:228`](server/src/services/instance-settings.ts#L228) | `?? true` → `?? false` |
+| [`instance-settings.ts:270`](server/src/services/instance-settings.ts#L270) | parse-failure fallback, `true` → `false` |
+| [`feature-catalog.ts`](packages/shared/src/feature-catalog.ts) | `selfHostedDefault: true` → `false` |
+
+`cloudDefault` is already `false` upstream, so unlike #3 there is nothing to leave
+diverging.
+
+**This one costs more than #3 did, and that is worth knowing before a re-apply.**
+`enableNativeRunner` was the **only** flag with `selfHostedDefault: true` and
+`cloudDefault: false`, so turning it off **empties the guarded set** that
+`applyCloudCatalogDefaults` exists to serve. By upstream's own comment that makes
+the helper dead code on this fork. Accepted: it is Cloud-only logic and this
+instance is self-hosted.
+
+**Detect it with.** Six assertions marked `FORK #4` in
+`server/src/__tests__/instance-settings-cloud-defaults.test.ts` — a file **#13068
+introduced**, which no §7.2 targeted suite and no typecheck covers:
+
+| Upstream assertion | Fork value |
+| --- | --- |
+| `expect(guarded).toContain("enableNativeRunner")` | `toEqual([])` |
+| self-hosted schema default `toBe(true)` | `false` |
+| `"enableNativeRunner" in stored` → `false`, twice (Cloud echo-strip) | `true` |
+| self-hosted normalized row `toBe(true)` | `false` |
+
+If those names reappear asserting `true` after a re-branch, #4 was lost.
+
+> **A seventh assertion in that same file is change #3's, not #4's.** It arrived
+> **already red** with the #13068 merge: `expect(experimental.enableStreamlinedUi).toBe(true)`.
+> Found 2026-09-09 only because #4 sent us into this file. **A new upstream test
+> file can encode upstream's defaults and quietly contradict a fork default with
+> nothing in the guards to catch it** — `verify-fork.sh` greps the source, not
+> upstream's assertions about it.
+
+**To revert.** Restore `true` at all four sites (the catalog included, or
+`feature-catalog.test.ts`'s sync test fails) and restore the six assertions.
 
 **Why it exists.** Every other term in that expression reads a field off `invite`,
 and an absent `invite` answers each one the *permissive* way —

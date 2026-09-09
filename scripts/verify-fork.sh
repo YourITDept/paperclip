@@ -50,12 +50,65 @@ SUMMARY="$OUT/summary.tsv"
 # a host, URL, path or mode that matches `env | grep PAPERCLIP_`, or when
 # something was "called 0 times", suspect a fifth.
 # ---------------------------------------------------------------------------
+# ORDER MATTERS: every `-u` must precede the VAR=VAL assignment. `env` stops
+# parsing options at the first non-option argument, so a `-u` placed after
+# PAPERCLIP_HOME=... is taken as the COMMAND and every suite dies with
+# `env: '-u': No such file or directory` — which prints as `0 passed` on every
+# suite and reads exactly like §7.5 #1's collected-nothing signature.
+# Broken and fixed this way on 2026-09-09 (Session 21).
 CLEAN=(env
   -u PAPERCLIP_CODEX_HOME          # retired in v6, harmless but kept
   -u PAPERCLIP_PUBLIC_URL          # 2 OAuth origin tests
   -u PAPERCLIP_TELEMETRY_DISABLED  # CLI telemetry suite
   -u PAPERCLIP_NO_BROWSER          # CLI onboard-service; found Session 19
+  # The FIFTH, found 2026-09-09 (Session 21). The container exports
+  # PAPERCLIP_HOME=/shared/paperclip — the LIVE instance state — and
+  # server/src/services/adapter-plugin-store.ts reads
+  # $PAPERCLIP_HOME/adapter-settings.json directly, with no mock. The
+  # operator has 14 adapter types disabled there, so
+  # agent-permissions-routes.test.ts cannot create a pi_local/process agent
+  # and 18 of its 69 tests fail with `Adapter "..." is not available on this
+  # instance. Available adapters: claude_local, codex_local`. That reads like
+  # a merge regression in the cs10 canary and is not one.
+  #
+  # Redirected, not unset: unsetting falls back to ~/.paperclip
+  # (packages/shared/src/home-paths.ts:19), which is also real state.
+  # The SIXTH, found 2026-09-09 (Session 21), and the first that leaks through
+  # FORK-CARRIED code. The container exports
+  # PAPERCLIP_PROVISIONING_WORKER_ENABLED=true, so change set 11's worker starts
+  # inside `startServer()` and registers its own `setInterval` drain loop.
+  # server-startup-feedback-export.test.ts captures the LAST setInterval callback
+  # it sees, so the fork's loop displaces the routine-tick callback and two
+  # upstream tests report `expected "vi.fn()" to be called 1 times, but got 0`.
+  #
+  # Note the shape: the previous five leaked into upstream code. This one is only
+  # reachable because the fork added `startProvisioningWorker` to index.ts — so a
+  # variable that is correct for the deployment makes an UPSTREAM test fail for a
+  # FORK reason. Unsetting it is the test-environment fix; making the worker
+  # inert under NODE_ENV=test would be the code fix, and is not taken here
+  # because change set 11 is deliberately thin in upstream files.
+  -u PAPERCLIP_PROVISIONING_WORKER_ENABLED
+  # SEVENTH and EIGHTH, found 2026-09-09 (Session 21) — and these two do not just
+  # leak, they WRITE. `server/src/index.ts:1820` reconciles PAPERCLIP_ADAPTERS
+  # into $PAPERCLIP_HOME/adapter-settings.json at startup, so any test that
+  # reaches startServer() PERSISTS the deployment's curated disabled list into
+  # whatever home the run is using — including the scratch home above. A later
+  # suite in the same run then reads it and fails with `Adapter "..." is not
+  # available on this instance`, which is §7.5 #2b-4 all over again but
+  # self-inflicted, one run later, and with no environment variable left to blame.
+  #
+  # Found the hard way: repairing the db mock (Finding 8) let startServer() get
+  # far enough to do the write for the first time, so a FIX in one suite created
+  # a FAILURE in another. Scrub the inputs and wipe the home each run — either
+  # alone is insufficient.
+  -u PAPERCLIP_ADAPTERS
+  -u PAPERCLIP_ADAPTERS_FILE
+  PAPERCLIP_HOME="$OUT/paperclip-home"
 )
+# Wipe, not just create: a previous run's startServer() may have persisted an
+# adapter-settings.json in here. State that survives a run defeats the point.
+rm -rf "$OUT/paperclip-home"
+mkdir -p "$OUT/paperclip-home"
 
 red()  { printf '\033[31m%s\033[0m\n' "$*"; }
 grn()  { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -161,6 +214,30 @@ g     "cs10 restoreDuplicateSourceEnv (def + 2 call sites)" 3 "restoreDuplicateS
 g     "cs11 provisioning wired into index.ts" 3 "startProvisioningWorker\|provisioningWorker.stop" server/src/index.ts
 check "cs11 module present" "5" "$(ls server/src/provisioning/*.ts 2>/dev/null | wc -l | tr -d ' ')"
 
+# ---------------------------------------------------------------------------
+# ReverseProxyCustomChanges.md §0.1 #3 and #4 — the fork's experimental-flag
+# defaults. Upstream ships all three ON for self-hosted; the fork ships them OFF.
+#
+# These fail in the WORST way available: a merge that takes upstream's line
+# builds, typechecks and passes every suite, and the only symptom is a rebuilt
+# instance quietly coming up with an experimental UI shell or an experimental
+# Rust execution path nobody opted into. There was no guard for them until
+# 2026-09-09, which is why #4's collision was found by hand.
+#
+# Four coupled sites per flag; feature-catalog.test.ts enforces catalog/schema
+# agreement, so a partial re-apply is a test failure rather than a silent half.
+# ---------------------------------------------------------------------------
+fork_default_off() { # fork_default_off <flag>
+  local flag=$1 n=0
+  grep -qE "  $flag: z\.boolean\(\)\.default\(false\)," packages/shared/src/validators/instance.ts && n=$((n+1))
+  grep -qE "      $flag: parsed\.data\.$flag \?\? false," server/src/services/instance-settings.ts && n=$((n+1))
+  grep -qE "^    $flag: false," server/src/services/instance-settings.ts && n=$((n+1))
+  check "fork default OFF: $flag" "3" "$n"
+}
+fork_default_off enableStreamlinedUi
+fork_default_off enableStreamlinedLeftNavigation
+fork_default_off enableNativeRunner
+
 if [ "$MODE" = "guards" ]; then hdr "guards only — stopping"; exit $FAILED; fi
 
 # ===========================================================================
@@ -203,14 +280,19 @@ suite "cs3+4 credential vaults" 83 server/src/__tests__/codex-vault-login-servic
   packages/adapters/codex-local/src/server/codex-vault.test.ts \
   packages/adapters/claude-local/src/server/claude-vault.test.ts
 suite "cs3/4 sidebar parity (UI reachability)" 4 ui/src/components/CompanySettingsSidebar.fork-parity.test.ts
-suite "cs5 vault preset" 20 ui/src/lib/new-agent-preset.test.ts ui/src/pages/NewAgent.test.tsx
+suite "cs5 vault preset" 48 ui/src/lib/new-agent-preset.test.ts ui/src/pages/NewAgent.test.tsx
 suite "cs6 invite guard" 19 ui/src/pages/InviteLanding.test.tsx
 suite "cs10 duplicate payload" 5 ui/src/lib/duplicate-agent-payload.test.ts
 suite "cs10 agent permissions" 69 server/src/__tests__/agent-permissions-routes.test.ts
-suite "cs3/4 openapi contract" 5 server/src/__tests__/openapi-routes.test.ts
+suite "cs3/4 openapi contract" 6 server/src/__tests__/openapi-routes.test.ts
 suite "cs11 provisioning" 27 server/src/__tests__/provisioning-agent-codex-home.test.ts \
   server/src/__tests__/provisioning-agent-task.test.ts \
   server/src/__tests__/provisioning-membership-remove.test.ts
+# §4.1 collision point: the `@paperclipai/db` vi.mock that change set 11's import
+# graph forces. Added to the TARGETED lane 2026-09-09 (Session 21) — it lived only
+# in `full` before, so #13063 widening the graph (`companyLogos`) went unseen by
+# every targeted run. 18/18 expected.
+suite "cs11 startup wiring (db mock)" 18 server/src/__tests__/server-startup-feedback-export.test.ts
 
 if [ "$MODE" != "full" ]; then
   hdr "Summary"; column -t -s"$(printf '\t')" "$SUMMARY" 2>/dev/null || cat "$SUMMARY"
@@ -223,10 +305,28 @@ hdr "4. Full suite — §7.1, four processes"
 # ONE GROUP PER PROCESS. `pnpm run test:run` exits on the first failing group,
 # so groups 2-4 never start; on this host general-server ALWAYS fails, which
 # means test:run has never once exercised most of the fork's own code.
+# Baselines are FAILING-FILE counts, all classified Pre-existing upstream in §8
+# Session 21 (byte-identical to the upstream tip; none is a fork-carried file).
+# Going ABOVE a baseline is the alarm; below is progress and only a note.
+group_baseline() { case "$1" in
+  general-server) echo 8 ;; general-workspaces-a) echo 0 ;; general-workspaces-b) echo 1 ;; *) echo 0 ;;
+esac; }
 for grp in general-server general-workspaces-a general-workspaces-b; do
   echo "  running $grp ..."
   "${CLEAN[@]}" node scripts/run-vitest-stable.mjs --mode general --group "$grp" > "$OUT/$grp.log" 2>&1
   grep -hE "Test Files" "$OUT/$grp.log" | sed 's/^/    /'
+  # Until 2026-09-09 these lines were PRINTED AND NOT SCORED, so `full` exited 0
+  # while ten files failed — one of them fork-caused. Never trust the exit code
+  # alone again; that is what this block is for.
+  gf=$(grep -hoE '^ ?Test Files +[0-9]+ failed' "$OUT/$grp.log" | grep -oE '[0-9]+' | awk '{t+=$1} END{print t+0}')
+  gb=$(group_baseline "$grp")
+  if [ "$gf" -le "$gb" ]; then
+    grn "  PASS  $grp failing files ($gf, baseline $gb)"; note PASS "$grp failing files" "$gf<=$gb"
+    [ "$gf" -lt "$gb" ] && ylw "        below baseline — if this holds, lower it here and in §7.4"
+  else
+    red "  FAIL  $grp failing files — $gf, baseline $gb. Classify each per §7.4."
+    note FAIL "$grp failing files" "got=$gf want<=$gb"; FAILED=1
+  fi
 done
 # §7.1: general-workspaces-a holds TWO vitest projects (ui, cli) and the abort
 # applies between them too. One summary block means a project was skipped and

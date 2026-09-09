@@ -41,7 +41,12 @@ export const patchInstanceGeneralSettingsSchema = z
 
 export const instanceExperimentalSettingsSchema = z.object({
   enableEnvironments: z.boolean().default(false),
-  enableNativeRunner: z.boolean().default(true),
+  // FORK #4 (O-8, 2026-09-09): upstream defaults this ON for self-hosted.
+  // The Rust Paperclip Runner is an experimental second execution path
+  // (doc/architecture/paperclip-runner.md, still `Status: Proposed`). Held off
+  // until it is exercised in a dedicated Rust environment. Also keeps `pnpm dev`
+  // from building runnerd. An explicit stored `true` still wins.
+  enableNativeRunner: z.boolean().default(false),
   enableManagedSandboxOnly: z.boolean().default(false),
   enableIsolatedWorkspaces: z.boolean().default(false),
   // FORK: upstream defaults both of these to true. Defaulted to false so an
