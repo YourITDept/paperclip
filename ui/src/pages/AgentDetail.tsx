@@ -59,8 +59,6 @@ import { formatDate, relativeTime, formatTokens, visibleRunCostUsd } from "../li
 import { cn } from "../lib/utils";
 import { describeRunRetryState } from "../lib/runRetryState";
 import { Button } from "@/components/ui/button";
-import { Tabs } from "@/components/ui/tabs";
-import { PageTabBar } from "../components/PageTabBar";
 import { AuditFeed } from "./audit/AuditFeed";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -289,18 +287,6 @@ function scrollToContainerBottom(container: ScrollContainer, behavior: ScrollBeh
 
 /** @deprecated Use AGENT_DETAIL_NAVIGATION for contextual navigation. */
 export const AGENT_DETAIL_TABS = AGENT_DETAIL_NAVIGATION.flatMap((section) => section.items);
-
-const LEGACY_AGENT_DETAIL_TABS = [
-  { value: "dashboard", label: "Dashboard" },
-  { value: "instructions", label: "Instructions" },
-  { value: "skills", label: "Skills" },
-  { value: "configuration", label: "Configuration" },
-  { value: "secrets", label: "Secrets" },
-  { value: "tools", label: "Tools" },
-  { value: "runs", label: "Runs" },
-  { value: "audit", label: "Audit" },
-  { value: "budget", label: "Budget" },
-] as const;
 
 export const DISCARD_AGENT_CONFIG_CHANGES_MESSAGE = "Discard unsaved agent configuration changes?";
 
@@ -765,19 +751,6 @@ export function AgentDetail() {
   const [dismissedLeftAgentIds, setDismissedLeftAgentIds] = useState<Set<string>>(() => new Set());
   const activeView: AgentDetailView = urlRunId ? "run-detail" : parseAgentDetailView(urlTab ?? null);
   const legacyAuditSection = !urlRunId ? agentLegacyAuditSection(urlTab ?? null) : null;
-  const legacyView = urlRunId
-    ? "runs"
-    : legacyAuditSection === "runs"
-      ? "runs"
-      : legacyAuditSection === "activity"
-        ? "audit"
-        : legacyAuditSection === "costs" || legacyAuditSection === "budgets"
-          ? "budget"
-          : activeView === "overview"
-            ? "dashboard"
-            : activeView === "runtime"
-              ? "configuration"
-              : activeView;
   const needsOverviewData = activeView === "overview";
   const needsRunData = activeView === "run-detail";
   const shouldLoadHeartbeats = needsOverviewData || needsRunData;
@@ -806,10 +779,6 @@ export function AgentDetail() {
   });
   const resolvedCompanyId = agent?.companyId ?? selectedCompanyId;
   const canonicalAgentRef = agent ? agentRouteRef(agent) : routeAgentRef;
-  const handleLegacyTabChange = useCallback((next: string) => {
-    if (!prepareAgentNavigation()) return;
-    navigate(`/agents/${canonicalAgentRef || routeAgentRef}/${next}`);
-  }, [canonicalAgentRef, navigate, prepareAgentNavigation, routeAgentRef]);
   const agentLookupRef = agent?.id ?? routeAgentRef;
   const resolvedAgentId = agent?.id ?? null;
   const { data: boardAccess } = useQuery({

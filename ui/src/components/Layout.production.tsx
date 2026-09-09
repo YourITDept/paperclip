@@ -6,6 +6,7 @@ import { CompanySettingsSidebar } from "./CompanySettingsSidebar.production";
 import { CompanySettingsNav } from "./access/CompanySettingsNav";
 import { AppsSidebar } from "./AppsSidebar.production";
 import { AppDetailSidebar } from "./AppConnectionSidebar.production";
+import { AgentContextualSidebar } from "./AgentContextualSidebar";
 import { BreadcrumbBar } from "./BreadcrumbBar.production";
 import { PropertiesPanel } from "./PropertiesPanel";
 import { CommandPalette } from "./CommandPalette";
@@ -33,6 +34,7 @@ import { useCompanyPageMemory } from "../hooks/useCompanyPageMemory";
 import { healthApi } from "../api/health";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { resolveArchivedCompanyBounce, shouldSyncCompanySelectionFromRoute } from "../lib/company-selection";
+import { classifyShellRoute } from "../lib/shell-navigation";
 import { useOptionalToastActions } from "../context/ToastContext";
 import {
   applyMainContentScrollTop,
@@ -106,7 +108,8 @@ export function Layout() {
   const {
     companyPrefix,
     pluginRoutePath: matchedPluginRoutePath,
-  } = useParams<{ companyPrefix: string; pluginRoutePath?: string }>();
+    agentId,
+  } = useParams<{ companyPrefix: string; pluginRoutePath?: string; agentId?: string }>();
   const navigate = useNavigate();
   const location = useLocation();
   const navigationType = useNavigationType();
@@ -129,6 +132,15 @@ export function Layout() {
   // The Skills Store renders its own secondary (category) sidebar, so the main
   // app nav collapses to its rail throughout the Skills Store section (PAP-10879).
   const isSkillsRoute = isSkillsStoreRoute(location.pathname, companyPrefix);
+  // FORK: upstream #13011 deleted AgentDetail's in-page tab bar on the
+  // assumption that the streamlined shell's contextual sidebar replaces it.
+  // This fork defaults `enableStreamlinedUi` off (ReverseProxyCustomChanges #3),
+  // so this shell must render that nav itself — otherwise every agent section
+  // (Instructions, Skills, Runtime, Secrets, Tools, Permissions, API Keys,
+  // Revisions) is unreachable by clicking. `classifyShellRoute` is shared with
+  // the streamlined shell so both agree on what counts as an agent detail route.
+  const isAgentDetailRoute =
+    classifyShellRoute(location.pathname, companyPrefix).builtInContextualSurface === "agent";
   const onboardingTriggered = useRef(false);
   const lastMainScrollTop = useRef(0);
   const previousPathname = useRef<string | null>(null);
@@ -178,6 +190,8 @@ export function Layout() {
     <AppDetailSidebar kind="application" applicationId={appDetailApplicationId} />
   ) : isAppsRoute || isToolsRoute ? (
     <AppsSidebar />
+  ) : isAgentDetailRoute && agentId ? (
+    <AgentContextualSidebar agentRef={agentId} />
   ) : routeSidebarSlot ? (
     <PluginSlotMount
       slot={routeSidebarSlot}

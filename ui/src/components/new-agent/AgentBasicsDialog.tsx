@@ -103,6 +103,7 @@ export function AgentBasicsDialog({
   const [name, setName] = useState("");
   const [adapterType, setAdapterType] = useState(initialAdapter);
   const [runnerProvider, setRunnerProvider] = useState("codex");
+  const presetAdapter = Boolean(initialAdapter);
   const [step, setStep] = useState<"name" | "adapter">("name");
   const {
     data: adapters,
@@ -142,24 +143,26 @@ export function AgentBasicsDialog({
           className="flex items-center gap-2 px-6 py-5 text-xs text-muted-foreground"
           aria-label="New agent progress"
         >
-          <span
-            className={cn(step === "name" && "font-medium text-foreground")}
-          >
-            1. Name
-          </span>
-          <ChevronRight className="size-3" />
-          <span
-            className={cn(step === "adapter" && "font-medium text-foreground")}
-          >
-            2. Adapter
-          </span>
+          <span className="font-medium text-foreground">1. Name</span>
+          {!presetAdapter && (
+            <>
+              <ChevronRight className="size-3" />
+              <span
+                className={cn(step === "adapter" && "font-medium text-foreground")}
+              >
+                2. Adapter
+              </span>
+            </>
+          )}
         </div>
         <form
           className="flex min-h-0 flex-col"
           onSubmit={(event) => {
             event.preventDefault();
             if (!name.trim()) return;
-            if (step === "name") setStep("adapter");
+            if (step === "name" && presetAdapter && validAdapter)
+              onContinue({ name: name.trim(), adapterType, runnerProvider });
+            else if (step === "name") setStep("adapter");
             else if (validAdapter)
               onContinue({ name: name.trim(), adapterType, runnerProvider });
           }}
@@ -292,7 +295,9 @@ export function AgentBasicsDialog({
               type="submit"
               disabled={!name.trim() || (step === "adapter" && !validAdapter)}
             >
-              {step === "name" ? "Choose adapter" : "Configure agent"}
+              {step === "name" && !presetAdapter
+                ? "Choose adapter"
+                : "Configure agent"}
               <ArrowRight className="size-4" />
             </Button>
           </div>

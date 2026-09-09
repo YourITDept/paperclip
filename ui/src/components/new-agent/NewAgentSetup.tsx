@@ -38,6 +38,7 @@ import {
 import { resolveForcedKubernetesEnvironment } from "@/lib/forced-kubernetes-environment";
 import { environmentDisplayLabel } from "@/lib/managed-sandbox-environment";
 import { buildNewAgentRuntimeConfig } from "@/lib/new-agent-runtime-config";
+import { parseNewAgentEnvPreset } from "@/lib/new-agent-preset";
 import {
   PROVIDER_ENV_KEYS,
   storeProviderApiKey,
@@ -71,6 +72,7 @@ const blocking = (result: AdapterEnvironmentTestResult) =>
 export function NewAgentSetup() {
   const { selectedCompanyId } = useCompany();
   const [params] = useSearchParams();
+  const envPreset = parseNewAgentEnvPreset(params);
   if (!selectedCompanyId)
     return (
       <p className="text-sm text-muted-foreground">
@@ -85,6 +87,7 @@ export function NewAgentSetup() {
       adapterType={params.get("adapterType") ?? ""}
       runnerProvider={params.get("runnerProvider") ?? "codex"}
       createdAgentId={params.get("createdAgentId")}
+      envPreset={envPreset}
     />
   );
 }
@@ -95,12 +98,14 @@ function Setup({
   adapterType,
   runnerProvider,
   createdAgentId,
+  envPreset,
 }: {
   companyId: string;
   name: string;
   adapterType: string;
   runnerProvider: string;
   createdAgentId: string | null;
+  envPreset: Record<string, EnvBinding>;
 }) {
   const navigate = useNavigate();
   const cache = useQueryClient();
@@ -128,8 +133,13 @@ function Setup({
   const [kimiModel, setKimiModel] = useState("");
   const [kimiBaseUrl, setKimiBaseUrl] = useState("");
   const [kimiProtocol, setKimiProtocol] = useState("kimi");
+  const hasEnvPreset = Object.keys(envPreset).length > 0;
   const [screen, setScreen] = useState<"connect" | "runtime" | "saved">(
-    createdAgentId ? "saved" : connectionAdapter ? "connect" : "runtime",
+    createdAgentId
+      ? "saved"
+      : connectionAdapter && !hasEnvPreset
+        ? "connect"
+        : "runtime",
   );
   const [model, setModel] = useState("");
   const efforts = isRunner ? [] : setupEfforts(adapterType, model);
@@ -141,7 +151,9 @@ function Setup({
   const [providerBinding, setProviderBinding] = useState<EnvBinding | null>(
     null,
   );
-  const [connection, setConnection] = useState<ProviderConnection | null>(null);
+  const [connection, setConnection] = useState<ProviderConnection | null>(
+    hasEnvPreset ? { env: envPreset } : null,
+  );
   const [repository, setRepository] = useState("");
   const [branch, setBranch] = useState("");
   const [createdInSession, setCreated] = useState<Agent | null>(null);
@@ -565,9 +577,18 @@ function Setup({
         initialAdapter={adapterType}
         onClose={() => navigate("/agents/all")}
         onContinue={(basics) =>
-          navigate(`/agents/new?${new URLSearchParams(basics)}`, {
-            replace: true,
-          })
+          navigate(
+            `/agents/new?${(() => {
+              const next = new URLSearchParams(basics);
+              for (const [name, binding] of Object.entries(envPreset)) {
+                if (typeof binding !== "string" && binding.type === "plain") {
+                  next.append("env", `${name}=${binding.value}`);
+                }
+              }
+              return next;
+            })()}`,
+            { replace: true },
+          )
         }
       />
     );

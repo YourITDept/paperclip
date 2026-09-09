@@ -120,12 +120,15 @@ async function fill(label: string, value: string) {
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
 }
-async function render(adapter = "pi_local", runnerProvider = "codex") {
-  state.params = new URLSearchParams({
-    name: "Atlas",
-    adapterType: adapter,
-    runnerProvider,
-  });
+async function render(
+  adapter = "pi_local",
+  runnerProvider = "codex",
+  env?: [string, string],
+  name = "Atlas",
+) {
+  state.params = new URLSearchParams({ adapterType: adapter, runnerProvider });
+  if (name) state.params.set("name", name);
+  if (env) state.params.append("env", `${env[0]}=${env[1]}`);
   await act(async () =>
     root.render(
       <QueryClientProvider client={cache}>
@@ -190,6 +193,32 @@ afterEach(async () => {
   container.remove();
 });
 describe("New agent setup", () => {
+  it("asks only for a name when opened from a login preset and preserves the home", async () => {
+    await render("codex_local", "codex", ["CODEX_HOME", "/sysops/llm/codex/team"], "");
+    expect(container.textContent).not.toContain("Choose an adapter");
+    const nameInput = document.querySelector(
+      'input[placeholder="e.g. Darnold"]',
+    ) as HTMLInputElement;
+    expect(nameInput).toBeTruthy();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!.call(nameInput, "Atlas");
+      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const configure = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Configure agent",
+    );
+    expect(configure).toBeTruthy();
+    await act(async () => configure!.click());
+    await settle();
+    const destination = state.navigate.mock.calls[0][0] as string;
+    expect(destination).toContain("name=Atlas");
+    expect(destination).toContain("adapterType=codex_local");
+    expect(destination).toContain("env=CODEX_HOME%3D%2Fsysops%2Fllm%2Fcodex%2Fteam");
+  });
+
   it("blocks direct runner setup links when the experiment is disabled", async () => {
     settings.getExperimental.mockResolvedValue({ enableNativeRunner: false });
     await render("paperclip_runner");
@@ -366,6 +395,23 @@ describe("New agent setup", () => {
       });
     },
   );
+  it.each([
+    ["claude_local", "CLAUDE_CONFIG_DIR", "/sysops/llm/claude/team"],
+    ["codex_local", "CODEX_HOME", "/sysops/llm/codex/team"],
+  ])("uses the %s login preset without an extra connection step", async (adapter, envName, envValue) => {
+    await render(adapter, "codex", [envName, envValue]);
+    expect(container.textContent).not.toContain("Connect a model");
+    await click("Run test");
+    await click("Finish setup");
+    expect(api.testEnvironment.mock.calls[0][2].adapterConfig.env[envName]).toEqual({
+      type: "plain",
+      value: envValue,
+    });
+    expect(api.hire.mock.calls[0][1].adapterConfig.env[envName]).toEqual({
+      type: "plain",
+      value: envValue,
+    });
+  });
   it.each([
     ["claude_local", "claude", "Claude", "ANTHROPIC_API_KEY"],
     ["codex_local", "codex", "OpenAI", "OPENAI_API_KEY"],
