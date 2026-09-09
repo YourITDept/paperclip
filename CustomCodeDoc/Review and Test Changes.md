@@ -1506,6 +1506,102 @@ finds a `pnpm-workspace.yaml`. Loud beats silent; the old behaviour was a
 > "§7". It is this section, **§8** — §7 is the test procedure. Kept as-is so old
 > cross-references still resolve; read "§7 session log" as this section.
 
+### 2026-09-09 — Session 22: verifying PR #47 (GitHub merge, 13 commits)
+
+**Who:** Claude (Opus 5) with chris@anderson-family.com
+**Branch:** `W8-20260909b` @ `93da2d008` (upstream tip `7d84b183f`)
+**Merge:** **already committed by the operator via the GitHub PR route** (§5.1's
+normal path), not the local §5.2 procedure. This session is review-after-the-fact.
+**Nothing was committed by the assistant.**
+
+> **A GitHub merge gets no conflict review.** That is the whole reason for §6.5.
+> This one auto-merged cleanly and *still* landed two commits in
+> `server/src/index.ts` and `server/src/routes/agents.ts` — the two files §4.1
+> names as the fork's worst silent-loss risks. Clean-merge is not evidence.
+
+#### Result: the fork survived intact; one new upstream failure
+
+| Check | Result |
+| --- | --- |
+| Guards (22) | **all PASS** — every fork hunk present |
+| `typecheck` | **exit 0**, 0 `error TS` |
+| §7.2 suites (10) | **all PASS at baseline** |
+| `general-server` | 9 failed, 519 passed, 2 skipped (530) |
+| `general-workspaces-a` | **566 / 566** UI · **62 / 62** CLI |
+| `general-workspaces-b` | **0 failed** across 5 projects |
+| serialized, per file | **0 failed of 144** |
+
+`verify-fork.sh full` exited **1** — correctly, on `general-server` 9 > baseline 8.
+
+#### `github-launcher` is fixed, and by a commit whose title hides it
+
+`general-workspaces-b` went **1 failed → 0**. The standing failure since Session
+20, `packages/adapter-utils/src/github-launcher.test.ts`, now passes 52/52.
+
+It was fixed by `82f662656 fix(runner): restore legacy Git access and independent
+networking (#13094)`. **Read that title again.** With `enableNativeRunner` newly
+held OFF (change #4), a `fix(runner)` commit is exactly the one you skip. It
+changes `packages/adapter-utils/src/github-launcher.ts` and adds 114 lines to
+`execution-target.ts` — shared code that runs whatever the runner flag says.
+
+**The rule: upstream's commit-type prefix describes the motivation, not the blast
+radius.** Diff the files, not the title. Baseline lowered 1 → 0.
+
+#### The new 9th: `native-codex-runner.integration.test.ts` — upstream's
+
+`expected { exitCode: 1 } to match { exitCode: 0 }`, with
+`runTerminalState: "failed"` where `"succeeded"` was expected.
+
+Classified **upstream regression introduced by PR #47**, on four independent
+checks:
+
+1. Reproduces **alone on an idle machine** — not contention (§7.4 trap 4).
+2. Neither the test nor `native-codex-runner.ts` reads `enableNativeRunner`,
+   `getExperimental`, or instance settings — **fork change #4 cannot reach it.**
+3. Both files are **byte-identical to the upstream tip**.
+4. Not a stale binary: `paperclip-runnerd` was rebuilt at 18:43 UTC, six minutes
+   *after* the merge landed at 18:37, `target/release` and `dist/bin` are
+   byte-identical, and no `.rs` is newer than either.
+
+**The likely culprit names itself.** `668110469 fix(runner): preserve provider
+identity and **terminal failures** (#13074)` changes terminal-state semantics;
+this test asserts a terminal state. Four runner commits rewrote the area in one
+batch — `durable/runner.rs` alone gained 3,069 lines.
+
+Baseline raised 8 → 9. **It is upstream's to fix**; the fork should not carry a
+patch for it. Watch it clear on a future merge and lower the baseline again.
+
+#### §7.5 #3, FOURTH recurrence — and upstream refreshed the lockfile in the same batch
+
+`--frozen-lockfile` refused on `patchedDependencies`. The batch contains
+`5bb83e5b4 chore(lockfile): refresh pnpm-lock.yaml (#13061)` and **still** shipped
+`patches/@agentclientprotocol__codex-acp@1.6.2.patch` with a stale hash.
+Regenerated: 8 lines, one hash.
+
+**Stop treating this as a surprise.** Four merges, four recurrences, and a
+dedicated upstream refresh commit did not prevent it. `corepack pnpm install
+--no-frozen-lockfile` is now simply the first step after any upstream merge; the
+resulting `pnpm-lock.yaml` is a reviewable change like any other (RULE 0).
+
+#### Concerns raised for the operator, not defects
+
+- **`startServer()` keeps accumulating background timers.** `35fdc0c66` adds
+  `executionControlInterval` driving five durable queues. The fork's provisioning
+  worker still registers last (index.ts ~1920, past upstream's 1166 and 1834), so
+  §7.5 #2b-5 still bites and the scrub still answers it — but each new upstream
+  timer widens that surface. The case for making the worker inert under
+  `NODE_ENV=test` is stronger than when it was declined in Session 21.
+- **The agent list lost its action bar in the shell this fork runs.**
+  `622376e99` removes `AgentActionButtons` from `Agents.production.tsx` as well as
+  the streamlined list. Upstream's compensation — dropping `showRun={false}` in
+  `AgentDetail.tsx` — *does* reach this fork, because `App.tsx` routes the
+  streamlined `AgentDetail` in both modes. Deliberate UX, not a fork break, and it
+  only works because the agent detail page is reachable — which Session 21 fixed.
+- **cs1 and cs11 cleared explicitly.** `bf753b997` (connections/OAuth) touches no
+  auth, middleware or proxy file. The recovery changes are engine-prerequisite and
+  `in_review` paths; `queueIssueAssignmentWakeup` is still called twice from the
+  fork's handlers and the onboarding wake gate is still scoped to `originKind`.
+
 ### 2026-09-09 — Session 21: upstream merge into `W8-20260909a` (5 commits)
 
 **Who:** Claude (Opus 5) with chris@anderson-family.com

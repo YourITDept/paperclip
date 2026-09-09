@@ -309,7 +309,16 @@ hdr "4. Full suite — §7.1, four processes"
 # Session 21 (byte-identical to the upstream tip; none is a fork-carried file).
 # Going ABOVE a baseline is the alarm; below is progress and only a note.
 group_baseline() { case "$1" in
-  general-server) echo 8 ;; general-workspaces-a) echo 0 ;; general-workspaces-b) echo 1 ;; *) echo 0 ;;
+  # 9 since PR #47 (2026-09-09): the standing 8, plus upstream's new
+  # native-codex-runner.integration.test.ts failure. Reproduces alone, both files
+  # byte-identical to upstream, and neither reads enableNativeRunner — so fork
+  # change #4 cannot reach it. See §8 Session 22.
+  general-server) echo 9 ;;
+  general-workspaces-a) echo 0 ;;
+  # 0 since PR #47: 82f662656 fixed github-launcher.test.ts, which had been the
+  # standing single failure here since Session 20. Was 1.
+  general-workspaces-b) echo 0 ;;
+  *) echo 0 ;;
 esac; }
 for grp in general-server general-workspaces-a general-workspaces-b; do
   echo "  running $grp ..."
