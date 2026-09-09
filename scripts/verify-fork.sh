@@ -285,9 +285,13 @@ suite "cs6 invite guard" 19 ui/src/pages/InviteLanding.test.tsx
 suite "cs10 duplicate payload" 5 ui/src/lib/duplicate-agent-payload.test.ts
 suite "cs10 agent permissions" 69 server/src/__tests__/agent-permissions-routes.test.ts
 suite "cs3/4 openapi contract" 6 server/src/__tests__/openapi-routes.test.ts
-suite "cs11 provisioning" 27 server/src/__tests__/provisioning-agent-codex-home.test.ts \
+# 30 since 2026-09-09: +3 for provisioning-agent-instructions.test.ts. Provisioned
+# agents were born with an EMPTY instruction bundle because this module calls
+# agentService.create directly and only agentRoutes seeds defaults.
+suite "cs11 provisioning" 30 server/src/__tests__/provisioning-agent-codex-home.test.ts \
   server/src/__tests__/provisioning-agent-task.test.ts \
-  server/src/__tests__/provisioning-membership-remove.test.ts
+  server/src/__tests__/provisioning-membership-remove.test.ts \
+  server/src/__tests__/provisioning-agent-instructions.test.ts
 # §4.1 collision point: the `@paperclipai/db` vi.mock that change set 11's import
 # graph forces. Added to the TARGETED lane 2026-09-09 (Session 21) — it lived only
 # in `full` before, so #13063 widening the graph (`companyLogos`) went unseen by

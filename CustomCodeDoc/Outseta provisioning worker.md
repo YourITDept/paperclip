@@ -113,6 +113,71 @@ never re-queued, and a type we simply had not built yet would be dead for good.
 **Adding a name to `JOB_TYPES` is therefore always the first step**, and it is
 safe on its own.
 
+## Default instructions on `agent.create` (added 2026-09-09)
+
+**The defect, reported by the operator:** every agent provisioned from the queue
+was created with an **empty instruction bundle** — no Execution Contract, no
+final-disposition checklist, no work-product rules — while looking entirely
+normal in the UI.
+
+**Why, and it is a shape worth remembering.** Two code paths create agents and
+only one of them seeds instructions:
+
+| Path | Seeds instructions? |
+| --- | --- |
+| `agentRoutes` (API/UI) | **Yes** — calls `materializeDefaultInstructionsBundleForNewAgent` after its create |
+| `server/src/provisioning/handlers.ts` | **No** — calls `agentService.create` directly |
+
+`server/src/services/agents.ts` contains **no reference to instructions at all**.
+The seeding lives in the *route*, not the service, so anything that calls the
+service directly silently gets less. This module has always called the service
+directly — that is deliberate, it is how the worker avoids HTTP — so the gap was
+present from the day change set 11 was written, not introduced by a merge.
+
+**Nothing detected it.** The agent row is valid, the adapter config is valid, the
+adapter runs. The only symptom is an agent with no instructions, which reads as
+"the model is being unhelpful" rather than "the bundle is empty."
+
+### What it does now
+
+`seedDefaultInstructions()` runs after `agentsSvc.create` and mirrors the route:
+
+- skips adapters whose `supportsInstructionsBundle !== true` (`http`, `process`);
+- skips when the config already names instructions, mirroring the route's
+  `hasExplicitInstructionsBundle`;
+- loads the role-keyed default from
+  [`services/default-agent-instructions.ts`](server/src/services/default-agent-instructions.ts)
+  — `ceo` gets `AGENTS.md`/`HEARTBEAT.md`/`SOUL.md`/`TOOLS.md`, everything else
+  gets `AGENTS.md`. Provisioning sets no role, so agents land on `general` →
+  the `default` bundle;
+- materializes with `replaceExisting: false`, then writes the resulting
+  `adapterConfig` back.
+
+**Create only. `reconcileAgent` deliberately does not call it**, so a later queue
+row can never overwrite instructions someone edited by hand — the same
+merge-never-replace rule the rest of this module follows. The operator declined a
+backfill of existing agents (2026-09-09): they will be recreated through the
+provisioning skill instead.
+
+**Never fatal.** A throw is logged and swallowed. The agent already exists by that
+point, and failing the job would push it into a retry that finds the agent
+present, takes the reconcile path, and therefore never seeds — the failure would
+make the gap *permanent* rather than transient.
+
+### Where it is written, and the trap that comes with it
+
+`materializeManagedBundle` writes under `resolvePaperclipInstanceRoot()`, which is
+derived from **`PAPERCLIP_HOME`**. Its test must redirect that variable or it
+writes into the live deployment — the same class as
+"Review and Test Changes.md" §7.5 #2b-4 and #2b-6.
+
+### Covered by
+
+`server/src/__tests__/provisioning-agent-instructions.test.ts` — 3 tests, in the
+cs11 §7.2 suite (baseline 27 → **30**). One asserts the file's **contents**, not
+just its existence: an empty `AGENTS.md` satisfies every structural check and is
+exactly the bug.
+
 ## What it depends on in upstream — the list to re-check after every merge
 
 This is the register entry that actually matters. After a merge, confirm each

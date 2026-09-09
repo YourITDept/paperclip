@@ -37,6 +37,12 @@ import type { HumanCompanyMembershipRole } from "@paperclipai/shared";
 import { ISSUE_PRIORITIES, ISSUE_STATUSES } from "@paperclipai/shared";
 import { accessService } from "../services/access.js";
 import { agentService } from "../services/agents.js";
+import { agentInstructionsService } from "../services/agent-instructions.js";
+import {
+  loadDefaultAgentInstructionsBundle,
+  resolveDefaultAgentInstructionsBundleRole,
+} from "../services/default-agent-instructions.js";
+import { findActiveServerAdapter } from "../adapters/registry.js";
 import { secretService } from "../services/secrets.js";
 import { companyService } from "../services/companies.js";
 import { issueService } from "../services/issues.js";
@@ -230,6 +236,67 @@ export function provisioningHandlers(
   const access = accessService(db);
   const companiesSvc = companyService(db);
   const agentsSvc = agentService(db);
+  const instructionsSvc = agentInstructionsService();
+
+  /**
+   * Give a provisioned agent the same starting instructions the board UI gives
+   * one, because nothing else will.
+   *
+   * Two paths create agents and only one of them seeds instructions.
+   * `agentRoutes` calls `materializeDefaultInstructionsBundleForNewAgent` after
+   * its create; this module calls `agentsSvc.create` directly, and
+   * `services/agents.ts` has no notion of instructions at all. So every agent
+   * provisioned from the queue started life with an EMPTY instruction bundle —
+   * no Execution Contract, no final-disposition checklist, no work-product
+   * rules — while looking completely normal in the UI. Reported by the operator
+   * 2026-09-09.
+   *
+   * Deliberately seed-only, never replace:
+   *   - `replaceExisting: false` keeps a bundle that is already on disk;
+   *   - the explicit-config check mirrors the route's `hasExplicitInstructionsBundle`
+   *     so a payload that names its own instructions wins;
+   *   - only the create path calls this. `reconcileAgent` does not, so a later
+   *     queue row cannot overwrite instructions a person edited by hand. That
+   *     matches this module's standing "merge, never replace" rule.
+   *
+   * Never fatal. The agent exists and is usable by the time we get here, and a
+   * thrown error would fail the job into a retry that finds the agent already
+   * present, takes the reconcile path, and therefore never seeds at all — the
+   * failure would make the gap permanent instead of transient.
+   */
+  async function seedDefaultInstructions(agent: {
+    id: string; companyId: string; name: string; role: string;
+    adapterType: string; adapterConfig: unknown;
+  }): Promise<void> {
+    try {
+      if (findActiveServerAdapter(agent.adapterType)?.supportsInstructionsBundle !== true) return;
+      const config = (agent.adapterConfig ?? {}) as Record<string, unknown>;
+      const alreadyConfigured = [
+        "instructionsBundleMode", "instructionsRootPath", "instructionsEntryFile",
+        "instructionsFilePath", "agentsMdPath",
+      ].some((key) => typeof config[key] === "string" && config[key] !== "");
+      if (alreadyConfigured) return;
+
+      const files = await loadDefaultAgentInstructionsBundle(
+        resolveDefaultAgentInstructionsBundleRole(agent.role),
+      );
+      const materialized = await instructionsSvc.materializeManagedBundle(agent, files, {
+        entryFile: "AGENTS.md",
+        replaceExisting: false,
+      });
+      await agentsSvc.update(agent.id, { adapterConfig: materialized.adapterConfig });
+      logger.info(
+        { agentId: agent.id, companyId: agent.companyId, role: agent.role, files: Object.keys(files) },
+        "provisioning: seeded default agent instructions",
+      );
+    } catch (err) {
+      logger.error(
+        { err, agentId: agent.id, companyId: agent.companyId },
+        "provisioning: failed to seed default agent instructions; agent has an EMPTY bundle",
+      );
+    }
+  }
+
   const secretsSvc = secretService(db);
   const issuesSvc = issueService(db);
   const heartbeat = deps.heartbeat ?? null;
@@ -1031,6 +1098,8 @@ export function provisioningHandlers(
       // Only sent when it actually changes a default.
       ...(payload.canCreateAgents === true ? { permissions: { canCreateAgents: true } } : {}),
     });
+
+    await seedDefaultInstructions(agent);
 
     logger.info(
       {
