@@ -1353,6 +1353,134 @@ finds a `pnpm-workspace.yaml`. Loud beats silent; the old behaviour was a
 > "§7". It is this section, **§8** — §7 is the test procedure. Kept as-is so old
 > cross-references still resolve; read "§7 session log" as this section.
 
+### 2026-09-08 — Session 20: upstream merge into `W8-20260908c` (14 commits)
+
+**Who:** Claude (Opus 5) with chris@anderson-family.com
+**Branch:** `W8-20260908c` @ `a134c5d83` + upstream `7ed122911` (merge base `297d8741f`)
+**Merge commit:** `c31befe27`, made by the operator after review.
+**Rollback tag:** `pre-merge-backup-W8-20260908c` → `a134c5d83`
+
+**Incoming:** 14 commits, 350 files, +29937/−5967 — roughly **four times** the
+previous merge. No renames, no deletions (§6.4 q2 clear). Three new migrations,
+`0246`–`0248`.
+
+**First merge verified with `scripts/verify-fork.sh` (§7.0)** rather than by
+hand. It did the job: all 14 change-set guards were green *before* the long run,
+including the auto-merged files where loss is silent.
+
+#### Result: no fork-caused failures. The failing set is IDENTICAL to Session 19
+
+| Group | Test Files | Tests |
+| --- | --- | --- |
+| `general-server` | 15 failed, 505 passed, 2 skipped (522) | — |
+| `general-workspaces-a` — UI | **566 passed (566)** | — |
+| `general-workspaces-a` — CLI | **62 passed (62)** | — |
+| `general-workspaces-b` | 1 failed, 92 passed | 2 failed, 1225 passed |
+| serialized, **per file** | **140 passed, 3 failed of 143** | — |
+| typecheck | **exit 0**, 0 `error TS` | — |
+
+Every §7.2 change-set suite green: cs1 28, cs3+4 83, sidebar parity 4, cs5 45,
+cs6 19, cs10 5 and 69, openapi 6, cs11 27.
+
+**The `general-server` failing set was diffed against Session 19's recorded 15:
+not one new, not one gone.** All 16 failures (15 + `github-launcher`) were
+re-run individually on an idle machine per trap 4 and all 16 reproduced, so none
+is contention. All 14 implicated files — including `heartbeat.ts`, which
+upstream rewrote across 5 commits this merge — are **byte-identical to
+`7ed122911`**, so fork causation is not available as an explanation.
+
+**The CLI project went from 1 failure to 62/62.** That is Session 19's
+`PAPERCLIP_NO_BROWSER` scrub in `$CLEAN` working — the fix is confirmed, not
+merely believed.
+
+#### The conflicts: two, and the fork lost a feature
+
+`ui/src/pages/NewAgent.tsx` and `.test.tsx`. Upstream #13011 **replaced** the
+fork's 500-line page with a **14-line wrapper** around a new `NewAgentSetup`
+(1149 lines) and deleted the §4.1 canary test. Raised with the operator per
+§5.3; the operator chose **take upstream's page, port later**.
+
+**Change set 5 is now DEGRADED, and the first reading of how badly was wrong.**
+The initial assessment was "the vault path is no longer prefilled, the operator
+types it". It is worse: `NewAgentSetup.tsx:329` sets
+`envBindings: nextConnection?.env ?? {}` — env comes **only** from a selected
+connection, and there is **no free-form environment field in the new flow at
+all**. A vault-bound agent cannot be created in one step any more. The
+capability survives only because `AgentConfigForm` still carries the env editor
+and is still rendered from `AgentDetail.tsx`: create the agent, then set
+`CODEX_HOME` / `CLAUDE_CONFIG_DIR` by hand.
+
+**"Retire it and use upstream's flow" is not available**, checked rather than
+assumed (§6.4 q3): upstream's new `SETUP_CREDENTIAL_KEYS`
+(`ui/src/lib/agent-setup-fields.ts`) maps adapters to **API keys**
+(`CURSOR_API_KEY`, `GEMINI_API_KEY`, …) and does not list `codex_local` or
+`claude_local`. A vault *directory* is a different concern that upstream does
+not cover. Open item **O-7**.
+
+**The cs5 suite reports 45 passing and that number says nothing about the fork's
+half** — it is upstream's tests. `verify-fork.sh` now prints a WARN for exactly
+this shape:
+
+```
+WARN  cs5 DEGRADED — the vault button emits ?env= and nothing parses it.
+```
+
+A WARN, not a FAIL: the degradation is known and accepted until O-7 is decided,
+and a permanently red check is noise nobody reads. But it must not be silent —
+that is the Session 19 Finding 7 lesson applied one merge later.
+
+#### Finding 1 — trap 3 has a second form: `patchedDependencies` HASHES
+
+`--frozen-lockfile` failed with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`. Misleading,
+because the entry **names** in `package.json` and the lockfile matched
+perfectly — the fork's, upstream's and the merged blocks were byte-identical.
+
+**It was the hashes.** Upstream edited two patch files
+(`patches/acpx@0.13.1.patch` +142 lines,
+`patches/@agentclientprotocol__codex-acp@1.6.2.patch` +10) without regenerating
+the lockfile that records their content hashes. The fork carries no patch
+changes, so it is purely upstream's.
+
+**Taking upstream's lockfile wholesale does NOT fix this one** — their lockfile
+*is* the stale artefact. That is the difference from Session 19, where taking it
+worked. Regenerated with `--no-frozen-lockfile`; the diff was 17 lines and
+exactly the two changed hashes, which is what a correct regeneration looks like.
+Recorded in §7.5 #3.
+
+#### Finding 2 — two ways to break the verification script, both self-inflicted
+
+**Do not edit `verify-fork.sh` while a run is executing it.** Bash does not load
+a script into memory; it reads and executes incrementally, tracking position by
+**byte offset**. Inserting 18 lines above the current position shifts every
+offset after it and the remainder executes garbled text, with no error. A
+90-minute run was killed rather than trusted.
+
+**Then the fix broke it differently.** Running a copy from `/tmp` made
+`cd "$(dirname "$0")/.."` resolve to **`/`**; pnpm tried to walk the whole
+filesystem (`ERR_PNPM_WORKSPACE_WALK_ERROR ... /home/ubuntu: Permission
+denied`), and every suite afterwards reported `Command "vitest" not found` or
+**0 tests** — **exactly §7.5 #1's missing-plugin-sdk signature.** Two unrelated
+causes, one symptom, and the obvious reading is the wrong one.
+
+The script now resolves its root from `BASH_SOURCE`, falls back to
+`git rev-parse --show-toplevel`, and **exits 2 with a clear message** if neither
+finds a `pnpm-workspace.yaml`. Both halves are §7.5 #7.
+
+#### Finding 3 — trap 5's abandoned processes are still happening
+
+A **9-hour-old** `paperclip-company-cli-e2e` was holding 714 MB, from a `pcvt-`
+vitest temp root. It **ignored SIGTERM** and needed `kill -9`, exactly as trap 5
+records from Session 15. Clear these before a long run: available memory went
+from 4 GB to 5 GB.
+
+#### For the deployment
+
+Three new migrations (`0246`–`0248`) ship with this merge;
+`PAPERCLIP_MIGRATION_AUTO_APPLY=true` is set on these instances, so watch the
+boot log first. Then the two fork-specific checks: `provisioning: worker
+enabled`, and the Codex/Claude login tabs still visible in Settings — the latter
+because Session 19 shipped a UI regression that went unnoticed for a week.
+
 ### 2026-09-08 — Session 19: upstream merge into `W8-20260908a` (8 commits)
 
 **Who:** Claude (Opus 5) with chris@anderson-family.com

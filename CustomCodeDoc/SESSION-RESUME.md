@@ -10,13 +10,13 @@ It is the one file in this directory that is not append-only.
 
 ---
 
-## Current state — updated 2026-09-08 22:55
+## Current state — updated 2026-09-09 00:05
 
 | | |
 | --- | --- |
 | **Branch** | `W8-20260908c` |
-| **HEAD** | `a134c5d83` "Packaged up compiled code for release W8-20260908b" |
-| **Working tree** | **MERGE STAGED, uncommitted.** Upstream merge; conflicts resolved; full suite running. |
+| **HEAD** | `ad3ed43fe` "Changed for merge" · merge commit `c31befe27` |
+| **Working tree** | **Dirty — documentation only.** The merge is committed (`c31befe27`). Full suite complete. |
 | **Active work item** | Session 20 — upstream merge (14 commits, upstream tip `7ed122911`) |
 | **Its document** | [`Review and Test Changes.md`](CustomCodeDoc/Review%20and%20Test%20Changes.md) §8, Session 20 |
 | **Rollback tag** | `pre-merge-backup-W8-20260908c` → `a134c5d83` |
@@ -75,17 +75,50 @@ than during a merge.
 
 ### The very next action
 
-**Read the full-suite result**, classify per §7.4/§7.5, then append Session 20
-to §8.
+**Testing is COMPLETE. Nothing blocks a deployment test.**
 
-```bash
-grep -E "PASS|FAIL|WARN" /tmp/paperclip-verify-full/summary.tsv
-sed 's/\x1b\[[0-9;]*m//g' /tmp/verify-full.log | tail -40
+The remaining work is a decision, not a task: **O-7**, change set 5. Port the
+env preset into `ui/src/components/new-agent/NewAgentSetup.tsx`, or accept the
+two-step create-then-edit flow permanently. Retiring it is not available —
+upstream's credential mechanism does not cover vault directories.
+
+Uncommitted, for review:
+
+```
+M CustomCodeDoc/Review and Test Changes.md    Session 20 entry, §7.5 #3 + #7, cs5 DEGRADED
+M CustomCodeDoc/SESSION-RESUME.md             this file
 ```
 
-Already green: all 14 change-set guards, typecheck (0 `error TS`), and every
-§7.2 suite (cs1 28, cs3+4 83, parity 4, cs5 45↑, cs6 19, cs10 5 and 69,
-openapi 6↑, cs11 27).
+### Final result — full suite, 2026-09-08
+
+| Check | Result |
+| --- | --- |
+| Guards (14) | **all PASS**, one WARN (cs5 degraded, expected) |
+| `typecheck` | **exit 0**, 0 `error TS` |
+| §7.2 change-set suites (9) | **all PASS** — cs1 28, cs3+4 83, parity 4, cs5 45, cs6 19, cs10 5 + 69, openapi 6, cs11 27 |
+| `general-server` | 15 failed, 505 passed, 2 skipped (522) |
+| `general-workspaces-a` — UI | **566 / 566** |
+| `general-workspaces-a` — CLI | **62 / 62** |
+| `general-workspaces-b` | 1 failed, 92 passed |
+| serialized, per file | **140 passed, 3 failed of 143** |
+
+**No fork-caused failures.** The `general-server` failing set is **identical** to
+Session 19 — not one new, not one gone. All 16 failures reproduce individually
+on an idle machine (so none is contention), and all 14 implicated files are
+**byte-identical to upstream `7ed122911`** — including `heartbeat.ts`, which
+upstream rewrote across 5 commits in this merge.
+
+**The CLI project went 1 failure → 62/62**, confirming Session 19's
+`PAPERCLIP_NO_BROWSER` scrub actually fixed it.
+
+### Deploying this build
+
+Three new migrations (`0246`–`0248`). `PAPERCLIP_MIGRATION_AUTO_APPLY=true` is
+set, so watch the boot log first. Then two fork-specific checks:
+
+- `provisioning: worker enabled` in the log (change set 11 — its loss is silent)
+- Codex/Claude login tabs visible in Settings (Session 19 shipped a regression
+  here that went unnoticed for a week)
 
 ### Two mistakes made this session — both now fixed in the script
 
