@@ -9,6 +9,9 @@ import {
   removeLoginStagingHome,
 } from "./host-login-pty.js";
 import { runDeviceLogin } from "./device-login-runner.js";
+
+// Vaults are company-scoped: <root>/<companyId>/<name>.
+const CO = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
 import {
   CODEX_VAULT_CREDENTIAL_REJECTED,
   CODEX_VAULT_ROOT_ENV_KEY,
@@ -194,15 +197,15 @@ describe("promoteVaultCredential", () => {
   });
 
   it("writes a private credential into the vault", async () => {
-    const written = await promoteVaultCredential("chris_codex", Buffer.from(SUBSCRIPTION_AUTH), env);
+    const written = await promoteVaultCredential(CO, "chris_codex", Buffer.from(SUBSCRIPTION_AUTH), env);
     expect((await fs.stat(written)).mode & 0o777).toBe(0o600);
-    const summary = await readVaultSummary("chris_codex", env);
+    const summary = await readVaultSummary(CO, "chris_codex", env);
     expect(summary.hasCredential).toBe(true);
     expect(summary.authMode).toBe("chatgpt");
   });
 
   it("replaces an existing credential in place, so live symlinks follow it", async () => {
-    const dir = await ensureVaultDir("chris_codex", env);
+    const dir = await ensureVaultDir(CO, "chris_codex", env);
     const authPath = path.join(dir, "auth.json");
     await fs.writeFile(authPath, JSON.stringify({ OPENAI_API_KEY: "old" }), { mode: 0o600 });
 
@@ -211,7 +214,7 @@ describe("promoteVaultCredential", () => {
     const linked = path.join(agentHome, "auth.json");
     await fs.symlink(authPath, linked);
 
-    await promoteVaultCredential("chris_codex", Buffer.from(SUBSCRIPTION_AUTH), env);
+    await promoteVaultCredential(CO, "chris_codex", Buffer.from(SUBSCRIPTION_AUTH), env);
 
     // The running agent must observe the new credential through its symlink.
     expect(await fs.readFile(linked, "utf8")).toBe(SUBSCRIPTION_AUTH);
@@ -219,21 +222,21 @@ describe("promoteVaultCredential", () => {
   });
 
   it("rejects unusable bytes and leaves any existing credential untouched", async () => {
-    const dir = await ensureVaultDir("chris_codex", env);
+    const dir = await ensureVaultDir(CO, "chris_codex", env);
     const authPath = path.join(dir, "auth.json");
     await fs.writeFile(authPath, SUBSCRIPTION_AUTH, { mode: 0o600 });
 
     for (const bad of ["", "{not json", JSON.stringify({ tokens: { account_id: "a" } })]) {
       await expect(
-        promoteVaultCredential("chris_codex", Buffer.from(bad), env),
+        promoteVaultCredential(CO, "chris_codex", Buffer.from(bad), env),
       ).rejects.toThrow(CODEX_VAULT_CREDENTIAL_REJECTED);
     }
     expect(await fs.readFile(authPath, "utf8")).toBe(SUBSCRIPTION_AUTH);
   });
 
   it("leaves no temp files behind", async () => {
-    await promoteVaultCredential("chris_codex", Buffer.from(SUBSCRIPTION_AUTH), env);
-    const entries = await fs.readdir(path.join(root, "chris_codex"));
+    await promoteVaultCredential(CO, "chris_codex", Buffer.from(SUBSCRIPTION_AUTH), env);
+    const entries = await fs.readdir(path.join(root, CO, "chris_codex"));
     expect(entries.filter((entry) => entry.includes(".tmp"))).toEqual([]);
   });
 });

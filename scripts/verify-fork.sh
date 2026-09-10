@@ -325,10 +325,18 @@ suite() { # suite <label> <expected-tests> <files...>
 suite "cs1 proxy header auth" 28 server/src/auth/proxy-header-auth.test.ts \
   server/src/middleware/proxy-header-actor.test.ts \
   server/src/__tests__/proxy-header-auth.integration.test.ts
-suite "cs3+4 credential vaults" 83 server/src/__tests__/codex-vault-login-service.test.ts \
+# 128 since 2026-09-10: +28 path-boundary tests, +17 client-scope tests.
+# The client ones exist because `submitCode` shipped without the scope and only
+# surfaced when an operator was midway through a live Claude device login. Those assert
+# what CANNOT happen — a crafted company id or vault name traversing out of its
+# subtree — so they belong in the guard lane, not only in a general run.
+suite "cs3+4 credential vaults" 128 server/src/__tests__/codex-vault-login-service.test.ts \
   server/src/__tests__/claude-vault-login-service.test.ts \
   packages/adapters/codex-local/src/server/codex-vault.test.ts \
-  packages/adapters/claude-local/src/server/claude-vault.test.ts
+  packages/adapters/claude-local/src/server/claude-vault.test.ts \
+  packages/adapters/codex-local/src/server/codex-vault-company-scope.test.ts \
+  packages/adapters/claude-local/src/server/claude-vault-company-scope.test.ts \
+  ui/src/api/vault-company-scope.test.ts
 suite "cs3/4 sidebar parity (UI reachability)" 4 ui/src/components/CompanySettingsSidebar.fork-parity.test.ts
 # 59 since 2026-09-09: the vault directory now binds as an ORGANIZATION SECRET
 # (secret_ref) instead of a plain env value, because a plain one reads back as
@@ -368,11 +376,11 @@ hdr "4. Full suite — §7.1, four processes"
 # Session 21 (byte-identical to the upstream tip; none is a fork-carried file).
 # Going ABOVE a baseline is the alarm; below is progress and only a note.
 group_baseline() { case "$1" in
-  # 9 since PR #47 (2026-09-09): the standing 8, plus upstream's new
-  # native-codex-runner.integration.test.ts failure. Reproduces alone, both files
-  # byte-identical to upstream, and neither reads enableNativeRunner — so fork
-  # change #4 cannot reach it. See §8 Session 22.
-  general-server) echo 9 ;;
+  # Back to 8 as of PR #48 (2026-09-10): upstream FIXED its own
+  # native-codex-runner.integration.test.ts regression (O-9) in the four runner
+  # commits of that batch, so the standing set is the original 8 again. It was 9
+  # for exactly one merge. See §8 Session 23.
+  general-server) echo 8 ;;
   general-workspaces-a) echo 0 ;;
   # 0 since PR #47: 82f662656 fixed github-launcher.test.ts, which had been the
   # standing single failure here since Session 20. Was 1.

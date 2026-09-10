@@ -9,7 +9,7 @@ import {
   claudeVaultLoginService,
   type ClaudeVaultLoginActor,
 } from "../services/claude-vault-login-service.js";
-import { getActorInfo } from "./authz.js";
+import { assertCompanyAccess, getActorInfo } from "./authz.js";
 
 // The Claude credential vault routes.
 //
@@ -55,6 +55,32 @@ function ownerId(req: Request): string {
   return actor.actorId;
 }
 
+/**
+ * The company whose vault scope this request operates in.
+ *
+ * Vaults are `<root>/<companyId>/<name>`. The id arrives from the request, which
+ * is only safe because it is AUTHORIZED here rather than trusted: without
+ * `assertCompanyAccess` the tier would be decorative — company A would send
+ * company B's id and walk straight into their scope.
+ *
+ * It is the companyId and not the issue prefix on purpose. `resolveRenamedIssuePrefix`
+ * (services/companies.ts) re-keys a prefix when a company is renamed, which would
+ * orphan a prefix-named directory: the row moves, the directory does not, and
+ * agents bound to the old path keep working while no longer being governed by
+ * the company that owns them. `companies.id` is never re-keyed.
+ */
+function requireCompanyScope(req: Request): string {
+  const raw =
+    (req.query.companyId as string | undefined)
+    ?? (req.body as Record<string, unknown> | undefined)?.companyId;
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    throw badRequest("A companyId is required to address a credential vault.");
+  }
+  const companyId = raw.trim();
+  assertCompanyAccess(req, companyId);
+  return companyId;
+}
+
 function readVaultName(value: unknown): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw badRequest("A login name is required.");
@@ -83,16 +109,18 @@ export function claudeVaultRoutes(db: Db) {
   // are bound to it. The summary carries a masked token suffix and never a token.
   router.get("/instance/claude-vaults", async (req, res) => {
     assertCanManageVaults(req);
-    res.json({ root: service.vaultRoot(), vaults: await service.listWithUsage() });
+    const companyId = requireCompanyScope(req);
+    res.json({ root: service.vaultRoot(companyId), vaults: await service.listWithUsage(companyId) });
   });
 
   // Create an empty vault. The login also creates the directory, so this exists
   // only to stage a name before signing in to it.
   router.post("/instance/claude-vaults", async (req, res) => {
     const actor = assertCanManageVaults(req);
+    const companyId = requireCompanyScope(req);
     const name = readVaultName((req.body as Record<string, unknown> | undefined)?.name);
     try {
-      res.status(201).json(await service.create(name, actor));
+      res.status(201).json(await service.create(companyId, name, actor));
     } catch (error) {
       if (error instanceof ClaudeVaultNameInvalidError) throw badRequest(error.message);
       throw error;
@@ -103,10 +131,11 @@ export function claudeVaultRoutes(db: Db) {
   // the authorization URL, then posts the operator's code back.
   router.post("/instance/claude-vaults/:name/login-sessions", async (req, res) => {
     const actor = assertCanManageVaults(req);
+    const companyId = requireCompanyScope(req);
     const name = readVaultName(req.params.name);
     try {
       const session = await service.start(
-        { vaultName: name, startedByUserId: actor.actorId },
+        { companyId, vaultName: name, startedByUserId: actor.actorId },
         actor,
       );
       res.status(201).json(session);
@@ -122,6 +151,7 @@ export function claudeVaultRoutes(db: Db) {
   // existence of another admin's session is not disclosed.
   router.get("/instance/claude-vaults/login-sessions/:sessionId", async (req, res) => {
     assertCanManageVaults(req);
+    const companyId = requireCompanyScope(req);
     const session = service.read(req.params.sessionId as string, ownerId(req));
     if (!session) throw notFound("Login session not found.");
     res.json(session);
@@ -131,6 +161,7 @@ export function claudeVaultRoutes(db: Db) {
   // the Codex device login has no equivalent.
   router.post("/instance/claude-vaults/login-sessions/:sessionId/code", async (req, res) => {
     assertCanManageVaults(req);
+    const companyId = requireCompanyScope(req);
     const code = readLoginCode((req.body as Record<string, unknown> | undefined)?.code);
     try {
       const session = service.submitCode(req.params.sessionId as string, ownerId(req), code);
@@ -147,6 +178,7 @@ export function claudeVaultRoutes(db: Db) {
   // Cancel an in-flight login.
   router.post("/instance/claude-vaults/login-sessions/:sessionId/cancel", async (req, res) => {
     assertCanManageVaults(req);
+    const companyId = requireCompanyScope(req);
     const session = service.cancel(req.params.sessionId as string, ownerId(req));
     if (!session) throw notFound("Login session not found.");
     res.json(session);
@@ -156,9 +188,10 @@ export function claudeVaultRoutes(db: Db) {
   // vault that holds no credential; a 404 only when there is no vault at all.
   router.delete("/instance/claude-vaults/:name/credential", async (req, res) => {
     const actor = assertCanManageVaults(req);
+    const companyId = requireCompanyScope(req);
     const name = readVaultName(req.params.name);
     try {
-      res.json(await service.removeCredential(name, actor));
+      res.json(await service.removeCredential(companyId, name, actor));
     } catch (error) {
       if (error instanceof ClaudeVaultNameInvalidError) throw badRequest(error.message);
       if (error instanceof ClaudeVaultNotFoundError) throw notFound(error.message);
@@ -172,9 +205,10 @@ export function claudeVaultRoutes(db: Db) {
   // whose CLAUDE_CONFIG_DIR names this path.
   router.delete("/instance/claude-vaults/:name", async (req, res) => {
     const actor = assertCanManageVaults(req);
+    const companyId = requireCompanyScope(req);
     const name = readVaultName(req.params.name);
     try {
-      const result = await service.remove(name, actor);
+      const result = await service.remove(companyId, name, actor);
       if (!result.deleted) throw notFound("Claude login not found.");
       res.json(result);
     } catch (error) {

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { agents, type Db } from "@paperclipai/db";
 import {
   CODEX_VAULT_CREDENTIAL_REJECTED,
@@ -9,6 +9,8 @@ import {
   deleteVault,
   ensureVaultDir,
   isValidVaultName,
+  resolveCompanyVaultDir,
+  resolveCompanyVaultRoot,
   listVaults,
   promoteVaultCredential,
   readVaultSummary,
@@ -79,6 +81,7 @@ export interface VaultLoginSessionView {
 
 interface VaultLoginSession {
   sessionId: string;
+  companyId: string;
   vaultName: string;
   state: VaultLoginState;
   url: string | null;
@@ -117,6 +120,7 @@ export class VaultNotFoundError extends Error {
 }
 
 export interface StartVaultLoginInput {
+  companyId: string;
   vaultName: string;
   startedByUserId: string;
   /** Overrides the codex executable. Used by tests; never taken from a request. */
@@ -128,7 +132,11 @@ export function codexVaultLoginService(db: Db) {
   const sessions = new Map<string, VaultLoginSession>();
   // One in-flight login per vault. A second start for the same vault would race
   // the same credential file, so it is refused rather than queued.
+  // Keyed by companyId + vault name. Keying on the name alone would let one
+  // company's in-flight login block another company's vault of the same name —
+  // and vault names are per-company now, so collisions are expected, not rare.
   const activeByVault = new Map<string, string>();
+  const activeKey = (companyId: string, vaultName: string) => `${companyId}:${vaultName}`;
   const settings = instanceSettingsService(db);
 
   /**
@@ -172,13 +180,14 @@ export function codexVaultLoginService(db: Db) {
    * list, which degrades the warning rather than blocking the operator.
    */
   async function agentsUsingVault(
+    companyId: string,
     vaultName: string,
     env: NodeJS.ProcessEnv = process.env,
   ): Promise<{ id: string; name: string; companyId: string }[]> {
     if (!isValidVaultName(vaultName)) return [];
     let dir: string;
     try {
-      dir = resolveVaultDir(vaultName, env);
+      dir = resolveCompanyVaultDir(companyId, vaultName, env);
     } catch {
       return [];
     }
@@ -186,7 +195,10 @@ export function codexVaultLoginService(db: Db) {
       return await db
         .select({ id: agents.id, name: agents.name, companyId: agents.companyId })
         .from(agents)
-        .where(sql`${agents.adapterConfig} -> 'env' ->> 'CODEX_HOME' = ${dir}`);
+        // Scoped to the company as well as the path: a vault directory belongs to
+        // exactly one company now, so a cross-company row here would be a bug.
+        .where(and(eq(agents.companyId, companyId),
+          sql`${agents.adapterConfig} -> 'env' ->> 'CODEX_HOME' = ${dir}`));
     } catch {
       return [];
     }
@@ -221,18 +233,18 @@ export function codexVaultLoginService(db: Db) {
     session.expiresAt = null;
     session.error = error ?? null;
     session.terminalAt = Date.now();
-    activeByVault.delete(session.vaultName);
+    activeByVault.delete(activeKey(session.companyId, session.vaultName));
   }
 
   return {
     /** The vault root this instance provisions into. */
-    vaultRoot(env: NodeJS.ProcessEnv = process.env): string {
-      return resolveVaultRoot(env);
+    vaultRoot(companyId: string, env: NodeJS.ProcessEnv = process.env): string {
+      return resolveCompanyVaultRoot(companyId, env);
     },
 
     /** Lists every vault and whether it currently holds a usable credential. */
-    async list(env: NodeJS.ProcessEnv = process.env): Promise<CodexVaultSummary[]> {
-      return listVaults(env);
+    async list(companyId: string, env: NodeJS.ProcessEnv = process.env): Promise<CodexVaultSummary[]> {
+      return listVaults(companyId, env);
     },
 
     /**
@@ -246,9 +258,10 @@ export function codexVaultLoginService(db: Db) {
      * than one who sees the logins without warnings.
      */
     async listWithUsage(
+      companyId: string,
       env: NodeJS.ProcessEnv = process.env,
     ): Promise<(CodexVaultSummary & { boundAgentCount: number })[]> {
-      const vaults = await listVaults(env);
+      const vaults = await listVaults(companyId, env);
       if (vaults.length === 0) return [];
       const byDir = new Map(vaults.map((vault) => [vault.dir, 0]));
       try {
@@ -274,14 +287,15 @@ export function codexVaultLoginService(db: Db) {
      * name before logging into it; the login also creates the directory.
      */
     async create(
+      companyId: string,
       vaultName: string,
       actor: VaultLoginActor,
       env: NodeJS.ProcessEnv = process.env,
     ): Promise<CodexVaultSummary> {
       if (!isValidVaultName(vaultName)) throw new VaultNameInvalidError();
-      await ensureVaultDir(vaultName, env);
+      await ensureVaultDir(companyId, vaultName, env);
       await audit("codex.vault.created", vaultName, actor);
-      return readVaultSummary(vaultName, env);
+      return readVaultSummary(companyId, vaultName, env);
     },
 
     /** The agents bound to this vault. See {@link agentsUsingVault}. */
@@ -297,23 +311,24 @@ export function codexVaultLoginService(db: Db) {
      * both would race the same credential file.
      */
     async removeCredential(
+      companyId: string,
       vaultName: string,
       actor: VaultLoginActor,
       env: NodeJS.ProcessEnv = process.env,
     ): Promise<CodexVaultSummary> {
       if (!isValidVaultName(vaultName)) throw new VaultNameInvalidError();
-      if (activeByVault.has(vaultName)) throw new VaultLoginConflictError(vaultName);
+      if (activeByVault.has(activeKey(companyId, vaultName))) throw new VaultLoginConflictError(vaultName);
       // "No such vault" and "vault with no credential" are different answers.
       // The first is a 404; the second is a success, because the caller's intent
       // is already satisfied. Without this the missing case reached the
       // directory lock, whose realpath throws ENOENT, and surfaced as a 500.
-      if (!(await vaultExists(vaultName, env))) throw new VaultNotFoundError(vaultName);
-      const removed = await removeVaultCredential(vaultName, env);
+      if (!(await vaultExists(companyId, vaultName, env))) throw new VaultNotFoundError(vaultName);
+      const removed = await removeVaultCredential(companyId, vaultName, env);
       // Audited even when there was nothing to remove: the operator pressed the
       // button, and "tried to sign out an already-empty vault" is the kind of
       // thing an audit trail should be able to answer.
       await audit("codex.vault.credential.removed", vaultName, actor, { removed });
-      return readVaultSummary(vaultName, env);
+      return readVaultSummary(companyId, vaultName, env);
     },
 
     /**
@@ -325,14 +340,15 @@ export function codexVaultLoginService(db: Db) {
      * cannot promote a credential into a directory being removed.
      */
     async remove(
+      companyId: string,
       vaultName: string,
       actor: VaultLoginActor,
       env: NodeJS.ProcessEnv = process.env,
     ): Promise<{ name: string; deleted: boolean }> {
       if (!isValidVaultName(vaultName)) throw new VaultNameInvalidError();
-      if (activeByVault.has(vaultName)) throw new VaultLoginConflictError(vaultName);
-      const agentsBound = await agentsUsingVault(vaultName, env);
-      const deleted = await deleteVault(vaultName, env);
+      if (activeByVault.has(activeKey(companyId, vaultName))) throw new VaultLoginConflictError(vaultName);
+      const agentsBound = await agentsUsingVault(companyId, vaultName, env);
+      const deleted = await deleteVault(companyId, vaultName, env);
       await audit("codex.vault.deleted", vaultName, actor, {
         deleted,
         // Recorded because it is the fact you want when an agent starts failing
@@ -351,14 +367,15 @@ export function codexVaultLoginService(db: Db) {
       actor: VaultLoginActor,
     ): Promise<VaultLoginSessionView> {
       sweep();
-      const { vaultName, startedByUserId } = input;
+      const { companyId, vaultName, startedByUserId } = input;
       if (!isValidVaultName(vaultName)) throw new VaultNameInvalidError();
-      if (activeByVault.has(vaultName)) throw new VaultLoginConflictError(vaultName);
+      if (activeByVault.has(activeKey(companyId, vaultName))) throw new VaultLoginConflictError(vaultName);
 
       const env = input.env ?? process.env;
       const sessionId = randomUUID();
       const session: VaultLoginSession = {
         sessionId,
+        companyId,
         vaultName,
         state: "starting",
         url: null,
@@ -370,9 +387,9 @@ export function codexVaultLoginService(db: Db) {
         terminalAt: null,
       };
       sessions.set(sessionId, session);
-      activeByVault.set(vaultName, sessionId);
+      activeByVault.set(activeKey(companyId, vaultName), sessionId);
 
-      await ensureVaultDir(vaultName, env).catch(() => undefined);
+      await ensureVaultDir(companyId, vaultName, env).catch(() => undefined);
       await audit("codex.vault.login.started", vaultName, actor);
 
       // The login runs detached from the request. Everything below records its
@@ -439,8 +456,8 @@ export function codexVaultLoginService(db: Db) {
           // Promotion validates the bytes again and writes atomically under the
           // vault lock, so a running agent following the symlink sees either the
           // old credential or the new one.
-          await promoteVaultCredential(vaultName, credential, env);
-          const summary = await readVaultSummary(vaultName, env);
+          await promoteVaultCredential(companyId, vaultName, credential, env);
+          const summary = await readVaultSummary(companyId, vaultName, env);
           finish(session, "success");
           await audit("codex.vault.login.succeeded", vaultName, actor, {
             authMode: summary.authMode,

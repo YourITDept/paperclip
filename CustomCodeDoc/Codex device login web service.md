@@ -65,6 +65,81 @@ the resolution tests in `codex-vault.test.ts` are deleted. `codex-vault.ts` keep
 only what the provisioning UI needs: name validation, directory creation,
 credential summaries, listing, and atomic promotion.
 
+## Per-company vault scope — groundwork only, NOT wired up (2026-09-10)
+
+**Status: additive helpers and tests exist. Nothing calls them. The vault layout
+on disk is unchanged and every route still requires instance admin.**
+
+### Why this was started
+
+A company admin cannot run the Codex/Claude logins today —
+`assertCanManageVaults` ([`routes/codex-vaults.ts:32`](server/src/routes/codex-vaults.ts#L32))
+requires `isInstanceAdmin`, because a flat vault namespace is instance-wide. The
+operator asked whether a per-company directory tier could make a company-scoped
+gate safe. It can, and this is the first step of it.
+
+The risk a flat namespace carries, and the reason the gate is strict: a company
+admin let into it could run a device login into an **existing** vault name and
+silently repoint every agent bound to that directory — including other companies'
+— at their own account. Nothing downstream detects credential substitution. The
+agents keep running, authenticated as someone else.
+
+### What exists now
+
+`resolveCompanyVaultRoot`, `resolveCompanyVaultDir`, `assertValidVaultCompanyScope`
+in both `codex-vault.ts` and `claude-vault.ts`, plus 28 tests
+(`*-vault-company-scope.test.ts`, folded into the cs3+4 suite: 83 → **111**).
+They are pure additions with **no callers**.
+
+### The two findings worth keeping
+
+**1. The segment must be the companyId, NOT the issue prefix.** The readable
+choice — `/sysops/llm/codex/ACME/alice` — is wrong and quietly so.
+[`resolveRenamedIssuePrefix`](server/src/services/companies.ts#L230) re-keys
+`issuePrefix` when a company is renamed, so a prefix-named directory is orphaned
+by that rename: the row moves, the directory does not, and agents bound to the old
+path point at a directory the application no longer considers the company's. The
+credential still works, so nothing fails — it just stops being governed.
+`companies.id` is never re-keyed. Readability is given up deliberately.
+
+**2. The segment must come from the ACTOR, never the request.** A route that
+joins a caller-supplied company id onto the root has a decorative boundary:
+company A sends company B's id and walks through. The tests assert traversal
+(`..`, `../<other-uuid>`, `/etc`, non-UUID, empty) fails on the id *and* on the
+vault name.
+
+### Resume point — what is left, in order
+
+1. Thread the scope through both login services (4 call sites each) **and**
+   `agentsUsingVault`'s SQL, which must scope its match to the company.
+2. Routes derive the company from the actor and `assertCompanyAccess` it — still
+   gated on instance admin at this stage.
+3. Migrate existing vault directories under their company id. **The operator
+   elected to do this by hand** (2026-09-10): re-create, move and remove vaults
+   manually rather than have code relocate them.
+4. **Only then** relax `assertCanManageVaults` to company admin within their own
+   scope. That is the change the exercise is for; everything above is groundwork
+   that must be provably correct while the strict gate still protects it.
+
+> **Why it stopped here.** Making `companyId` required turned the compiler into
+> the checklist and it found 110 call sites — 99 of them in the existing vault
+> tests. Mid-refactor, the adapter sources compiled while the **services** only
+> appeared to: they type-check against the package's built `dist`, which still
+> carried the old unscoped `.d.ts`. The breakage was real and hidden behind a
+> stale build. The signature changes were reverted; the additive helpers kept.
+>
+> **Read that as a standing caution for this workspace:** a green server
+> typecheck after an adapter signature change proves nothing until the adapter
+> package is rebuilt.
+
+### Boundary limits, once it is wired
+
+- **Management-only.** It stops a company admin creating or destroying
+  credentials elsewhere. It does *not* stop an agent being bound to another
+  company's path by hand — env values are not constrained by the vault name rule.
+- **Namespacing, not isolation.** Anything with host filesystem access still sees
+  every vault.
+
 ## 10. Phase 2 — the login lives inside Paperclip
 
 The standalone service is no longer the way in. Provisioning now happens in

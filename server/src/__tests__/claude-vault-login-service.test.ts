@@ -3,6 +3,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
+
+// Vaults are company-scoped: <root>/<companyId>/<name>.
+const CO = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
 import {
   ClaudeVaultCodeUnexpectedError,
   ClaudeVaultLoginConflictError,
@@ -122,6 +125,7 @@ describe("provisioning multiple Claude accounts", () => {
   it("completes the code round trip and stores the credential", async () => {
     const started = await service.start(
       {
+        companyId: CO,
         vaultName: "acct_one",
         startedByUserId: ADMIN.actorId,
         claudeCommand: await fakeClaudeFor("AAAABBBBCCCCDDDDEEEE1111", "one"),
@@ -140,7 +144,7 @@ describe("provisioning multiple Claude accounts", () => {
     service.submitCode(started.sessionId, ADMIN.actorId, "BROWSER-CODE-1");
     expect((await waitFor(started.sessionId, "terminal")).state).toBe("success");
 
-    const vaults = await service.list(env);
+    const vaults = await service.list(CO, env);
     expect(vaults).toHaveLength(1);
     expect(vaults[0]).toMatchObject({
       name: "acct_one",
@@ -156,7 +160,7 @@ describe("provisioning multiple Claude accounts", () => {
       ["acct_two", "DDDDEEEEFFFFGGGGHHHH2222", "two"],
     ] as const) {
       const started = await service.start(
-        { vaultName: name, startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor(tail, label), env },
+        { companyId: CO, vaultName: name, startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor(tail, label), env },
         ADMIN,
       );
       await waitFor(started.sessionId, "waiting_for_code");
@@ -164,15 +168,16 @@ describe("provisioning multiple Claude accounts", () => {
       expect((await waitFor(started.sessionId, "terminal")).state).toBe("success");
     }
 
-    const vaults = await service.list(env);
+    const vaults = await service.list(CO, env);
     expect(vaults.map((v) => v.name)).toEqual(["acct_one", "acct_two"]);
     expect(vaults[0].tokenSuffix).not.toBe(vaults[1].tokenSuffix);
   });
 
   it("never writes into the vault when the login fails", async () => {
-    await service.create("untouched", ADMIN, env);
+    await service.create(CO, "untouched", ADMIN, env);
     const started = await service.start(
       {
+        companyId: CO,
         vaultName: "untouched",
         startedByUserId: ADMIN.actorId,
         claudeCommand: await failingClaude("x"),
@@ -183,43 +188,43 @@ describe("provisioning multiple Claude accounts", () => {
     expect((await waitFor(started.sessionId, "terminal")).state).toBe("failed");
     // The login runs against a private staging directory, so a failure leaves the
     // vault exactly as it was.
-    expect(await service.list(env)).toMatchObject([{ name: "untouched", hasCredential: false }]);
+    expect(await service.list(CO, env)).toMatchObject([{ name: "untouched", hasCredential: false }]);
   });
 
   it("leaves an existing credential byte-identical when a re-login fails", async () => {
     const first = await service.start(
-      { vaultName: "stable", startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor("AAAABBBBCCCCDDDDEEEE1111", "s1"), env },
+      { companyId: CO, vaultName: "stable", startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor("AAAABBBBCCCCDDDDEEEE1111", "s1"), env },
       ADMIN,
     );
     await waitFor(first.sessionId, "waiting_for_code");
     service.submitCode(first.sessionId, ADMIN.actorId, "CODE");
     await waitFor(first.sessionId, "terminal");
-    const before = await fs.readFile(path.join(root, "stable", ".credentials.json"), "utf8");
+    const before = await fs.readFile(path.join(root, CO, "stable", ".credentials.json"), "utf8");
 
     const second = await service.start(
-      { vaultName: "stable", startedByUserId: ADMIN.actorId, claudeCommand: await failingClaude("s2"), env },
+      { companyId: CO, vaultName: "stable", startedByUserId: ADMIN.actorId, claudeCommand: await failingClaude("s2"), env },
       ADMIN,
     );
     expect((await waitFor(second.sessionId, "terminal")).state).toBe("failed");
-    expect(await fs.readFile(path.join(root, "stable", ".credentials.json"), "utf8")).toBe(before);
+    expect(await fs.readFile(path.join(root, CO, "stable", ".credentials.json"), "utf8")).toBe(before);
   });
 });
 
 describe("session lifecycle and authorization", () => {
   it("refuses a second concurrent login for the same vault but allows another", async () => {
     const first = await service.start(
-      { vaultName: "busy", startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor("AAAABBBBCCCCDDDDEEEE1111", "b1"), env },
+      { companyId: CO, vaultName: "busy", startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor("AAAABBBBCCCCDDDDEEEE1111", "b1"), env },
       ADMIN,
     );
     await waitFor(first.sessionId, "waiting_for_code");
 
     await expect(
-      service.start({ vaultName: "busy", startedByUserId: ADMIN.actorId, env }, ADMIN),
+      service.start({ companyId: CO, vaultName: "busy", startedByUserId: ADMIN.actorId, env }, ADMIN),
     ).rejects.toBeInstanceOf(ClaudeVaultLoginConflictError);
 
     // Parallel provisioning of a different account is the point.
     const other = await service.start(
-      { vaultName: "other", startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor("DDDDEEEEFFFFGGGGHHHH2222", "b2"), env },
+      { companyId: CO, vaultName: "other", startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor("DDDDEEEEFFFFGGGGHHHH2222", "b2"), env },
       ADMIN,
     );
     await waitFor(other.sessionId, "waiting_for_code");
@@ -229,7 +234,7 @@ describe("session lifecycle and authorization", () => {
 
   it("hides a session from another admin, and refuses their code", async () => {
     const started = await service.start(
-      { vaultName: "owned", startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor("AAAABBBBCCCCDDDDEEEE1111", "o1"), env },
+      { companyId: CO, vaultName: "owned", startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor("AAAABBBBCCCCDDDDEEEE1111", "o1"), env },
       ADMIN,
     );
     await waitFor(started.sessionId, "waiting_for_code");
@@ -243,7 +248,7 @@ describe("session lifecycle and authorization", () => {
 
   it("accepts a code once and refuses a replay", async () => {
     const started = await service.start(
-      { vaultName: "once", startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor("AAAABBBBCCCCDDDDEEEE1111", "r1"), env },
+      { companyId: CO, vaultName: "once", startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor("AAAABBBBCCCCDDDDEEEE1111", "r1"), env },
       ADMIN,
     );
     await waitFor(started.sessionId, "waiting_for_code");
@@ -256,7 +261,7 @@ describe("session lifecycle and authorization", () => {
 
   it("refuses a code for a session that never reached the prompt", async () => {
     const started = await service.start(
-      { vaultName: "early", startedByUserId: ADMIN.actorId, claudeCommand: await failingClaude("e1"), env },
+      { companyId: CO, vaultName: "early", startedByUserId: ADMIN.actorId, claudeCommand: await failingClaude("e1"), env },
       ADMIN,
     );
     await waitFor(started.sessionId, "terminal");
@@ -267,18 +272,18 @@ describe("session lifecycle and authorization", () => {
 
   it("cancelling a waiting login ends it without writing a credential", async () => {
     const started = await service.start(
-      { vaultName: "cancelled", startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor("AAAABBBBCCCCDDDDEEEE1111", "c1"), env },
+      { companyId: CO, vaultName: "cancelled", startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor("AAAABBBBCCCCDDDDEEEE1111", "c1"), env },
       ADMIN,
     );
     await waitFor(started.sessionId, "waiting_for_code");
     const view = service.cancel(started.sessionId, ADMIN.actorId);
     expect(view?.state).toBe("failed");
-    expect(await service.list(env)).toMatchObject([{ name: "cancelled", hasCredential: false }]);
+    expect(await service.list(CO, env)).toMatchObject([{ name: "cancelled", hasCredential: false }]);
   });
 
   it("drops the URL once the session is terminal, so it cannot be replayed", async () => {
     const started = await service.start(
-      { vaultName: "dropped", startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor("AAAABBBBCCCCDDDDEEEE1111", "d1"), env },
+      { companyId: CO, vaultName: "dropped", startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor("AAAABBBBCCCCDDDDEEEE1111", "d1"), env },
       ADMIN,
     );
     await waitFor(started.sessionId, "waiting_for_code");
@@ -290,7 +295,7 @@ describe("session lifecycle and authorization", () => {
 describe("removing an authorization", () => {
   async function signIn(name: string, tail: string, label: string): Promise<void> {
     const started = await service.start(
-      { vaultName: name, startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor(tail, label), env },
+      { companyId: CO, vaultName: name, startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor(tail, label), env },
       ADMIN,
     );
     await waitFor(started.sessionId, "waiting_for_code");
@@ -301,47 +306,47 @@ describe("removing an authorization", () => {
   it("signs a vault out, keeping the directory, and lets it be signed in again", async () => {
     await signIn("revocable", "AAAABBBBCCCCDDDDEEEE1111", "rev");
 
-    const after = await service.removeCredential("revocable", ADMIN, env);
+    const after = await service.removeCredential(CO, "revocable", ADMIN, env);
     expect(after).toMatchObject({ name: "revocable", hasCredential: false, tokenSuffix: null });
-    await expect(fs.access(path.join(root, "revocable", "settings.json"))).resolves.toBeUndefined();
+    await expect(fs.access(path.join(root, CO, "revocable", "settings.json"))).resolves.toBeUndefined();
 
     await signIn("revocable", "DDDDEEEEFFFFGGGGHHHH2222", "rev2");
-    expect((await service.list(env))[0]).toMatchObject({ hasCredential: true });
+    expect((await service.list(CO, env))[0]).toMatchObject({ hasCredential: true });
   });
 
   it("signing one vault out leaves the other account untouched", async () => {
     await signIn("keep_me", "AAAABBBBCCCCDDDDEEEE1111", "keep");
     await signIn("drop_me", "DDDDEEEEFFFFGGGGHHHH2222", "drop");
 
-    await service.removeCredential("drop_me", ADMIN, env);
+    await service.removeCredential(CO, "drop_me", ADMIN, env);
 
-    const vaults = await service.list(env);
+    const vaults = await service.list(CO, env);
     expect(vaults.find((v) => v.name === "keep_me")).toMatchObject({ hasCredential: true });
     expect(vaults.find((v) => v.name === "drop_me")).toMatchObject({ hasCredential: false });
   });
 
   it("deletes a vault outright and drops it from the listing", async () => {
     await signIn("temporary", "AAAABBBBCCCCDDDDEEEE1111", "tmp");
-    await expect(service.remove("temporary", ADMIN, env)).resolves.toEqual({
+    await expect(service.remove(CO, "temporary", ADMIN, env)).resolves.toEqual({
       name: "temporary",
       deleted: true,
     });
-    expect(await service.list(env)).toEqual([]);
-    await expect(fs.access(path.join(root, "temporary"))).rejects.toThrow();
+    expect(await service.list(CO, env)).toEqual([]);
+    await expect(fs.access(path.join(root, CO, "temporary"))).rejects.toThrow();
   });
 
   it("signing out a vault that does not exist is a not-found, not a crash", async () => {
-    await expect(service.removeCredential("never_created", ADMIN, env)).rejects.toBeInstanceOf(
+    await expect(service.removeCredential(CO, "never_created", ADMIN, env)).rejects.toBeInstanceOf(
       ClaudeVaultNotFoundError,
     );
-    await service.create("exists_but_empty", ADMIN, env);
-    await expect(service.removeCredential("exists_but_empty", ADMIN, env)).resolves.toMatchObject({
+    await service.create(CO, "exists_but_empty", ADMIN, env);
+    await expect(service.removeCredential(CO, "exists_but_empty", ADMIN, env)).resolves.toMatchObject({
       hasCredential: false,
     });
   });
 
   it("reports deleted:false for a vault that was never provisioned", async () => {
-    await expect(service.remove("never_existed", ADMIN, env)).resolves.toEqual({
+    await expect(service.remove(CO, "never_existed", ADMIN, env)).resolves.toEqual({
       name: "never_existed",
       deleted: false,
     });
@@ -349,36 +354,36 @@ describe("removing an authorization", () => {
 
   it("refuses both removals while a login for that vault is in flight", async () => {
     const started = await service.start(
-      { vaultName: "busy_vault", startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor("AAAABBBBCCCCDDDDEEEE1111", "bv"), env },
+      { companyId: CO, vaultName: "busy_vault", startedByUserId: ADMIN.actorId, claudeCommand: await fakeClaudeFor("AAAABBBBCCCCDDDDEEEE1111", "bv"), env },
       ADMIN,
     );
     await waitFor(started.sessionId, "waiting_for_code");
 
-    await expect(service.removeCredential("busy_vault", ADMIN, env)).rejects.toBeInstanceOf(
+    await expect(service.removeCredential(CO, "busy_vault", ADMIN, env)).rejects.toBeInstanceOf(
       ClaudeVaultLoginConflictError,
     );
-    await expect(service.remove("busy_vault", ADMIN, env)).rejects.toBeInstanceOf(
+    await expect(service.remove(CO, "busy_vault", ADMIN, env)).rejects.toBeInstanceOf(
       ClaudeVaultLoginConflictError,
     );
 
     service.cancel(started.sessionId, ADMIN.actorId);
     await waitFor(started.sessionId, "terminal");
-    await expect(service.remove("busy_vault", ADMIN, env)).resolves.toMatchObject({ deleted: true });
+    await expect(service.remove(CO, "busy_vault", ADMIN, env)).resolves.toMatchObject({ deleted: true });
   });
 
   it("rejects an invalid name on both removal paths", async () => {
-    await expect(service.removeCredential("../escape", ADMIN, env)).rejects.toBeInstanceOf(
+    await expect(service.removeCredential(CO, "../escape", ADMIN, env)).rejects.toBeInstanceOf(
       ClaudeVaultNameInvalidError,
     );
-    await expect(service.remove("../escape", ADMIN, env)).rejects.toBeInstanceOf(
+    await expect(service.remove(CO, "../escape", ADMIN, env)).rejects.toBeInstanceOf(
       ClaudeVaultNameInvalidError,
     );
   });
 
   it("degrades the bound-agent warning to empty rather than failing when the db is unavailable", async () => {
-    await service.create("unbound", ADMIN, env);
-    await expect(service.agentsUsing("unbound", env)).resolves.toEqual([]);
-    await expect(service.listWithUsage(env)).resolves.toMatchObject([{ boundAgentCount: 0 }]);
-    await expect(service.remove("unbound", ADMIN, env)).resolves.toMatchObject({ deleted: true });
+    await service.create(CO, "unbound", ADMIN, env);
+    await expect(service.agentsUsing(CO, "unbound", env)).resolves.toEqual([]);
+    await expect(service.listWithUsage(CO, env)).resolves.toMatchObject([{ boundAgentCount: 0 }]);
+    await expect(service.remove(CO, "unbound", ADMIN, env)).resolves.toMatchObject({ deleted: true });
   });
 });

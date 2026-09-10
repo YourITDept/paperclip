@@ -1555,6 +1555,84 @@ finds a `pnpm-workspace.yaml`. Loud beats silent; the old behaviour was a
 > "§7". It is this section, **§8** — §7 is the test procedure. Kept as-is so old
 > cross-references still resolve; read "§7 session log" as this section.
 
+### 2026-09-10 — Session 23: verifying PR #48 (GitHub merge, 11 commits)
+
+**Branch:** `W8-20260909d` @ `43d912525` (upstream tip `bd1fdc288`). Merged by the
+operator via the GitHub PR route. Review-after-the-fact. Nothing committed by the
+assistant.
+
+#### Result: the cleanest merge yet — exit 0, and one open item closed
+
+| Check | Result |
+| --- | --- |
+| Guards (22) | **all PASS** |
+| `typecheck` | **exit 0**, 0 `error TS` |
+| §7.2 suites (10) | **all PASS at baseline** (cs5 60, cs11 30) |
+| `general-server` | 8 failed, 563 passed, 2 skipped (573) — **below baseline 9** |
+| `general-workspaces-a` | **568/568** UI · **62/62** CLI |
+| `general-workspaces-b` | **0 failed** across 6 projects |
+| serialized, per file | 3 failed of 144 — all timeouts, see below |
+
+**`git diff` against the §4 register is EMPTY.** Not one of the 11 commits touches
+a registered fork file — `index.ts`, `routes/agents.ts`, both vault services, both
+sidebars, the validators, `redaction.ts`. §6.4 q2 clear as well: no renames, no
+deletions. This is the first merge where the fork's surface was untouched.
+
+#### O-9 is CLOSED, by upstream, one merge after it opened
+
+`native-codex-runner.integration.test.ts` is gone from the failing set. Session 22
+classified it as an upstream regression introduced by PR #47 and explicitly
+declined to carry a fork patch for it; four runner commits in this batch
+(`ca96e1eb0`, `3b550c80f`, and two others) fixed it. Baseline lowered **9 → 8**.
+
+**The classification paid for itself.** Had it been treated as fork-caused and
+patched around, that patch would now be dead weight to unpick. "Prove it is
+upstream's, then wait" cost one merge of a raised baseline and nothing else.
+
+#### §7.5 #3 did NOT recur — first clean `--frozen-lockfile` in five merges
+
+Exit 0 in 9 seconds, despite `package.json` and **eight** patch files changing.
+The batch carries two lockfile-refresh commits (#13106, #13128) that actually did
+their job. Do not conclude the trap is gone — conclude that upstream *can* get it
+right, and keep the `--no-frozen-lockfile` step in the procedure.
+
+#### The 3 serialized failures are cold-start timeouts, not defects
+
+`issue-telemetry-routes`, `issue-thread-interaction-routes`,
+`issue-update-comment-wakeup-routes` — all fail **only** in serialized mode and
+all pass in the group run. Every one is a `Test timed out in 10000ms` (15000 in
+one), and two carry a follow-on `expected vi.fn() ... called 1 times` that is the
+timed-out test's async work landing inside the next test.
+
+**None of the three files was touched by this merge** (0 commits each). This is
+the documented `agent-skills-routes` pattern: `--pool=forks --isolate` gives each
+file its own process, and the app cold start alone can exceed a 10 s per-test cap.
+Environmental. Recorded rather than chased.
+
+> The script notes serialized as INFO rather than FAIL, which is why the run still
+> exits 0. That is correct here, but it is worth knowing the number is advisory —
+> read it, do not rely on the exit code to police it.
+
+#### Notable for the operator, none of it fork-breaking
+
+- **Sixteen migrations** (`0255`–`0270`). Every DROP is a `DROP CONSTRAINT` or
+  `DROP INDEX`, nearly all on `chat_*` tables created in the same batch; two touch
+  pre-existing tables (`tool_connections` check constraint, an
+  `agent_wakeup_requests` idempotency index) and both are replacements. **No
+  `DROP TABLE`, `DROP COLUMN` or `TRUNCATE` — no data loss.** With
+  `PAPERCLIP_MIGRATION_AUTO_APPLY=true`, watch the boot log through to completion.
+- **A whole chat subsystem arrived** (#13100: 143 files, 48k lines, vendored
+  Discord/Slack/Teams/Telegram/GitHub adapters — the bulk of the PR's 793k
+  additions). It adds **no feature-catalog entry and no instance-settings flag**,
+  so fork changes #3/#4 do not govern it; it is opt-in by configuring a chat
+  connection. It touches `server/src/index.ts` not at all, so it cannot perturb
+  change set 11's `setInterval` (§7.5 #2b-5).
+- **`3b550c80f` adds `trustCodexStartupRoot(environment.CODEX_HOME, …)`** — new
+  startup-trust semantics for `CODEX_HOME`, landing in the same area the fork's
+  vault work occupies. It lives entirely in `packages/paperclip-runner`, so fork
+  change #4 keeps it inert. **Revisit it if the runner is ever enabled**: vault
+  directories would start flowing through that trust step.
+
 ### 2026-09-09 — Session 22: verifying PR #47 (GitHub merge, 13 commits)
 
 **Who:** Claude (Opus 5) with chris@anderson-family.com

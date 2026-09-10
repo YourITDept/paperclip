@@ -48,34 +48,35 @@ export interface CodexVaultLoginSession {
 }
 
 export const codexVaultsApi = {
-  list: () => api.get<CodexVaultListResponse>("/instance/codex-vaults"),
-  create: (name: string) => api.post<CodexVaultSummary>("/instance/codex-vaults", { name }),
-  startLogin: (name: string) =>
+  list: (companyId: string) => api.get<CodexVaultListResponse>(`/instance/codex-vaults?companyId=${encodeURIComponent(companyId)}`),
+  create: (companyId: string, name: string) =>
+    api.post<CodexVaultSummary>("/instance/codex-vaults", { companyId, name }),
+  startLogin: (companyId: string, name: string) =>
     api.post<CodexVaultLoginSession>(
       `/instance/codex-vaults/${encodeURIComponent(name)}/login-sessions`,
-      {},
+      { companyId },
     ),
-  readSession: (sessionId: string) =>
+  readSession: (companyId: string, sessionId: string) =>
     api.get<CodexVaultLoginSession>(
-      `/instance/codex-vaults/login-sessions/${encodeURIComponent(sessionId)}`,
+      `/instance/codex-vaults/login-sessions/${encodeURIComponent(sessionId)}?companyId=${encodeURIComponent(companyId)}`,
     ),
-  cancelSession: (sessionId: string) =>
+  cancelSession: (companyId: string, sessionId: string) =>
     api.post<CodexVaultLoginSession>(
       `/instance/codex-vaults/login-sessions/${encodeURIComponent(sessionId)}/cancel`,
-      {},
+      { companyId },
     ),
   /**
    * Removes the credential and keeps the login. Reversible: the directory, its
    * `config.toml`, and its path survive, so an agent pointed at it keeps
    * resolving and signing in again restores it.
    */
-  signOut: (name: string) =>
+  signOut: (companyId: string, name: string) =>
     api.delete<CodexVaultSummary>(
-      `/instance/codex-vaults/${encodeURIComponent(name)}/credential`,
+      `/instance/codex-vaults/${encodeURIComponent(name)}/credential?companyId=${encodeURIComponent(companyId)}`,
     ),
   /** Deletes the directory outright. Irreversible; breaks agents bound to it. */
-  remove: (name: string) =>
+  remove: (companyId: string, name: string) =>
     api.delete<{ name: string; deleted: boolean }>(
-      `/instance/codex-vaults/${encodeURIComponent(name)}`,
+      `/instance/codex-vaults/${encodeURIComponent(name)}?companyId=${encodeURIComponent(companyId)}`,
     ),
 };

@@ -35,6 +35,7 @@ import { copyTextToClipboard } from "@/lib/clipboard";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { cn } from "../lib/utils";
+import { useCompany } from "../context/CompanyContext";
 
 // The Codex credential vault settings page.
 //
@@ -217,6 +218,11 @@ function LoginPanel({
 }
 
 export function InstanceCodexVaults() {
+  // Vaults are company-scoped (<root>/<companyId>/<name>), so every call on
+  // this page carries the selected company. The server authorizes it — this is
+  // addressing, not permission.
+  const { selectedCompanyId } = useCompany();
+  const companyId = selectedCompanyId ?? "";
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const [newName, setNewName] = useState("");
@@ -234,15 +240,16 @@ export function InstanceCodexVaults() {
   }, [setBreadcrumbs]);
 
   const vaultsQuery = useQuery({
-    queryKey: queryKeys.instance.codexVaults,
-    queryFn: () => codexVaultsApi.list(),
+    queryKey: [...queryKeys.instance.codexVaults, companyId],
+    queryFn: () => codexVaultsApi.list(companyId),
+    enabled: companyId !== "",
   });
 
   // Poll only while a login is in flight; stop the moment it is terminal.
   const sessionQuery = useQuery({
     queryKey: queryKeys.instance.codexVaultSession(sessionId ?? ""),
-    queryFn: () => codexVaultsApi.readSession(sessionId as string),
-    enabled: sessionId !== null,
+    queryFn: () => codexVaultsApi.readSession(companyId, sessionId as string),
+    enabled: sessionId !== null && companyId !== "",
     refetchInterval: (query) => {
       const state = query.state.data?.state;
       return state === "success" || state === "failed" ? false : 1500;
@@ -258,7 +265,7 @@ export function InstanceCodexVaults() {
   }, [session?.state, queryClient]);
 
   const startLogin = useMutation({
-    mutationFn: (name: string) => codexVaultsApi.startLogin(name),
+    mutationFn: (name: string) => codexVaultsApi.startLogin(companyId, name),
     onSuccess: (started) => {
       setActionError(null);
       setSessionId(started.sessionId);
@@ -267,7 +274,7 @@ export function InstanceCodexVaults() {
   });
 
   const createVault = useMutation({
-    mutationFn: (name: string) => codexVaultsApi.create(name),
+    mutationFn: (name: string) => codexVaultsApi.create(companyId, name),
     onSuccess: async (created) => {
       setActionError(null);
       setNewName("");
@@ -278,11 +285,11 @@ export function InstanceCodexVaults() {
   });
 
   const cancelSession = useMutation({
-    mutationFn: (id: string) => codexVaultsApi.cancelSession(id),
+    mutationFn: (id: string) => codexVaultsApi.cancelSession(companyId, id),
   });
 
   const signOutVault = useMutation({
-    mutationFn: (name: string) => codexVaultsApi.signOut(name),
+    mutationFn: (name: string) => codexVaultsApi.signOut(companyId, name),
     onSuccess: async () => {
       setActionError(null);
       setPendingAction(null);
@@ -294,7 +301,7 @@ export function InstanceCodexVaults() {
   });
 
   const removeVault = useMutation({
-    mutationFn: (name: string) => codexVaultsApi.remove(name),
+    mutationFn: (name: string) => codexVaultsApi.remove(companyId, name),
     onSuccess: async () => {
       setActionError(null);
       setPendingAction(null);

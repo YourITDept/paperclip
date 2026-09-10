@@ -35,6 +35,7 @@ import { copyTextToClipboard } from "@/lib/clipboard";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { cn } from "../lib/utils";
+import { useCompany } from "../context/CompanyContext";
 
 // The Claude credential vault settings page.
 //
@@ -230,6 +231,11 @@ function LoginPanel({
 }
 
 export function InstanceClaudeVaults() {
+  // Vaults are company-scoped (<root>/<companyId>/<name>), so every call on
+  // this page carries the selected company. The server authorizes it — this is
+  // addressing, not permission.
+  const { selectedCompanyId } = useCompany();
+  const companyId = selectedCompanyId ?? "";
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const [newName, setNewName] = useState("");
@@ -250,15 +256,16 @@ export function InstanceClaudeVaults() {
   }, [setBreadcrumbs]);
 
   const vaultsQuery = useQuery({
-    queryKey: queryKeys.instance.claudeVaults,
-    queryFn: () => claudeVaultsApi.list(),
+    queryKey: [...queryKeys.instance.claudeVaults, companyId],
+    queryFn: () => claudeVaultsApi.list(companyId),
+    enabled: companyId !== "",
   });
 
   // Poll only while a login is in flight; stop the moment it is terminal.
   const sessionQuery = useQuery({
     queryKey: queryKeys.instance.claudeVaultSession(sessionId ?? ""),
-    queryFn: () => claudeVaultsApi.readSession(sessionId as string),
-    enabled: sessionId !== null,
+    queryFn: () => claudeVaultsApi.readSession(companyId, sessionId as string),
+    enabled: sessionId !== null && companyId !== "",
     refetchInterval: (query) => {
       const state = query.state.data?.state;
       return state === "success" || state === "failed" ? false : 1500;
@@ -274,7 +281,7 @@ export function InstanceClaudeVaults() {
   }, [session?.state, queryClient]);
 
   const startLogin = useMutation({
-    mutationFn: (name: string) => claudeVaultsApi.startLogin(name),
+    mutationFn: (name: string) => claudeVaultsApi.startLogin(companyId, name),
     onSuccess: (started) => {
       setActionError(null);
       setLoginCode("");
@@ -284,7 +291,7 @@ export function InstanceClaudeVaults() {
   });
 
   const createVault = useMutation({
-    mutationFn: (name: string) => claudeVaultsApi.create(name),
+    mutationFn: (name: string) => claudeVaultsApi.create(companyId, name),
     onSuccess: async (created) => {
       setActionError(null);
       setNewName("");
@@ -295,12 +302,12 @@ export function InstanceClaudeVaults() {
   });
 
   const cancelSession = useMutation({
-    mutationFn: (id: string) => claudeVaultsApi.cancelSession(id),
+    mutationFn: (id: string) => claudeVaultsApi.cancelSession(companyId, id),
   });
 
   const submitCode = useMutation({
     mutationFn: ({ id, code }: { id: string; code: string }) =>
-      claudeVaultsApi.submitCode(id, code),
+      claudeVaultsApi.submitCode(companyId, id, code),
     onSuccess: () => {
       setActionError(null);
       setLoginCode("");
@@ -309,7 +316,7 @@ export function InstanceClaudeVaults() {
   });
 
   const signOutVault = useMutation({
-    mutationFn: (name: string) => claudeVaultsApi.signOut(name),
+    mutationFn: (name: string) => claudeVaultsApi.signOut(companyId, name),
     onSuccess: async () => {
       setActionError(null);
       setPendingAction(null);
@@ -321,7 +328,7 @@ export function InstanceClaudeVaults() {
   });
 
   const removeVault = useMutation({
-    mutationFn: (name: string) => claudeVaultsApi.remove(name),
+    mutationFn: (name: string) => claudeVaultsApi.remove(companyId, name),
     onSuccess: async () => {
       setActionError(null);
       setPendingAction(null);

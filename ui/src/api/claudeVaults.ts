@@ -45,40 +45,41 @@ export interface ClaudeVaultLoginSession {
 }
 
 export const claudeVaultsApi = {
-  list: () => api.get<ClaudeVaultListResponse>("/instance/claude-vaults"),
-  create: (name: string) => api.post<ClaudeVaultSummary>("/instance/claude-vaults", { name }),
-  startLogin: (name: string) =>
+  list: (companyId: string) => api.get<ClaudeVaultListResponse>(`/instance/claude-vaults?companyId=${encodeURIComponent(companyId)}`),
+  create: (companyId: string, name: string) =>
+    api.post<ClaudeVaultSummary>("/instance/claude-vaults", { companyId, name }),
+  startLogin: (companyId: string, name: string) =>
     api.post<ClaudeVaultLoginSession>(
       `/instance/claude-vaults/${encodeURIComponent(name)}/login-sessions`,
-      {},
+      { companyId },
     ),
-  readSession: (sessionId: string) =>
+  readSession: (companyId: string, sessionId: string) =>
     api.get<ClaudeVaultLoginSession>(
-      `/instance/claude-vaults/login-sessions/${encodeURIComponent(sessionId)}`,
+      `/instance/claude-vaults/login-sessions/${encodeURIComponent(sessionId)}?companyId=${encodeURIComponent(companyId)}`,
     ),
   /** Hands the browser code back to the waiting login. Claude-specific. */
-  submitCode: (sessionId: string, code: string) =>
+  submitCode: (companyId: string, sessionId: string, code: string) =>
     api.post<ClaudeVaultLoginSession>(
       `/instance/claude-vaults/login-sessions/${encodeURIComponent(sessionId)}/code`,
-      { code },
+      { companyId, code },
     ),
-  cancelSession: (sessionId: string) =>
+  cancelSession: (companyId: string, sessionId: string) =>
     api.post<ClaudeVaultLoginSession>(
       `/instance/claude-vaults/login-sessions/${encodeURIComponent(sessionId)}/cancel`,
-      {},
+      { companyId },
     ),
   /**
    * Removes the credential and keeps the login. Reversible: the directory, its
    * `settings.json`, and its path survive, so an agent pointed at it keeps
    * resolving and signing in again restores it.
    */
-  signOut: (name: string) =>
+  signOut: (companyId: string, name: string) =>
     api.delete<ClaudeVaultSummary>(
-      `/instance/claude-vaults/${encodeURIComponent(name)}/credential`,
+      `/instance/claude-vaults/${encodeURIComponent(name)}/credential?companyId=${encodeURIComponent(companyId)}`,
     ),
   /** Deletes the directory outright. Irreversible; breaks agents bound to it. */
-  remove: (name: string) =>
+  remove: (companyId: string, name: string) =>
     api.delete<{ name: string; deleted: boolean }>(
-      `/instance/claude-vaults/${encodeURIComponent(name)}`,
+      `/instance/claude-vaults/${encodeURIComponent(name)}?companyId=${encodeURIComponent(companyId)}`,
     ),
 };

@@ -2,6 +2,9 @@ import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+
+// Vaults are company-scoped: <root>/<companyId>/<name>.
+const CO = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
 import {
   CODEX_VAULT_NAME_INVALID,
   CODEX_VAULT_ROOT_ENV_KEY,
@@ -95,39 +98,39 @@ describe("vault root", () => {
 
 describe("ensureVaultDir", () => {
   it("creates a private directory and seeds config.toml", async () => {
-    const dir = await ensureVaultDir("chris_codex", env);
+    const dir = await ensureVaultDir(CO, "chris_codex", env);
     expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
     expect((await fs.stat(path.join(dir, "config.toml"))).mode & 0o777).toBe(0o600);
   });
 
   it("tightens an existing group-writable directory", async () => {
-    const dir = path.join(root, "loose_vault");
+    const dir = path.join(root, CO, "loose_vault");
     await fs.mkdir(dir, { recursive: true });
     await fs.chmod(dir, 0o775);
-    await ensureVaultDir("loose_vault", env);
+    await ensureVaultDir(CO, "loose_vault", env);
     expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
   });
 
   it("never overwrites an existing config.toml", async () => {
-    const dir = await ensureVaultDir("chris_codex", env);
+    const dir = await ensureVaultDir(CO, "chris_codex", env);
     await fs.writeFile(path.join(dir, "config.toml"), "custom = true\n");
-    await ensureVaultDir("chris_codex", env);
+    await ensureVaultDir(CO, "chris_codex", env);
     expect(await fs.readFile(path.join(dir, "config.toml"), "utf8")).toBe("custom = true\n");
   });
 
   it("never touches auth.json", async () => {
-    const dir = await ensureVaultDir("chris_codex", env);
+    const dir = await ensureVaultDir(CO, "chris_codex", env);
     await fs.writeFile(path.join(dir, "auth.json"), SUBSCRIPTION_AUTH, { mode: 0o600 });
-    await ensureVaultDir("chris_codex", env);
+    await ensureVaultDir(CO, "chris_codex", env);
     expect(await fs.readFile(path.join(dir, "auth.json"), "utf8")).toBe(SUBSCRIPTION_AUTH);
   });
 });
 
 describe("readVaultSummary", () => {
   it("reports a usable subscription credential without leaking the account id", async () => {
-    const dir = await ensureVaultDir("chris_codex", env);
+    const dir = await ensureVaultDir(CO, "chris_codex", env);
     await fs.writeFile(path.join(dir, "auth.json"), SUBSCRIPTION_AUTH, { mode: 0o600 });
-    const summary = await readVaultSummary("chris_codex", env);
+    const summary = await readVaultSummary(CO, "chris_codex", env);
     expect(summary.hasCredential).toBe(true);
     expect(summary.authMode).toBe("chatgpt");
     expect(summary.accountSuffix).toBe("ef0123456789");
@@ -141,66 +144,66 @@ describe("readVaultSummary", () => {
   });
 
   it("reports an api-key credential as usable", async () => {
-    const dir = await ensureVaultDir("keyed", env);
+    const dir = await ensureVaultDir(CO, "keyed", env);
     await fs.writeFile(path.join(dir, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "sk-x" }));
-    expect((await readVaultSummary("keyed", env)).hasCredential).toBe(true);
+    expect((await readVaultSummary(CO, "keyed", env)).hasCredential).toBe(true);
   });
 
   it("treats an absent, malformed, or half-written credential as unusable", async () => {
-    await ensureVaultDir("empty", env);
-    expect((await readVaultSummary("empty", env)).hasCredential).toBe(false);
+    await ensureVaultDir(CO, "empty", env);
+    expect((await readVaultSummary(CO, "empty", env)).hasCredential).toBe(false);
 
-    const bad = await ensureVaultDir("bad", env);
+    const bad = await ensureVaultDir(CO, "bad", env);
     await fs.writeFile(path.join(bad, "auth.json"), "{not json");
-    expect((await readVaultSummary("bad", env)).hasCredential).toBe(false);
+    expect((await readVaultSummary(CO, "bad", env)).hasCredential).toBe(false);
 
-    const partial = await ensureVaultDir("partial", env);
+    const partial = await ensureVaultDir(CO, "partial", env);
     // An account id with no token material is not usable.
     await fs.writeFile(
       path.join(partial, "auth.json"),
       JSON.stringify({ auth_mode: "chatgpt", tokens: { account_id: "abc" } }),
     );
-    expect((await readVaultSummary("partial", env)).hasCredential).toBe(false);
+    expect((await readVaultSummary(CO, "partial", env)).hasCredential).toBe(false);
   });
 });
 
 describe("listVaults", () => {
   it("lists valid vaults sorted and ignores unrelated entries", async () => {
-    await ensureVaultDir("zeta", env);
-    await ensureVaultDir("alpha", env);
+    await ensureVaultDir(CO, "zeta", env);
+    await ensureVaultDir(CO, "alpha", env);
     await fs.mkdir(path.join(root, "Not A Vault"), { recursive: true });
-    await fs.writeFile(path.join(root, "loose-file"), "x");
-    expect((await listVaults(env)).map((vault) => vault.name)).toEqual(["alpha", "zeta"]);
+    await fs.writeFile(path.join(root, CO, "loose-file"), "x");
+    expect((await listVaults(CO, env)).map((vault) => vault.name)).toEqual(["alpha", "zeta"]);
   });
 
   it("lists empty when the root does not exist", async () => {
-    const absent = { [CODEX_VAULT_ROOT_ENV_KEY]: path.join(root, "absent") };
-    expect(await listVaults(absent)).toEqual([]);
+    const absent = { [CODEX_VAULT_ROOT_ENV_KEY]: path.join(root, CO, "absent") };
+    expect(await listVaults(CO, absent)).toEqual([]);
   });
 });
 
 describe("removing a credential", () => {
   it("removes auth.json and keeps the vault usable", async () => {
-    const dir = await ensureVaultDir("keeper", env);
-    await promoteVaultCredential("keeper", Buffer.from(SUBSCRIPTION_AUTH), env);
-    await expect(readVaultSummary("keeper", env)).resolves.toMatchObject({ hasCredential: true });
+    const dir = await ensureVaultDir(CO, "keeper", env);
+    await promoteVaultCredential(CO, "keeper", Buffer.from(SUBSCRIPTION_AUTH), env);
+    await expect(readVaultSummary(CO, "keeper", env)).resolves.toMatchObject({ hasCredential: true });
 
-    await expect(removeVaultCredential("keeper", env)).resolves.toBe(true);
+    await expect(removeVaultCredential(CO, "keeper", env)).resolves.toBe(true);
 
     // The credential is gone...
     await expect(fs.access(path.join(dir, "auth.json"))).rejects.toThrow();
     // ...but the vault, its path, and its config survive, so an agent pointed at
     // this CODEX_HOME still resolves and a later sign-in restores it.
     await expect(fs.access(path.join(dir, "config.toml"))).resolves.toBeUndefined();
-    const summary = await readVaultSummary("keeper", env);
+    const summary = await readVaultSummary(CO, "keeper", env);
     expect(summary).toMatchObject({ name: "keeper", dir, hasCredential: false, accountSuffix: null });
-    expect(await listVaults(env)).toHaveLength(1);
+    expect(await listVaults(CO, env)).toHaveLength(1);
   });
 
   it("is idempotent when there is no credential", async () => {
-    await ensureVaultDir("empty", env);
-    await expect(removeVaultCredential("empty", env)).resolves.toBe(false);
-    await expect(removeVaultCredential("empty", env)).resolves.toBe(false);
+    await ensureVaultDir(CO, "empty", env);
+    await expect(removeVaultCredential(CO, "empty", env)).resolves.toBe(false);
+    await expect(removeVaultCredential(CO, "empty", env)).resolves.toBe(false);
   });
 
   it("returns false for a vault directory that does not exist", async () => {
@@ -208,55 +211,55 @@ describe("removing a credential", () => {
     // ENOENT, so a sign-out against a missing vault surfaced as a 500 rather
     // than a not-found. The earlier idempotency test missed it because it
     // created the directory first.
-    await expect(removeVaultCredential("never_created", env)).resolves.toBe(false);
+    await expect(removeVaultCredential(CO, "never_created", env)).resolves.toBe(false);
   });
 
   it("reports vault existence, so callers can tell no-vault from no-credential", async () => {
-    await expect(vaultExists("absent", env)).resolves.toBe(false);
-    await ensureVaultDir("present", env);
-    await expect(vaultExists("present", env)).resolves.toBe(true);
+    await expect(vaultExists(CO, "absent", env)).resolves.toBe(false);
+    await ensureVaultDir(CO, "present", env);
+    await expect(vaultExists(CO, "present", env)).resolves.toBe(true);
   });
 
   it("re-signing in after a removal restores the credential", async () => {
-    await ensureVaultDir("cycle", env);
-    await promoteVaultCredential("cycle", Buffer.from(SUBSCRIPTION_AUTH), env);
-    await removeVaultCredential("cycle", env);
-    await promoteVaultCredential("cycle", Buffer.from(SUBSCRIPTION_AUTH), env);
-    expect(await readVaultSummary("cycle", env)).toMatchObject({ hasCredential: true });
+    await ensureVaultDir(CO, "cycle", env);
+    await promoteVaultCredential(CO, "cycle", Buffer.from(SUBSCRIPTION_AUTH), env);
+    await removeVaultCredential(CO, "cycle", env);
+    await promoteVaultCredential(CO, "cycle", Buffer.from(SUBSCRIPTION_AUTH), env);
+    expect(await readVaultSummary(CO, "cycle", env)).toMatchObject({ hasCredential: true });
   });
 
   it("rejects a traversing name instead of unlinking outside the root", async () => {
-    await expect(removeVaultCredential("../escape", env)).rejects.toThrow(CODEX_VAULT_NAME_INVALID);
+    await expect(removeVaultCredential(CO, "../escape", env)).rejects.toThrow(CODEX_VAULT_NAME_INVALID);
   });
 });
 
 describe("deleting a vault", () => {
   it("removes the whole directory and leaves its siblings alone", async () => {
-    const doomed = await ensureVaultDir("doomed", env);
-    const survivor = await ensureVaultDir("survivor", env);
-    await promoteVaultCredential("doomed", Buffer.from(SUBSCRIPTION_AUTH), env);
-    await promoteVaultCredential("survivor", Buffer.from(SUBSCRIPTION_AUTH), env);
+    const doomed = await ensureVaultDir(CO, "doomed", env);
+    const survivor = await ensureVaultDir(CO, "survivor", env);
+    await promoteVaultCredential(CO, "doomed", Buffer.from(SUBSCRIPTION_AUTH), env);
+    await promoteVaultCredential(CO, "survivor", Buffer.from(SUBSCRIPTION_AUTH), env);
 
-    await expect(deleteVault("doomed", env)).resolves.toBe(true);
+    await expect(deleteVault(CO, "doomed", env)).resolves.toBe(true);
 
     await expect(fs.access(doomed)).rejects.toThrow();
     await expect(fs.access(survivor)).resolves.toBeUndefined();
-    const remaining = await listVaults(env);
+    const remaining = await listVaults(CO, env);
     expect(remaining.map((vault) => vault.name)).toEqual(["survivor"]);
     expect(remaining[0]).toMatchObject({ hasCredential: true });
   });
 
   it("removes a vault holding extra state, not just the known files", async () => {
-    const dir = await ensureVaultDir("stateful", env);
+    const dir = await ensureVaultDir(CO, "stateful", env);
     await fs.mkdir(path.join(dir, "sessions"), { recursive: true });
     await fs.writeFile(path.join(dir, "sessions", "a.json"), "{}");
     await fs.writeFile(path.join(dir, "history.jsonl"), "{}\n");
-    await expect(deleteVault("stateful", env)).resolves.toBe(true);
+    await expect(deleteVault(CO, "stateful", env)).resolves.toBe(true);
     await expect(fs.access(dir)).rejects.toThrow();
   });
 
   it("reports false for a vault that does not exist", async () => {
-    await expect(deleteVault("ghost", env)).resolves.toBe(false);
+    await expect(deleteVault(CO, "ghost", env)).resolves.toBe(false);
   });
 
   it("refuses a traversing name rather than removing a directory outside the root", async () => {
@@ -265,7 +268,7 @@ describe("deleting a vault", () => {
     const outside = path.join(root, "..", "not-a-vault");
     await fs.mkdir(outside, { recursive: true });
     try {
-      await expect(deleteVault("../not-a-vault", env)).rejects.toThrow(CODEX_VAULT_NAME_INVALID);
+      await expect(deleteVault(CO, "../not-a-vault", env)).rejects.toThrow(CODEX_VAULT_NAME_INVALID);
       await expect(fs.access(outside)).resolves.toBeUndefined();
     } finally {
       await fs.rm(outside, { recursive: true, force: true });
@@ -274,7 +277,7 @@ describe("deleting a vault", () => {
 
   it("never removes the vault root itself", async () => {
     for (const name of ["", ".", "..", "/"]) {
-      await expect(deleteVault(name, env)).rejects.toThrow();
+      await expect(deleteVault(CO, name, env)).rejects.toThrow();
     }
     await expect(fs.access(root)).resolves.toBeUndefined();
   });

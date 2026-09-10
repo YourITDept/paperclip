@@ -3,6 +3,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
+
+// Vaults are company-scoped: <root>/<companyId>/<name>.
+const CO = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
 import {
   VaultLoginConflictError,
   VaultNameInvalidError,
@@ -99,6 +102,7 @@ describe("provisioning multiple Codex accounts", () => {
   it("creates independent vaults holding different identities", async () => {
     const first = await service.start(
       {
+        companyId: CO,
         vaultName: "acct_one",
         startedByUserId: ADMIN.actorId,
         codexCommand: await fakeCodexFor("11111111-1111-1111-1111-aaaaaaaaaaaa", "one"),
@@ -110,6 +114,7 @@ describe("provisioning multiple Codex accounts", () => {
 
     const second = await service.start(
       {
+        companyId: CO,
         vaultName: "acct_two",
         startedByUserId: ADMIN.actorId,
         codexCommand: await fakeCodexFor("22222222-2222-2222-2222-bbbbbbbbbbbb", "two"),
@@ -119,7 +124,7 @@ describe("provisioning multiple Codex accounts", () => {
     );
     expect((await settle(second.sessionId)).state).toBe("success");
 
-    const vaults = await service.list(env);
+    const vaults = await service.list(CO, env);
     expect(vaults.map((vault) => vault.name)).toEqual(["acct_one", "acct_two"]);
     expect(vaults.every((vault) => vault.hasCredential)).toBe(true);
 
@@ -131,7 +136,7 @@ describe("provisioning multiple Codex accounts", () => {
 
     // And on disk, two distinct credentials.
     const readAuth = async (name: string) =>
-      JSON.parse(await fs.readFile(path.join(root, name, "auth.json"), "utf8"));
+      JSON.parse(await fs.readFile(path.join(root, CO, name, "auth.json"), "utf8"));
     expect((await readAuth("acct_one")).tokens.refresh_token).toBe("refresh-one");
     expect((await readAuth("acct_two")).tokens.refresh_token).toBe("refresh-two");
   });
@@ -139,6 +144,7 @@ describe("provisioning multiple Codex accounts", () => {
   it("re-logging into a vault replaces that identity and leaves others alone", async () => {
     const first = await service.start(
       {
+        companyId: CO,
         vaultName: "acct_one",
         startedByUserId: ADMIN.actorId,
         codexCommand: await fakeCodexFor("11111111-1111-1111-1111-aaaaaaaaaaaa", "one"),
@@ -149,6 +155,7 @@ describe("provisioning multiple Codex accounts", () => {
     await settle(first.sessionId);
     const other = await service.start(
       {
+        companyId: CO,
         vaultName: "acct_two",
         startedByUserId: ADMIN.actorId,
         codexCommand: await fakeCodexFor("22222222-2222-2222-2222-bbbbbbbbbbbb", "two"),
@@ -161,6 +168,7 @@ describe("provisioning multiple Codex accounts", () => {
     // Sign in to acct_one again, this time as a different account.
     const again = await service.start(
       {
+        companyId: CO,
         vaultName: "acct_one",
         startedByUserId: ADMIN.actorId,
         codexCommand: await fakeCodexFor("33333333-3333-3333-3333-cccccccccccc", "three"),
@@ -170,7 +178,7 @@ describe("provisioning multiple Codex accounts", () => {
     );
     expect((await settle(again.sessionId)).state).toBe("success");
 
-    const vaults = await service.list(env);
+    const vaults = await service.list(CO, env);
     expect(vaults.find((vault) => vault.name === "acct_one")?.accountSuffix).toBe("cccccccccccc");
     // The untouched vault must be exactly as it was.
     expect(vaults.find((vault) => vault.name === "acct_two")?.accountSuffix).toBe("bbbbbbbbbbbb");
@@ -181,6 +189,7 @@ describe("login session lifecycle", () => {
   it("surfaces the one-time prompt then clears it on completion", async () => {
     const started = await service.start(
       {
+        companyId: CO,
         vaultName: "acct_one",
         startedByUserId: ADMIN.actorId,
         codexCommand: await fakeCodexFor("11111111-1111-1111-1111-aaaaaaaaaaaa", "one"),
@@ -216,12 +225,12 @@ describe("login session lifecycle", () => {
     const slow = path.join(scratch, "codex-slow");
     await fs.writeFile(slow, `#!/bin/sh\nsleep 2\nexit 1\n`, { mode: 0o700 });
     const first = await service.start(
-      { vaultName: "acct_one", startedByUserId: ADMIN.actorId, codexCommand: slow, env },
+      { companyId: CO, vaultName: "acct_one", startedByUserId: ADMIN.actorId, codexCommand: slow, env },
       ADMIN,
     );
     await expect(
       service.start(
-        { vaultName: "acct_one", startedByUserId: ADMIN.actorId, codexCommand: slow, env },
+        { companyId: CO, vaultName: "acct_one", startedByUserId: ADMIN.actorId, codexCommand: slow, env },
         ADMIN,
       ),
     ).rejects.toBeInstanceOf(VaultLoginConflictError);
@@ -230,6 +239,7 @@ describe("login session lifecycle", () => {
     // whole point.
     const other = await service.start(
       {
+        companyId: CO,
         vaultName: "acct_two",
         startedByUserId: ADMIN.actorId,
         codexCommand: await fakeCodexFor("22222222-2222-2222-2222-bbbbbbbbbbbb", "two"),
@@ -246,13 +256,14 @@ describe("login session lifecycle", () => {
   it("releases the vault after a login finishes, so a retry can start", async () => {
     const failing = await failingCodex("retry");
     const first = await service.start(
-      { vaultName: "acct_one", startedByUserId: ADMIN.actorId, codexCommand: failing, env },
+      { companyId: CO, vaultName: "acct_one", startedByUserId: ADMIN.actorId, codexCommand: failing, env },
       ADMIN,
     );
     expect((await settle(first.sessionId)).state).toBe("failed");
 
     const retry = await service.start(
       {
+        companyId: CO,
         vaultName: "acct_one",
         startedByUserId: ADMIN.actorId,
         codexCommand: await fakeCodexFor("11111111-1111-1111-1111-aaaaaaaaaaaa", "one"),
@@ -266,6 +277,7 @@ describe("login session lifecycle", () => {
   it("leaves an existing credential intact when a re-login fails", async () => {
     const good = await service.start(
       {
+        companyId: CO,
         vaultName: "acct_one",
         startedByUserId: ADMIN.actorId,
         codexCommand: await fakeCodexFor("11111111-1111-1111-1111-aaaaaaaaaaaa", "one"),
@@ -274,15 +286,15 @@ describe("login session lifecycle", () => {
       ADMIN,
     );
     await settle(good.sessionId);
-    const before = await fs.readFile(path.join(root, "acct_one", "auth.json"), "utf8");
+    const before = await fs.readFile(path.join(root, CO, "acct_one", "auth.json"), "utf8");
 
     const bad = await service.start(
-      { vaultName: "acct_one", startedByUserId: ADMIN.actorId, codexCommand: await failingCodex("x"), env },
+      { companyId: CO, vaultName: "acct_one", startedByUserId: ADMIN.actorId, codexCommand: await failingCodex("x"), env },
       ADMIN,
     );
     expect((await settle(bad.sessionId)).state).toBe("failed");
     // Staging means a failed login never reaches the vault agents are using.
-    expect(await fs.readFile(path.join(root, "acct_one", "auth.json"), "utf8")).toBe(before);
+    expect(await fs.readFile(path.join(root, CO, "acct_one", "auth.json"), "utf8")).toBe(before);
   });
 });
 
@@ -290,6 +302,7 @@ describe("authorization and validation", () => {
   it("hides a session from an admin who did not start it", async () => {
     const started = await service.start(
       {
+        companyId: CO,
         vaultName: "acct_one",
         startedByUserId: ADMIN.actorId,
         codexCommand: await fakeCodexFor("11111111-1111-1111-1111-aaaaaaaaaaaa", "one"),
@@ -309,15 +322,15 @@ describe("authorization and validation", () => {
       await expect(
         service.start({ vaultName: name, startedByUserId: ADMIN.actorId, env }, ADMIN),
       ).rejects.toBeInstanceOf(VaultNameInvalidError);
-      await expect(service.create(name, ADMIN, env)).rejects.toBeInstanceOf(VaultNameInvalidError);
+      await expect(service.create(CO, name, ADMIN, env)).rejects.toBeInstanceOf(VaultNameInvalidError);
     }
-    expect(await service.list(env)).toEqual([]);
+    expect(await service.list(CO, env)).toEqual([]);
   });
 
   it("creates an empty vault with no credential", async () => {
-    const created = await service.create("staged", ADMIN, env);
+    const created = await service.create(CO, "staged", ADMIN, env);
     expect(created.hasCredential).toBe(false);
-    expect((await fs.stat(path.join(root, "staged"))).mode & 0o777).toBe(0o700);
+    expect((await fs.stat(path.join(root, CO, "staged"))).mode & 0o777).toBe(0o700);
   });
 });
 
@@ -325,6 +338,7 @@ describe("removing an authorization", () => {
   it("signs a vault out, keeping the directory, and lets it be signed in again", async () => {
     const started = await service.start(
       {
+        companyId: CO,
         vaultName: "revocable",
         startedByUserId: ADMIN.actorId,
         codexCommand: await fakeCodexFor("33333333-3333-3333-3333-cccccccccccc", "rev"),
@@ -334,17 +348,18 @@ describe("removing an authorization", () => {
     );
     expect((await settle(started.sessionId)).state).toBe("success");
 
-    const after = await service.removeCredential("revocable", ADMIN, env);
+    const after = await service.removeCredential(CO, "revocable", ADMIN, env);
     expect(after).toMatchObject({ name: "revocable", hasCredential: false, accountSuffix: null });
 
     // The vault is still listed and its directory still exists, so an agent
     // whose CODEX_HOME names it keeps resolving.
-    const listed = await service.list(env);
+    const listed = await service.list(CO, env);
     expect(listed.map((vault) => vault.name)).toEqual(["revocable"]);
-    await expect(fs.access(path.join(root, "revocable", "config.toml"))).resolves.toBeUndefined();
+    await expect(fs.access(path.join(root, CO, "revocable", "config.toml"))).resolves.toBeUndefined();
 
     const again = await service.start(
       {
+        companyId: CO,
         vaultName: "revocable",
         startedByUserId: ADMIN.actorId,
         codexCommand: await fakeCodexFor("33333333-3333-3333-3333-cccccccccccc", "rev2"),
@@ -353,7 +368,7 @@ describe("removing an authorization", () => {
       ADMIN,
     );
     expect((await settle(again.sessionId)).state).toBe("success");
-    expect((await service.list(env))[0]).toMatchObject({ hasCredential: true });
+    expect((await service.list(CO, env))[0]).toMatchObject({ hasCredential: true });
   });
 
   it("signing one vault out leaves the other account untouched", async () => {
@@ -362,15 +377,15 @@ describe("removing an authorization", () => {
       ["drop_me", "55555555-5555-5555-5555-eeeeeeeeeeee", "drop"],
     ] as const) {
       const started = await service.start(
-        { vaultName: name, startedByUserId: ADMIN.actorId, codexCommand: await fakeCodexFor(account, label), env },
+        { companyId: CO, vaultName: name, startedByUserId: ADMIN.actorId, codexCommand: await fakeCodexFor(account, label), env },
         ADMIN,
       );
       expect((await settle(started.sessionId)).state).toBe("success");
     }
 
-    await service.removeCredential("drop_me", ADMIN, env);
+    await service.removeCredential(CO, "drop_me", ADMIN, env);
 
-    const vaults = await service.list(env);
+    const vaults = await service.list(CO, env);
     expect(vaults.find((vault) => vault.name === "keep_me")).toMatchObject({
       hasCredential: true,
       accountSuffix: "dddddddddddd",
@@ -381,6 +396,7 @@ describe("removing an authorization", () => {
   it("deletes a vault outright and drops it from the listing", async () => {
     const started = await service.start(
       {
+        companyId: CO,
         vaultName: "temporary",
         startedByUserId: ADMIN.actorId,
         codexCommand: await fakeCodexFor("66666666-6666-6666-6666-ffffffffffff", "tmp"),
@@ -390,16 +406,16 @@ describe("removing an authorization", () => {
     );
     expect((await settle(started.sessionId)).state).toBe("success");
 
-    await expect(service.remove("temporary", ADMIN, env)).resolves.toEqual({
+    await expect(service.remove(CO, "temporary", ADMIN, env)).resolves.toEqual({
       name: "temporary",
       deleted: true,
     });
-    expect(await service.list(env)).toEqual([]);
-    await expect(fs.access(path.join(root, "temporary"))).rejects.toThrow();
+    expect(await service.list(CO, env)).toEqual([]);
+    await expect(fs.access(path.join(root, CO, "temporary"))).rejects.toThrow();
   });
 
   it("reports deleted:false for a vault that was never provisioned", async () => {
-    await expect(service.remove("never_existed", ADMIN, env)).resolves.toEqual({
+    await expect(service.remove(CO, "never_existed", ADMIN, env)).resolves.toEqual({
       name: "never_existed",
       deleted: false,
     });
@@ -415,42 +431,42 @@ describe("removing an authorization", () => {
       { mode: 0o700 },
     );
     const started = await service.start(
-      { vaultName: "busy_vault", startedByUserId: ADMIN.actorId, codexCommand: slowCodex, env },
+      { companyId: CO, vaultName: "busy_vault", startedByUserId: ADMIN.actorId, codexCommand: slowCodex, env },
       ADMIN,
     );
 
-    await expect(service.removeCredential("busy_vault", ADMIN, env)).rejects.toBeInstanceOf(
+    await expect(service.removeCredential(CO, "busy_vault", ADMIN, env)).rejects.toBeInstanceOf(
       VaultLoginConflictError,
     );
-    await expect(service.remove("busy_vault", ADMIN, env)).rejects.toBeInstanceOf(
+    await expect(service.remove(CO, "busy_vault", ADMIN, env)).rejects.toBeInstanceOf(
       VaultLoginConflictError,
     );
 
     service.cancel(started.sessionId, ADMIN.actorId);
     await settle(started.sessionId);
     // Once the login is terminal the vault can be removed normally.
-    await expect(service.remove("busy_vault", ADMIN, env)).resolves.toMatchObject({ deleted: true });
+    await expect(service.remove(CO, "busy_vault", ADMIN, env)).resolves.toMatchObject({ deleted: true });
   });
 
   it("signing out a vault that does not exist is a not-found, not a crash", async () => {
     // Regression: the missing case reached the directory lock and threw ENOENT,
     // which the route turned into a 500. "No such vault" is a 404; "vault with
     // no credential" stays a success.
-    await expect(service.removeCredential("never_created", ADMIN, env)).rejects.toBeInstanceOf(
+    await expect(service.removeCredential(CO, "never_created", ADMIN, env)).rejects.toBeInstanceOf(
       VaultNotFoundError,
     );
-    await service.create("exists_but_empty", ADMIN, env);
-    await expect(service.removeCredential("exists_but_empty", ADMIN, env)).resolves.toMatchObject({
+    await service.create(CO, "exists_but_empty", ADMIN, env);
+    await expect(service.removeCredential(CO, "exists_but_empty", ADMIN, env)).resolves.toMatchObject({
       name: "exists_but_empty",
       hasCredential: false,
     });
   });
 
   it("rejects an invalid name on both removal paths", async () => {
-    await expect(service.removeCredential("../escape", ADMIN, env)).rejects.toBeInstanceOf(
+    await expect(service.removeCredential(CO, "../escape", ADMIN, env)).rejects.toBeInstanceOf(
       VaultNameInvalidError,
     );
-    await expect(service.remove("../escape", ADMIN, env)).rejects.toBeInstanceOf(
+    await expect(service.remove(CO, "../escape", ADMIN, env)).rejects.toBeInstanceOf(
       VaultNameInvalidError,
     );
   });
@@ -459,9 +475,9 @@ describe("removing an authorization", () => {
     // The service here holds a stub db with no query methods. agentsUsing must
     // swallow that: the count is advisory, and an operator must still be able to
     // delete a vault when the agents table cannot be read.
-    await service.create("unbound", ADMIN, env);
-    await expect(service.agentsUsing("unbound", env)).resolves.toEqual([]);
-    await expect(service.listWithUsage(env)).resolves.toMatchObject([{ boundAgentCount: 0 }]);
-    await expect(service.remove("unbound", ADMIN, env)).resolves.toMatchObject({ deleted: true });
+    await service.create(CO, "unbound", ADMIN, env);
+    await expect(service.agentsUsing(CO, "unbound", env)).resolves.toEqual([]);
+    await expect(service.listWithUsage(CO, env)).resolves.toMatchObject([{ boundAgentCount: 0 }]);
+    await expect(service.remove(CO, "unbound", ADMIN, env)).resolves.toMatchObject({ deleted: true });
   });
 });

@@ -121,20 +121,106 @@ export function resolveVaultDir(name: string, env: NodeJS.ProcessEnv = process.e
   return dir;
 }
 
-/** The absolute credential path inside a named vault. */
-export function resolveVaultCredentialPath(
+/**
+ * The per-company vault scope segment.
+ *
+ * FORK-CARRIED (CustomCodeDoc §4 change sets 3 and 4).
+ *
+ * Vaults were a flat namespace directly under the root, which made "who may
+ * manage vaults" an instance-wide question and forced every route onto instance
+ * admin: a company admin allowed into a flat namespace could read another
+ * company's vault names, delete a credential their agents depend on, or — worst
+ * — run a device login into an EXISTING vault name and silently repoint every
+ * agent bound to that directory at their own account. Nothing downstream detects
+ * a credential substitution; the agents keep running as someone else.
+ *
+ * A company tier turns that into a scoped question. `<root>/<companyId>/<name>`
+ * cannot name, read, or delete anything outside the company whose id is in the
+ * path.
+ *
+ * ## The segment is the companyId, and it may not be the issue prefix
+ *
+ * The obvious readable choice — `/sysops/llm/codex/ACME/alice` — is WRONG, and
+ * quietly so. `resolveRenamedIssuePrefix` (server/src/services/companies.ts:230)
+ * re-keys a company's `issuePrefix` when the company is renamed. A directory
+ * named after the prefix would be orphaned by that rename: the row moves to the
+ * new prefix, the directory keeps the old one, and every agent bound to the old
+ * path points at a directory the application no longer considers the company's.
+ * The credential still works, so nothing fails — it just stops being governed.
+ *
+ * `companies.id` is never re-keyed. The path must be derivable from an immutable
+ * key alone, so it is the id, and readability is given up on purpose.
+ *
+ * ## The segment must come from the ACTOR, never from the request
+ *
+ * A route that joins a caller-supplied company onto the root has a decorative
+ * boundary: company A sends company B's id and walks through. Callers must pass
+ * an id they have already authorized the actor against.
+ */
+export const VAULT_COMPANY_SCOPE_INVALID = "VAULT_COMPANY_SCOPE_INVALID";
+
+const COMPANY_SCOPE_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+/** A company scope is a UUID and nothing else — no separators can survive this. */
+export function assertValidVaultCompanyScope(companyId: unknown): asserts companyId is string {
+  if (typeof companyId !== "string" || !COMPANY_SCOPE_RE.test(companyId)) {
+    throw new Error(VAULT_COMPANY_SCOPE_INVALID);
+  }
+}
+
+/** `<root>/<companyId>` — the directory a single company's vaults live under. */
+export function resolveCompanyVaultRoot(
+  companyId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  assertValidVaultCompanyScope(companyId);
+  const root = resolveVaultRoot(env);
+  const scoped = path.resolve(root, companyId);
+  // Belt-and-braces, exactly as resolveVaultDir does for the name: the pattern
+  // above already excludes every separator, so no accepted id can escape.
+  if (path.dirname(scoped) !== root || scoped === root) {
+    throw new Error(VAULT_COMPANY_SCOPE_INVALID);
+  }
+  return scoped;
+}
+
+/**
+ * `<root>/<companyId>/<name>` — a named vault inside one company's scope.
+ *
+ * Both segments are validated and the result is re-checked to be a direct child
+ * of the company root, so neither a crafted id nor a crafted name can traverse
+ * out of the company's subtree.
+ */
+export function resolveCompanyVaultDir(
+  companyId: string,
   name: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return path.join(resolveVaultDir(name, env), CREDENTIALS_FILE_NAME);
+  assertValidVaultName(name);
+  const companyRoot = resolveCompanyVaultRoot(companyId, env);
+  const dir = path.resolve(companyRoot, name);
+  if (path.dirname(dir) !== companyRoot || dir === companyRoot) {
+    throw new Error(CLAUDE_VAULT_NAME_INVALID);
+  }
+  return dir;
+}
+
+/** The absolute credential path inside a named vault. */
+export function resolveVaultCredentialPath(
+  companyId: string,
+  name: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return path.join(resolveCompanyVaultDir(companyId, name, env), CREDENTIALS_FILE_NAME);
 }
 
 /** The absolute settings path inside a named vault. */
 export function resolveVaultSettingsPath(
+  companyId: string,
   name: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return path.join(resolveVaultDir(name, env), SETTINGS_FILE_NAME);
+  return path.join(resolveCompanyVaultDir(companyId, name, env), SETTINGS_FILE_NAME);
 }
 
 /**
@@ -151,10 +237,11 @@ const DEFAULT_SETTINGS_JSON = `{}\n`;
  * existing one, and never touches the credential.
  */
 export async function ensureVaultDir(
+  companyId: string,
   name: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<string> {
-  const dir = resolveVaultDir(name, env);
+  const dir = resolveCompanyVaultDir(companyId, name, env);
   await fs.mkdir(dir, { recursive: true, mode: VAULT_DIR_MODE });
   await fs.chmod(dir, VAULT_DIR_MODE);
   try {
@@ -193,10 +280,11 @@ export interface ClaudeVaultSummary {
  * caller can list a half-provisioned vault instead of failing the whole listing.
  */
 export async function readVaultSummary(
+  companyId: string,
   name: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ClaudeVaultSummary> {
-  const dir = resolveVaultDir(name, env);
+  const dir = resolveCompanyVaultDir(companyId, name, env);
   const empty: ClaudeVaultSummary = {
     name,
     dir,
@@ -248,16 +336,17 @@ export async function readVaultSummary(
  * so unrelated content under the root is ignored rather than surfaced.
  */
 export async function listVaults(
+  companyId: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ClaudeVaultSummary[]> {
-  const root = resolveVaultRoot(env);
+  const root = resolveCompanyVaultRoot(companyId, env);
   const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => null);
   if (entries === null) return [];
   const names = entries
     .filter((entry) => entry.isDirectory() && isValidVaultName(entry.name))
     .map((entry) => entry.name)
     .sort();
-  return Promise.all(names.map((name) => readVaultSummary(name, env)));
+  return Promise.all(names.map((name) => readVaultSummary(companyId, name, env)));
 }
 
 /** The token shape `claude setup-token` mints. Checked before anything is written. */
@@ -298,6 +387,7 @@ export function buildSetupTokenCredential(token: string, now = Date.now()): stri
  * they want.
  */
 export async function promoteVaultCredential(
+  companyId: string,
   name: string,
   token: string,
   env: NodeJS.ProcessEnv = process.env,
@@ -310,7 +400,7 @@ export async function promoteVaultCredential(
     throw new Error(CLAUDE_VAULT_CREDENTIAL_REJECTED);
   }
 
-  const dir = await ensureVaultDir(name, env);
+  const dir = await ensureVaultDir(companyId, name, env);
   const destination = path.join(dir, CREDENTIALS_FILE_NAME);
   return withDirectoryMergeLock(dir, async () => {
     const temp = path.join(dir, `.credentials-${process.pid}-${randomUUID()}.tmp`);
@@ -330,10 +420,11 @@ export async function promoteVaultCredential(
 
 /** True when a vault directory exists. Distinguishes "no vault" from "no credential". */
 export async function vaultExists(
+  companyId: string,
   name: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<boolean> {
-  const dir = resolveVaultDir(name, env);
+  const dir = resolveCompanyVaultDir(companyId, name, env);
   return fs
     .stat(dir)
     .then((stat) => stat.isDirectory())
@@ -349,14 +440,15 @@ export async function vaultExists(
  * Returns `true` when a credential was removed, `false` when there was none.
  */
 export async function removeVaultCredential(
+  companyId: string,
   name: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<boolean> {
-  const dir = resolveVaultDir(name, env);
+  const dir = resolveCompanyVaultDir(companyId, name, env);
   // The lock resolves the directory's realpath, which throws ENOENT when there is
   // no directory. Probe first so a missing vault is an ordinary `false` rather
   // than a crash.
-  if (!(await vaultExists(name, env))) return false;
+  if (!(await vaultExists(companyId, name, env))) return false;
   return withDirectoryMergeLock(dir, async () => {
     try {
       // `unlink`, not `rm`: the credential may be a symlink, and unlink removes
@@ -385,15 +477,21 @@ export async function removeVaultCredential(
  * string in its adapter config, which this package cannot read.
  */
 export async function deleteVault(
+  companyId: string,
   name: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<boolean> {
-  const dir = resolveVaultDir(name, env);
-  const root = resolveVaultRoot(env);
-  if (path.dirname(dir) !== root || dir === root) {
+  const dir = resolveCompanyVaultDir(companyId, name, env);
+  // Belt-and-braces before an rm -rf, and it must compare against the COMPANY
+  // root, not the instance root: a scoped vault is <root>/<companyId>/<name>, so
+  // checking `dirname(dir) === instanceRoot` would reject every legitimate
+  // delete. `resolveCompanyVaultRoot` re-validates the id, so this cannot be
+  // widened by a crafted scope.
+  const companyRoot = resolveCompanyVaultRoot(companyId, env);
+  if (path.dirname(dir) !== companyRoot || dir === companyRoot) {
     throw new Error(CLAUDE_VAULT_NAME_INVALID);
   }
-  if (!(await vaultExists(name, env))) return false;
+  if (!(await vaultExists(companyId, name, env))) return false;
   // Take the directory lock so a concurrent promotion finishes first rather than
   // writing a credential into a directory being removed underneath it.
   await withDirectoryMergeLock(dir, async () => {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { agents, type Db } from "@paperclipai/db";
 import {
   CLAUDE_SETUP_TOKEN_COMMAND,
@@ -13,6 +13,8 @@ import {
   readVaultSummary,
   removeClaudeLoginStagingDir,
   removeVaultCredential,
+  resolveCompanyVaultDir,
+  resolveCompanyVaultRoot,
   resolveVaultDir,
   resolveVaultRoot,
   runSetupTokenLogin,
@@ -74,6 +76,7 @@ export interface ClaudeVaultLoginSessionView {
 
 interface ClaudeVaultLoginSession {
   sessionId: string;
+  companyId: string;
   vaultName: string;
   state: ClaudeVaultLoginState;
   url: string | null;
@@ -118,6 +121,7 @@ export class ClaudeVaultCodeUnexpectedError extends Error {
 }
 
 export interface StartClaudeVaultLoginInput {
+  companyId: string;
   vaultName: string;
   startedByUserId: string;
   /** Overrides the claude executable. Used by tests; never taken from a request. */
@@ -131,7 +135,11 @@ export function claudeVaultLoginService(db: Db) {
   const sessions = new Map<string, ClaudeVaultLoginSession>();
   // One in-flight login per vault. A second start would race the same credential
   // file, so it is refused rather than queued.
+  // Keyed by companyId + vault name. Keying on the name alone would let one
+  // company's in-flight login block another company's vault of the same name —
+  // and vault names are per-company now, so collisions are expected, not rare.
   const activeByVault = new Map<string, string>();
+  const activeKey = (companyId: string, vaultName: string) => `${companyId}:${vaultName}`;
   const settings = instanceSettingsService(db);
 
   /**
@@ -170,13 +178,14 @@ export function claudeVaultLoginService(db: Db) {
    * list, which degrades the warning rather than blocking the operator.
    */
   async function agentsUsingVault(
+    companyId: string,
     vaultName: string,
     env: NodeJS.ProcessEnv = process.env,
   ): Promise<{ id: string; name: string; companyId: string }[]> {
     if (!isValidVaultName(vaultName)) return [];
     let dir: string;
     try {
-      dir = resolveVaultDir(vaultName, env);
+      dir = resolveCompanyVaultDir(companyId, vaultName, env);
     } catch {
       return [];
     }
@@ -184,7 +193,10 @@ export function claudeVaultLoginService(db: Db) {
       return await db
         .select({ id: agents.id, name: agents.name, companyId: agents.companyId })
         .from(agents)
-        .where(sql`${agents.adapterConfig} -> 'env' ->> 'CLAUDE_CONFIG_DIR' = ${dir}`);
+        // Scoped to the company as well as the path: a vault directory belongs to
+        // exactly one company now, so a cross-company row here would be a bug.
+        .where(and(eq(agents.companyId, companyId),
+          sql`${agents.adapterConfig} -> 'env' ->> 'CLAUDE_CONFIG_DIR' = ${dir}`));
     } catch {
       return [];
     }
@@ -221,19 +233,19 @@ export function claudeVaultLoginService(db: Db) {
     session.deliverCode = null;
     session.error = error ?? null;
     session.terminalAt = Date.now();
-    if (activeByVault.get(session.vaultName) === session.sessionId) {
-      activeByVault.delete(session.vaultName);
+    if (activeByVault.get(activeKey(session.companyId, session.vaultName)) === session.sessionId) {
+      activeByVault.delete(activeKey(session.companyId, session.vaultName));
     }
   }
 
   return {
-    vaultRoot(env: NodeJS.ProcessEnv = process.env): string {
-      return resolveVaultRoot(env);
+    vaultRoot(companyId: string, env: NodeJS.ProcessEnv = process.env): string {
+      return resolveCompanyVaultRoot(companyId, env);
     },
 
     /** Lists every vault and whether it currently holds a usable credential. */
-    async list(env: NodeJS.ProcessEnv = process.env): Promise<ClaudeVaultSummary[]> {
-      return listVaults(env);
+    async list(companyId: string, env: NodeJS.ProcessEnv = process.env): Promise<ClaudeVaultSummary[]> {
+      return listVaults(companyId, env);
     },
 
     /**
@@ -242,9 +254,10 @@ export function claudeVaultLoginService(db: Db) {
      * rather than failing the page — the counts are advisory.
      */
     async listWithUsage(
+      companyId: string,
       env: NodeJS.ProcessEnv = process.env,
     ): Promise<(ClaudeVaultSummary & { boundAgentCount: number })[]> {
-      const vaults = await listVaults(env);
+      const vaults = await listVaults(companyId, env);
       if (vaults.length === 0) return [];
       const byDir = new Map(vaults.map((vault) => [vault.dir, 0]));
       try {
@@ -271,14 +284,15 @@ export function claudeVaultLoginService(db: Db) {
      * name before logging into it; the login also creates the directory.
      */
     async create(
+      companyId: string,
       vaultName: string,
       actor: ClaudeVaultLoginActor,
       env: NodeJS.ProcessEnv = process.env,
     ): Promise<ClaudeVaultSummary> {
       if (!isValidVaultName(vaultName)) throw new ClaudeVaultNameInvalidError();
-      await ensureVaultDir(vaultName, env);
+      await ensureVaultDir(companyId, vaultName, env);
       await audit("claude.vault.created", vaultName, actor);
-      return readVaultSummary(vaultName, env);
+      return readVaultSummary(companyId, vaultName, env);
     },
 
     /**
@@ -296,14 +310,15 @@ export function claudeVaultLoginService(db: Db) {
       actor: ClaudeVaultLoginActor,
     ): Promise<ClaudeVaultLoginSessionView> {
       sweep();
-      const { vaultName, startedByUserId } = input;
+      const { companyId, vaultName, startedByUserId } = input;
       if (!isValidVaultName(vaultName)) throw new ClaudeVaultNameInvalidError();
-      if (activeByVault.has(vaultName)) throw new ClaudeVaultLoginConflictError(vaultName);
+      if (activeByVault.has(activeKey(companyId, vaultName))) throw new ClaudeVaultLoginConflictError(vaultName);
 
       const env = input.env ?? process.env;
       const sessionId = randomUUID();
       const session: ClaudeVaultLoginSession = {
         sessionId,
+        companyId,
         vaultName,
         state: "starting",
         url: null,
@@ -315,9 +330,9 @@ export function claudeVaultLoginService(db: Db) {
         terminalAt: null,
       };
       sessions.set(sessionId, session);
-      activeByVault.set(vaultName, sessionId);
+      activeByVault.set(activeKey(companyId, vaultName), sessionId);
 
-      await ensureVaultDir(vaultName, env).catch(() => undefined);
+      await ensureVaultDir(companyId, vaultName, env).catch(() => undefined);
       await audit("claude.vault.login.started", vaultName, actor);
 
       // The login runs detached from the request. Everything below records its
@@ -360,14 +375,14 @@ export function claudeVaultLoginService(db: Db) {
               // straight into the vault and never stored on the session, never
               // logged, and never returned to a caller.
               const token = authBytes.toString("utf8").trim();
-              await promoteVaultCredential(vaultName, token, env);
+              await promoteVaultCredential(companyId, vaultName, token, env);
             },
             log: () => {},
           });
 
           if (result.outcome === "success" && result.credentialDelivered) {
             finish(session, "success");
-            const summary = await readVaultSummary(vaultName, env).catch(() => null);
+            const summary = await readVaultSummary(companyId, vaultName, env).catch(() => null);
             await audit("claude.vault.login.succeeded", vaultName, actor, {
               authMode: summary?.authMode ?? null,
               tokenSuffix: summary?.tokenSuffix ?? null,
@@ -449,19 +464,20 @@ export function claudeVaultLoginService(db: Db) {
      * sign-in restores it. Refused while a login for the same vault is in flight.
      */
     async removeCredential(
+      companyId: string,
       vaultName: string,
       actor: ClaudeVaultLoginActor,
       env: NodeJS.ProcessEnv = process.env,
     ): Promise<ClaudeVaultSummary> {
       if (!isValidVaultName(vaultName)) throw new ClaudeVaultNameInvalidError();
-      if (activeByVault.has(vaultName)) throw new ClaudeVaultLoginConflictError(vaultName);
+      if (activeByVault.has(activeKey(companyId, vaultName))) throw new ClaudeVaultLoginConflictError(vaultName);
       // "No such vault" and "vault with no credential" are different answers. The
       // first is a 404; the second is a success, because the caller's intent is
       // already satisfied.
-      if (!(await vaultExists(vaultName, env))) throw new ClaudeVaultNotFoundError(vaultName);
-      const removed = await removeVaultCredential(vaultName, env);
+      if (!(await vaultExists(companyId, vaultName, env))) throw new ClaudeVaultNotFoundError(vaultName);
+      const removed = await removeVaultCredential(companyId, vaultName, env);
       await audit("claude.vault.credential.removed", vaultName, actor, { removed });
-      return readVaultSummary(vaultName, env);
+      return readVaultSummary(companyId, vaultName, env);
     },
 
     /**
@@ -470,14 +486,15 @@ export function claudeVaultLoginService(db: Db) {
      * caller should show before asking for confirmation.
      */
     async remove(
+      companyId: string,
       vaultName: string,
       actor: ClaudeVaultLoginActor,
       env: NodeJS.ProcessEnv = process.env,
     ): Promise<{ name: string; deleted: boolean }> {
       if (!isValidVaultName(vaultName)) throw new ClaudeVaultNameInvalidError();
-      if (activeByVault.has(vaultName)) throw new ClaudeVaultLoginConflictError(vaultName);
-      const agentsBound = await agentsUsingVault(vaultName, env);
-      const deleted = await deleteVault(vaultName, env);
+      if (activeByVault.has(activeKey(companyId, vaultName))) throw new ClaudeVaultLoginConflictError(vaultName);
+      const agentsBound = await agentsUsingVault(companyId, vaultName, env);
+      const deleted = await deleteVault(companyId, vaultName, env);
       await audit("claude.vault.deleted", vaultName, actor, {
         deleted,
         boundAgentCount: agentsBound.length,
