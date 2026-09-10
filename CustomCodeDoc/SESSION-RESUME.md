@@ -21,6 +21,19 @@ It is the one file in this directory that is not append-only.
 | **Parent work item** | Per-company vault scope — steps **1 and 2 are implemented**, not just groundwork |
 | **Its document** | [`Codex device login web service.md`](CustomCodeDoc/Codex%20device%20login%20web%20service.md) § "Per-company vault scope" |
 
+> **The next session is on a DIFFERENT SERVER (operator, 2026-09-10).** Three things
+> do not travel with a `git clone`:
+>
+> - **The 25 uncommitted files.** They exist only in this host's working tree until
+>   the operator commits and pushes them (RULE 0 — the operator commits). On the new
+>   server, check `git log` for them before assuming any of the vault-scope work is
+>   present.
+> - **Host state** described in "Known state that will surprise you" (`ui/dist`, the
+>   `/sysops/llm/*` vault directories, `claude_yid`, legacy flat Codex vaults). That
+>   describes *this* host. Re-inspect the new server's vault root and builds.
+> - **Build outputs.** Run `corepack pnpm install --no-frozen-lockfile`, rebuild the
+>   adapters, then the server and UI, before any typecheck or test.
+
 > **The two device-login documents are behind this file.** Their "Per-company
 > vault scope" sections (written 13:03) still say *groundwork only, NOT wired up*
 > and put the Resume point at step 1. Steps 1–2 were built afterwards, 13:21–14:27.
@@ -71,12 +84,12 @@ service, route and UI changes. None of the following has been confirmed:
    member of the selected company gets *"User does not have access to this company"*.
    That is a behaviour change from before step 2. Deliberate or not is part of the
    next action.
-5. **13 orphaned test processes are still running**. They are not builds, and all
-   have ppid 1. 12 are stub servers from four full-suite runs (Sep 9 13:30, 15:06,
-   18:46; Sep 10 00:53) with working directories in `/tmp/pv-*/t/paperclip-runtime-*`.
-   Three are one CLI e2e server from Sep 10 01:35 (PIDs 482700/482711/482719, ~750 MB).
-   None hold app ports 3100/5173/54329/3000. **Not stopped yet**, awaiting the
-   operator. Clear them before any test run.
+5. **Orphaned test processes on this host: CLEARED 2026-09-10.** 15 processes, all
+   ppid 1, all stopped with TERM at the operator's request. 12 were stub servers from
+   four full-suite runs (working directories `/tmp/pv-*/t/paperclip-runtime-*`). Three
+   were one CLI e2e server from 01:35 (~750 MB). Each PID was re-checked against its
+   working directory or command line before being stopped. A sweep afterwards found
+   no build, test or `/tmp/pv-*` processes left. Memory: 10 GB available of 15.
 
 ## Uncommitted, for the operator's review
 
@@ -157,8 +170,8 @@ the manual migration, is done, unless the operator decides otherwise.
 
 - Retest a Claude login end to end after rebuilding the UI. Capture the error if it
   recurs.
-- Re-run `./scripts/verify-fork.sh targeted` (after the orphan cleanup and an
-  adapter rebuild).
+- Re-run `./scripts/verify-fork.sh targeted` after an adapter rebuild. On the new
+  server, run `./scripts/verify-fork.sh guards` first to check that host.
 - Update the Resume point in both device-login docs to "steps 1–2 done".
 - Step 3: operator moves legacy vault directories by hand.
 - Step 4: relax the gate, informed by the permissions review.

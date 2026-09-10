@@ -80,6 +80,7 @@
 # Flags: --db-url <url>       use this database URL instead of the environment
 #        --timeout <seconds>  --wait
 #        --pnpm  run the CLI from this checkout via tsx instead of the release
+#        --quiet onboard only: no live log on screen, just the progress lines
 #
 # DATABASE URL, highest precedence first:
 #   1. --db-url <url>    explicit; nothing has to be exported
@@ -88,7 +89,23 @@
 #
 # Whichever wins is exported as DATABASE_URL and written to the instance .env,
 # so boot 2 reads the same value without the variable being set again. --db-url
-# exists because POSTGRES_URL is often not present in the environment.
+# exists because POSTGRES_URL is often not present in the environment. It does
+# put the password on this script's command line, readable in `ps` for as long
+# as the script runs; exporting POSTGRES_URL instead avoids that.
+#
+# WHAT YOU SEE WHILE ONBOARD RUNS. The onboard output is streamed to the screen
+# as it arrives, with the banners, empty box borders and dev-server warnings
+# filtered out, plus a progress line every ONBOARD_PROGRESS_INTERVAL seconds
+# (default 15) naming the phase. The full unfiltered output is kept in
+# $LOG_DIR/onboard-<timestamp>.log.
+#
+# On an EMPTY database the migration phase is the long one, and it is silent:
+# the server logs "Applying N pending migrations" once, then drizzle applies all
+# of them in ONE transaction, so from outside the database shows no tables until
+# the commit. The progress line reads the running statement from
+# pg_stat_activity and names the migration file it belongs to. 269 migrations
+# over a remote TLS connection took about 3 minutes (2026-09-10).
+# ONBOARD_READY_TIMEOUT (default 900s) bounds the whole wait.
 
 set -euo pipefail
 
@@ -96,6 +113,7 @@ MODE="onboard"
 WAIT_FOR_READY=false
 WAIT_TIMEOUT=120
 USE_PNPM=false
+QUIET=false
 DB_URL_OVERRIDE=""
 
 while [ $# -gt 0 ]; do
@@ -107,6 +125,7 @@ while [ $# -gt 0 ]; do
     --queue) MODE="queue"; shift ;;
     --wait) WAIT_FOR_READY=true; shift ;;
     --pnpm) USE_PNPM=true; shift ;;
+    --quiet) QUIET=true; shift ;;
     --db-url) DB_URL_OVERRIDE="${2:?--db-url needs a value}"; shift 2 ;;
     --timeout) WAIT_TIMEOUT="${2:?--timeout needs a value}"; shift 2 ;;
     # Print from the usage banner to the end of the header, so adding usage
@@ -386,34 +405,41 @@ engine_status() {
   return 1
 }
 
-# What the worker will apply on boot 2. Read-only, best effort, never fatal.
+# psql against DATABASE_URL. Returns non-zero when psql is missing or the URL
+# does not parse; callers treat every read through it as best effort.
 #
 # The URL is split into libpq variables rather than passed as an argument: the
 # connection string carries the password and argv is visible to anyone who can
-# run `ps`.
+# run `ps`. Fields are joined with \x1f, not a tab, because `read` collapses runs
+# of whitespace IFS characters, so an empty password would shift every field
+# after it. PGCONNECT_TIMEOUT keeps an unreachable host from stalling the
+# onboard progress loop, which calls this every interval.
+psql_db() {
+  command -v psql > /dev/null 2>&1 || return 1
+  local host port user dbname pass sslmode
+  IFS=$'\x1f' read -r host port user dbname pass sslmode <<< "$(node -e '
+    try {
+      const u = new URL(process.env.DATABASE_URL);
+      process.stdout.write([
+        u.hostname, u.port || "5432",
+        decodeURIComponent(u.username), u.pathname.slice(1),
+        decodeURIComponent(u.password), u.searchParams.get("sslmode") || "prefer",
+      ].join("\x1f"));
+    } catch { process.stdout.write(""); }
+  ')" || true
+  [ -n "${host:-}" ] || return 1
+  PGPASSWORD="$pass" PGSSLMODE="$sslmode" PGCONNECT_TIMEOUT=5 \
+    psql --no-psqlrc --quiet -X -h "$host" -p "$port" -U "$user" -d "$dbname" "$@"
+}
+
+# What the worker will apply on boot 2. Read-only, best effort, never fatal.
 queue_report() {
   echo "--- provisioning queue ---"
   if ! command -v psql > /dev/null 2>&1; then
     echo "  (psql not installed — skipping; check with: database.js provisioning-report)"
     return 0
   fi
-  local host port user dbname pass
-  IFS=$'\t' read -r host port user dbname pass <<< "$(node -e '
-    try {
-      const u = new URL(process.env.DATABASE_URL);
-      process.stdout.write([
-        u.hostname, u.port || "5432",
-        decodeURIComponent(u.username), u.pathname.slice(1),
-        decodeURIComponent(u.password),
-      ].join("\t"));
-    } catch { process.stdout.write("\t\t\t\t"); }
-  ')" || true
-  if [ -z "${host:-}" ]; then
-    echo "  (DATABASE_URL is not a URL this can parse — skipping)"
-    return 0
-  fi
-  PGPASSWORD="$pass" psql --no-psqlrc --quiet \
-    -h "$host" -p "$port" -U "$user" -d "$dbname" -c "
+  psql_db -c "
       SELECT job_type, status, count(*)
       FROM provisioning.provisioning_jobs GROUP BY 1,2 ORDER BY 1,2;
     " 2>/dev/null || echo "  (no provisioning queue reachable in this database yet)"
@@ -517,6 +543,36 @@ if [ -f "$CONFIG_PATH" ]; then
   exit 0
 fi
 
+# ------------------------------------------------------- port preflight -----
+# The readiness poll below treats ANY healthy answer on $PORT as "our onboard
+# server is up". If something already holds the port, that poll succeeds within
+# two seconds, the loop stops onboard before it has written config.json, and
+# the run ends "without writing config.json" with an empty log. That is exactly
+# what happened on 2026-09-10: a boot-1 server orphaned by a Ctrl-C kept :3100
+# and three re-runs failed that way. Checked before anything is written.
+port_in_use() {
+  if command -v ss > /dev/null 2>&1; then
+    [ -n "$(ss -ltnH "sport = :$PORT" 2>/dev/null)" ]
+  else
+    [ "$(health_field status)" != "unreachable" ]
+  fi
+}
+
+if port_in_use; then
+  echo "FATAL: port $PORT is already in use (health: $(health_field status))." >&2
+  echo "       The readiness check cannot tell that server apart from the one" >&2
+  echo "       onboard starts, and would stop onboard before it writes the config." >&2
+  # Group id and command name only: full argv can carry a database password.
+  holders="$(ss -ltnpH "sport = :$PORT" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)"
+  for pid in $holders; do
+    read -r pgid started_cmd <<< "$(ps -o pgid=,lstart=,comm= -p "$pid" 2>/dev/null || true)"
+    [ -n "${pgid:-}" ] || continue
+    echo "       held by pid $pid (process group $pgid), started ${started_cmd}" >&2
+    echo "       stop it with: kill -INT -$pgid" >&2
+  done
+  exit 1
+fi
+
 # ---------------------------------------------------- persist the values ----
 ensure_dir() {
   local dir="$1" label="$2"
@@ -592,17 +648,181 @@ echo "Using CLI:    ${PAPERCLIP_CMD[*]}"
 echo "Database:     ${DATABASE_URL%%\?*} (from $DATABASE_URL_SOURCE)"
 echo "Config:       $CONFIG_PATH"
 echo "Provisioning: DISABLED for this run (boot 1)"
+if [ "$DATABASE_URL_SOURCE" = "--db-url" ]; then
+  echo "Note:         --db-url leaves the password readable in 'ps' while this runs;"
+  echo "              export POSTGRES_URL instead to keep it off the command line."
+fi
 echo
 
 ONBOARD_RC=0
-ONBOARD_LOG="$(mktemp "${TMPDIR:-/tmp}/paperclip-onboard-new.XXXXXX.log")"
+ONBOARD_PID=""
+TAIL_PID=""
 ONBOARD_READY_TIMEOUT="${ONBOARD_READY_TIMEOUT:-900}"
+PROGRESS_INTERVAL="${ONBOARD_PROGRESS_INTERVAL:-15}"
+
+# The full log sits beside the server logs, named by start time, so runs stop
+# piling up as anonymous files in /tmp. Created private before onboard writes
+# to it. Falls back to TMPDIR when LOG_DIR cannot be written.
+if mkdir -p "$LOG_DIR" 2>/dev/null && [ -w "$LOG_DIR" ]; then
+  ONBOARD_LOG="$LOG_DIR/onboard-$(date +%Y%m%d-%H%M%S).log"
+  (umask 077 && : > "$ONBOARD_LOG")
+else
+  ONBOARD_LOG="$(mktemp "${TMPDIR:-/tmp}/paperclip-onboard-new.XXXXXX.log")"
+fi
+
+# Migration files, when this is a checkout, so progress can name the file.
+MIGRATIONS_DIR=""
+if [ -n "${REPO_ROOT:-}" ] && [ -d "$REPO_ROOT/packages/db/src/migrations" ]; then
+  MIGRATIONS_DIR="$REPO_ROOT/packages/db/src/migrations"
+fi
+
+# What reaches the screen. The log keeps everything; this drops what carries no
+# information here: the ASCII banner (printed twice), box borders with nothing
+# inside them, the vite dev-middleware warnings a --pnpm checkout prints, and
+# the "Update available" notice. The migration line's file list (9 KB for an
+# empty database) is cut off, and box borders are trimmed from what is left.
+#
+# mawk compares bytes, so box-drawing characters appear only as literal strings,
+# never inside a bracket expression. The vite patterns are the exact warnings a
+# --pnpm run prints, not a bare "vite": that also matches "invite" and silently
+# dropped the bootstrap-invite lines.
+#
+# mawk reads a pipe in large blocks and processes nothing until a block fills or
+# the stream ends, so without -W interactive the "live" view arrived all at once
+# after the server had stopped. gawk reads line by line already and rejects the
+# flag, so it is added only for mawk.
+#
+# But interactive mawk has a 4096-byte record limit: at a line that long it
+# stops reading altogether, silently. The "Applying N pending migrations" line
+# is 9 KB on an empty database, so the view went dead at exactly the phase it
+# exists for, and would have hidden any error after it. sed cuts every line to
+# 1000 characters first (at most 4000 bytes even in UTF-8); -u keeps it from
+# reintroducing the buffering, where this sed supports it.
+AWK_LINEWISE=(awk)
+if awk -W version 2>&1 | grep -q mawk; then
+  AWK_LINEWISE=(awk -W interactive)
+fi
+SED_LINEWISE=(sed)
+if sed -u q < /dev/null > /dev/null 2>&1; then
+  SED_LINEWISE=(sed -u)
+fi
+filter_onboard_log() {
+  "${SED_LINEWISE[@]}" -E 's/^(.{1000}).*/\1.../' | "${AWK_LINEWISE[@]}" '
+    { gsub(/\033\[[0-9;?]*[A-Za-z]/, "") }
+    /Could not create bootstrap invite/ {
+      print "  | ■  Could not create bootstrap invite - expected on an empty database (no"
+      print "  |    tables until migrations run; this flow uses no invite). Only a real error"
+      print "  |    if doctor below also reports the database unreachable."
+      fflush(); next
+    }
+    !/[A-Za-z0-9]/                                    { next }
+    /The app people use to manage AI agents/          { next }
+    /Your Vite config|\[vite\]|VITE_[A-Z_]+=|configLoader|without a file extension|server\.hmr\.|`__dirname`/ { next }
+    /Update available: /                              { next }
+    /^(│)? *params: /                                 { next }
+    /If using embedded-postgres, start the Paperclip/ { next }
+    {
+      sub(/ \{"pendingMigrations".*/, "")
+      sub(/^│ */, "")
+      sub(/ *(─)*(╮|╯|│) *$/, "")
+      if (length($0) > 200) $0 = substr($0, 1, 197) "..."
+      print "  | " $0
+      fflush()
+    }
+  '
+}
+
+# The statement the migrating connection is running, mapped to its migration
+# file when the files are at hand. Drizzle sends each statement verbatim, so its
+# first line is a line of exactly one file. Best effort: prints nothing without
+# psql or a reachable database.
+current_migration() {
+  local stmt file n
+  stmt="$(psql_db -A -t -c "
+      SELECT query FROM pg_stat_activity
+      WHERE datname = current_database() AND pid <> pg_backend_pid()
+        AND state <> 'idle' AND query <> ''
+      ORDER BY query_start DESC LIMIT 1;" 2>/dev/null | grep -m1 -v '^[[:space:]]*$' || true)"
+  stmt="${stmt#"${stmt%%[![:space:]]*}"}"
+  [ -n "$stmt" ] || return 0
+  if [ -n "$MIGRATIONS_DIR" ]; then
+    file="$(grep -lF -- "$stmt" "$MIGRATIONS_DIR"/*.sql 2>/dev/null | head -1 || true)"
+    if [ -n "$file" ]; then
+      n="$(ls "$MIGRATIONS_DIR"/*.sql | grep -nxF -- "$file" | cut -d: -f1 || true)"
+      printf ' - now in %s (#%s of %s files)' "$(basename "$file")" "$n" \
+        "$(ls "$MIGRATIONS_DIR"/*.sql | wc -l | tr -d ' ')"
+      return 0
+    fi
+  fi
+  printf ' - running: %.70s' "$stmt"
+}
+
+# One "where is it now" line. The server binds its port only after migrations
+# commit, so a listening port means the long part is over.
+progress_line() {
+  local elapsed=$(( $(date +%s) - ONBOARD_STARTED )) phase pending
+  pending="$(grep -oE 'Applying [0-9]+ pending migrations' "$ONBOARD_LOG" 2>/dev/null | head -1 || true)"
+  if [ ! -f "$CONFIG_PATH" ]; then
+    phase="writing config"
+  elif port_in_use; then
+    phase="server listening, finishing startup"
+  elif [ -n "$pending" ]; then
+    phase="applying ${pending#Applying }$(current_migration)"
+  elif grep -q 'Starting Paperclip server' "$ONBOARD_LOG" 2>/dev/null; then
+    phase="server starting, checking migrations"
+  else
+    phase="doctor checks"
+  fi
+  printf '  ... %dm%02ds  %s\n' $((elapsed / 60)) $((elapsed % 60)) "$phase"
+}
+
+# setsid gives onboard its own process group, so a group signal reaches the
+# node server AND anything it spawned. Checked as a group for the same reason.
+onboard_alive() {
+  kill -0 -"$ONBOARD_PID" 2>/dev/null || kill -0 "$ONBOARD_PID" 2>/dev/null
+}
+
+# SIGINT first because node has no handler and exits cleanly on it; escalate
+# only if something is still alive.
+stop_onboard() {
+  kill -INT -"$ONBOARD_PID" 2>/dev/null || kill -INT "$ONBOARD_PID" 2>/dev/null || true
+  for _ in $(seq 1 15); do
+    onboard_alive || break
+    sleep 1
+  done
+  if onboard_alive; then
+    echo "  still running after SIGINT — sending SIGTERM"
+    kill -TERM -"$ONBOARD_PID" 2>/dev/null || kill -TERM "$ONBOARD_PID" 2>/dev/null || true
+    sleep 3
+    kill -KILL -"$ONBOARD_PID" 2>/dev/null || true
+  fi
+  wait "$ONBOARD_PID" 2>/dev/null || true
+}
+
+# The terminal's Ctrl-C never reaches onboard — setsid moved it out of this
+# process group — so without this an interrupted run leaves the server holding
+# the port, and every later run fails the port preflight above. On 2026-09-10
+# that orphan cost three re-runs before anyone saw it.
+cleanup_onboard() {
+  if [ -n "$ONBOARD_PID" ] && onboard_alive; then
+    echo "  interrupted — stopping the onboarding server so it does not keep port $PORT" >&2
+    stop_onboard >&2
+    echo "  stopped. Full log: $ONBOARD_LOG" >&2
+  fi
+  [ -z "$TAIL_PID" ] || kill "$TAIL_PID" 2>/dev/null || true
+}
+trap cleanup_onboard EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "Running onboard (server will be started, then stopped automatically)..."
-echo "  log: $ONBOARD_LOG"
+echo "  full log:  $ONBOARD_LOG"
+if [ "$QUIET" != true ]; then
+  echo "  live view: banners and dev-server noise filtered out; the full log has everything"
+fi
+echo
 
-# setsid gives onboard its own process group, so the stop below reaches the node
-# server AND anything it spawned, without ever signalling this script.
+ONBOARD_STARTED=$(date +%s)
 if command -v setsid > /dev/null 2>&1; then
   setsid "${PAPERCLIP_CMD[@]}" onboard --config "$CONFIG_PATH" --yes --bind lan \
     > "$ONBOARD_LOG" 2>&1 &
@@ -612,10 +832,25 @@ else
 fi
 ONBOARD_PID=$!
 
+# tail is started on its own so TAIL_PID is tail itself; the filter ends when
+# tail does. GNU tail's --pid ends the stream once onboard has exited, after
+# printing whatever was still unread.
+TAIL_FOLLOWS_PID=false
+if [ "$QUIET" != true ]; then
+  if tail --help 2>&1 | grep -q -- '--pid'; then
+    TAIL_FOLLOWS_PID=true
+    tail -n +1 -F --pid="$ONBOARD_PID" "$ONBOARD_LOG" 2>/dev/null > >(filter_onboard_log) &
+  else
+    tail -n +1 -F "$ONBOARD_LOG" 2>/dev/null > >(filter_onboard_log) &
+  fi
+  TAIL_PID=$!
+fi
+
 onboard_ready=false
-deadline=$(( $(date +%s) + ONBOARD_READY_TIMEOUT ))
+last_progress=$ONBOARD_STARTED
+deadline=$(( ONBOARD_STARTED + ONBOARD_READY_TIMEOUT ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  if ! kill -0 "$ONBOARD_PID" 2>/dev/null; then
+  if ! onboard_alive; then
     wait "$ONBOARD_PID" 2>/dev/null || ONBOARD_RC=$?
     echo "  onboard exited on its own (status ${ONBOARD_RC})"
     break
@@ -625,37 +860,51 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     echo "  server is up — config written and migrations applied"
     break
   fi
+  if [ $(( $(date +%s) - last_progress )) -ge "$PROGRESS_INTERVAL" ]; then
+    progress_line
+    last_progress=$(date +%s)
+  fi
   sleep 2
 done
 
+onboard_timed_out=false
 if [ "$onboard_ready" = true ]; then
-  # Signal the process group (negative pid). SIGINT first because node has no
-  # handler and exits cleanly on it; escalate only if something is still alive.
   echo "  stopping the onboarding server..."
-  kill -INT -"$ONBOARD_PID" 2>/dev/null || kill -INT "$ONBOARD_PID" 2>/dev/null || true
-  for _ in $(seq 1 15); do
-    kill -0 "$ONBOARD_PID" 2>/dev/null || break
-    sleep 1
-  done
-  if kill -0 "$ONBOARD_PID" 2>/dev/null; then
-    echo "  still running after SIGINT — sending SIGTERM"
-    kill -TERM -"$ONBOARD_PID" 2>/dev/null || kill -TERM "$ONBOARD_PID" 2>/dev/null || true
-    sleep 3
-    kill -KILL -"$ONBOARD_PID" 2>/dev/null || true
-  fi
-  wait "$ONBOARD_PID" 2>/dev/null || true
+  stop_onboard
   echo "  stopped"
-elif [ "$ONBOARD_RC" = 0 ] && ! [ -f "$CONFIG_PATH" ]; then
-  echo "onboard never reported a healthy server within ${ONBOARD_READY_TIMEOUT}s." >&2
-  echo "  see $ONBOARD_LOG" >&2
+elif onboard_alive; then
+  onboard_timed_out=true
+  echo "onboard never reported a healthy server within ${ONBOARD_READY_TIMEOUT}s - stopping it." >&2
+  stop_onboard >&2
 fi
 
-echo "--- last 20 lines of onboard output ---"
-tail -20 "$ONBOARD_LOG" 2>/dev/null || true
-echo "---"
+# Let the live view print the last lines before the summary below.
+if [ -n "$TAIL_PID" ]; then
+  if [ "$TAIL_FOLLOWS_PID" = true ]; then
+    wait "$TAIL_PID" 2>/dev/null || true
+  else
+    sleep 1; kill "$TAIL_PID" 2>/dev/null || true
+  fi
+  TAIL_PID=""
+fi
+
+if [ "$QUIET" = true ]; then
+  echo "--- last 20 lines of onboard output (filtered) ---"
+  filter_onboard_log < "$ONBOARD_LOG" | tail -20 || true
+  echo "---"
+fi
+
+if [ "$onboard_timed_out" = true ]; then
+  echo "The server was stopped before it became healthy, so migrations may not have" >&2
+  echo "committed. Read $ONBOARD_LOG, then move $(dirname "$CONFIG_PATH") aside" >&2
+  echo "before re-running: an existing config.json makes onboard a no-op." >&2
+  echo "Raise the limit with ONBOARD_READY_TIMEOUT=<seconds> if it was just slow." >&2
+  exit 1
+fi
 
 if [ ! -f "$CONFIG_PATH" ]; then
   echo "onboard exited ${ONBOARD_RC} without writing $CONFIG_PATH - nothing to patch." >&2
+  echo "  see $ONBOARD_LOG" >&2
   exit 1
 fi
 
@@ -663,6 +912,7 @@ apply_config_patches
 
 echo
 echo "Onboarded: config=$CONFIG_PATH logs=$LOG_DIR backups=$PAPERCLIP_DB_BACKUP_DIR"
+echo "Onboard log: $ONBOARD_LOG"
 echo "Password signup is disabled and telemetry is off."
 
 # ------------------------------------------------------------ next steps ----
