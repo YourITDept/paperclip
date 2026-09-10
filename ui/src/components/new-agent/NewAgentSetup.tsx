@@ -39,6 +39,7 @@ import { resolveForcedKubernetesEnvironment } from "@/lib/forced-kubernetes-envi
 import { environmentDisplayLabel } from "@/lib/managed-sandbox-environment";
 import { buildNewAgentRuntimeConfig } from "@/lib/new-agent-runtime-config";
 import { parseNewAgentEnvPreset } from "@/lib/new-agent-preset";
+import { bindEnvPresetToOrganizationSecrets } from "@/lib/home-directory-secret";
 import {
   PROVIDER_ENV_KEYS,
   storeProviderApiKey,
@@ -154,6 +155,46 @@ function Setup({
   const [connection, setConnection] = useState<ProviderConnection | null>(
     hasEnvPreset ? { env: envPreset } : null,
   );
+  // Rebind a vault preset from plain values to ORGANIZATION SECRET references
+  // before anything reads it. A plain env value comes back `***REDACTED***` on
+  // the next read (server/src/redaction.ts:946), so an agent created from one
+  // and later edited persists the marker as its directory; a `secret_ref`
+  // carries an id and survives the round trip. See lib/home-directory-secret.ts.
+  //
+  // Runs once, on the preset the URL carried — create-or-reuse by name, so a
+  // second agent from the same vault binds the same secret rather than making
+  // another. Deliberately not gated behind Save: the operator should SEE the
+  // bound secret in the form before creating the agent, not discover it after.
+  //
+  // The dependency is a STRING, not `envPreset`. `parseNewAgentEnvPreset(params)`
+  // builds a new object on every render, so an object dependency re-runs this
+  // effect on every render — and the first version of this code paired that with
+  // a `cancelled` flag set by the effect's own cleanup. The result was a silent
+  // no-op: render 1 started the request and armed the cleanup; the next render
+  // (one of six `useQuery` calls resolving, all of which land after mount) ran
+  // that cleanup, setting `cancelled = true`, then hit the `presetBound` guard
+  // and returned without re-arming. When the request finally resolved, its
+  // `if (!cancelled)` was false and the binding was dropped on the floor. The
+  // secret was created; the agent kept the plain path. Fixed 2026-09-10.
+  const presetKey = JSON.stringify(envPreset);
+  const presetBound = useRef(false);
+  const [presetBindError, setPresetBindError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!hasEnvPreset || presetBound.current || !companyId) return;
+    presetBound.current = true;
+    bindEnvPresetToOrganizationSecrets(companyId, envPreset)
+      .then((env) => setConnection({ env }))
+      .catch((error: unknown) => {
+        // Surfaced, never swallowed. The first version fell back to the plain
+        // value silently, which is indistinguishable from the change not being
+        // deployed — it cost a full round of operator testing to tell apart.
+        setPresetBindError(
+          error instanceof Error ? error.message : "could not bind the vault directory to a secret",
+        );
+      });
+    // No cleanup: nothing here may cancel the only attempt the guard allows.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId, presetKey, hasEnvPreset]);
   const [repository, setRepository] = useState("");
   const [branch, setBranch] = useState("");
   const [createdInSession, setCreated] = useState<Agent | null>(null);
@@ -655,6 +696,12 @@ function Setup({
             </div>
           </div>
         </header>
+        {presetBindError && (
+          <p role="alert" className="text-sm text-destructive">
+            The credential vault directory could not be stored as an organization
+            secret, so it is still a plain value: {presetBindError}
+          </p>
+        )}
         {environmentError && !envs.isPending && (
           <p role="alert" className="text-sm text-destructive">
             {environmentError}

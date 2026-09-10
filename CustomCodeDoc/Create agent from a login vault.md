@@ -15,6 +15,106 @@ step that came after it and used to be manual.
 
 ---
 
+## Vault directories bind as organization secrets (changed 2026-09-09)
+
+**The operator's report:** "the redacting replacement is messing it up."
+
+**What was happening.** The preset seeded the vault directory as a *plain* env
+binding. [`redactAgentEnvBinding`](server/src/redaction.ts#L946) rewrites every
+plain binding to `{ type: "plain", value: "***REDACTED***" }` on read:
+
+```ts
+if (typeof value === "string" || isPlainBinding(value)) {
+  return { type: "plain", value: REDACTED_EVENT_VALUE };
+}
+```
+
+A `secret_ref` is passed through untouched, because it carries an **id, not a
+value** — there is nothing in it to redact. So any flow that read an agent and
+wrote it back — duplicating it, editing an unrelated field on the same form —
+persisted the literal marker over the vault path, and the agent ended up pointing
+at a directory named `***REDACTED***`. Change set 10 (`restoreDuplicateSourceEnv`)
+exists to repair exactly this round trip on the create path; binding by reference
+means the round trip is never lossy to begin with.
+
+**What it does now.** `CLAUDE_CONFIG_DIR` / `CODEX_HOME` reach the agent as an
+**organization secret bound by reference** — the model the provisioning worker
+already uses (`handlers.ts`, `codexHome` names a company secret key) and the one
+upstream's own device-login flow uses (`CODEX_HOME_<handle>`,
+[`routes/agents.ts:836`](server/src/routes/agents.ts#L836)).
+
+| Piece | File |
+| --- | --- |
+| `ensureOrganizationDirectorySecret` — create-or-reuse by name | `ui/src/lib/home-directory-secret.ts` |
+| `bindEnvPresetToOrganizationSecrets` — convert a whole preset | same |
+| The one-shot rebind when the form opens with a preset | `ui/src/components/new-agent/NewAgentSetup.tsx` |
+
+**Create-or-reuse by a deterministic name** — `CODEX_HOME_team` from
+`/sysops/llm/codex/team` — so every agent pointed at one vault shares one secret.
+Rotating the path in a single place moves all of them, which is what "usable by
+the whole organization" has to mean to be worth anything.
+
+### Why the secret is created here and not when the vault is provisioned
+
+That was the first instinct and it does not work: **vaults are instance-scoped**
+(`/instance/codex-vaults`) and **secrets are per-company**. At vault-creation time
+there is no company to own the secret. The New Agent flow is the first point where
+both facts are known, so that is where the binding happens.
+
+### Two deliberate behaviours
+
+- **The URL still carries a plain path.** `new-agent-preset.ts` continues to
+  refuse secret references from the query string — a query string is untrusted
+  input, and that property is worth keeping. The conversion happens after parsing,
+  in the form, where the company is known.
+- **A failed bind leaves the value plain rather than dropping it.** A visible,
+  editable plain path is a better failure than an agent created with no vault
+  directory at all: the operator can see and fix the former, and cannot see the
+  latter.
+
+### The bug that shipped first, and why it was invisible (2026-09-10)
+
+The operator tested the first version and reported the original symptom
+unchanged — "it still shows text and then redacted" — and no secret created.
+**The build was correct**; the code was wrong, in two compounding ways.
+
+**1. The effect cancelled itself.** It depended on `envPreset`, which
+`parseNewAgentEnvPreset(params)` rebuilds on **every render**, and it paired that
+with a `cancelled` flag set from its own cleanup:
+
+```
+Render 1   effect runs -> guard set -> request starts -> cleanup armed
+Render 2   cleanup fires -> cancelled = true
+           effect re-runs -> once-only guard -> returns, nothing re-armed
+Response   `if (!cancelled)` is false -> binding dropped, plain value kept
+```
+
+Render 2 is not a race that *might* happen: the component holds six `useQuery`
+calls that all resolve after mount. The secret **was** created; only the binding
+was lost — which is why the vault looked untouched from the agent's side.
+
+Fixed by depending on a **string** key (`JSON.stringify(envPreset)`) and removing
+the cleanup entirely: nothing may cancel the single attempt the guard permits.
+
+**2. The failure path was silent.** `bindEnvPresetToOrganizationSecrets` caught
+every error and returned the plain binding, justified at the time as "a visible,
+editable path beats no directory at all". That reasoning is wrong in the way that
+matters: **a silent fallback is byte-identical to the change not being deployed**,
+so the operator could not distinguish a stale build from a broken feature, and
+spent a testing round on the question. It now throws, and `NewAgentSetup` renders
+the message above the form.
+
+> **The lesson worth keeping.** A degradation path that produces exactly the
+> pre-fix symptom is not a safety net — it is a way to hide the defect from the
+> only person able to report it. Fail loudly, or do not fail.
+
+### Covered by
+
+`ui/src/lib/home-directory-secret.test.ts` (9, one asserting it now THROWS rather
+than falling back) plus a mid-request regression test and two rewritten cases in
+`NewAgent.test.tsx` asserting the `secret_ref` reaches **both** `testEnvironment`
+and `hire`, and that a second agent from the same vault reuses the secret. cs5 baseline 48 → **60**.
+
 ## 1. The gap this closes
 
 Both vault docs end at the same sentence, and both pages used to say it out loud:

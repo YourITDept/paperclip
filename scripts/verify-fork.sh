@@ -123,6 +123,56 @@ check() { # check <label> <expected> <actual>
 }
 
 # ===========================================================================
+# ===========================================================================
+hdr "0a. Preflight — memory and abandoned test processes (§7.5 #5, trap 5)"
+# Runs FIRST because both failures it catches are indistinguishable from real
+# defects once you are looking at a red suite:
+#
+#   - §7.5 #5: the OOM killer returns exit 137 with ZERO `error TS` lines, which
+#     reads as a broken typecheck. Cost a full run on 2026-09-09 (Session 22)
+#     while three abandoned tsx processes aged 4-9 HOURS held ~2.1 GB between
+#     them.
+#   - trap 5: test processes that outlive their run, ignore SIGTERM, and keep
+#     their embedded-Postgres and heap alive. They also cause the
+#     `companies_issue_prefix_idx` collisions that look like fork defects.
+#
+# REPORTS, NEVER KILLS. Two reasons: these are not always this script's
+# processes, and one class of them MUST NOT be killed — see the skip list.
+MEM_AVAIL_GB=$(awk '/MemAvailable/ {printf "%d", $2/1048576}' /proc/meminfo 2>/dev/null || echo 99)
+if [ "$MEM_AVAIL_GB" -ge 6 ]; then
+  grn "  PASS  memory available (${MEM_AVAIL_GB}G)"; note PASS "memory available" "${MEM_AVAIL_GB}G"
+elif [ "$MEM_AVAIL_GB" -ge 3 ]; then
+  ylw "  WARN  only ${MEM_AVAIL_GB}G available — typecheck may be OOM-killed (§7.5 #5)"
+  note WARN "memory available" "${MEM_AVAIL_GB}G"
+else
+  red "  FAIL  ${MEM_AVAIL_GB}G available. Typecheck WILL be OOM-killed and report exit 137"
+  red "        with zero 'error TS'. Clear the processes below before believing any result."
+  note FAIL "memory available" "${MEM_AVAIL_GB}G"; FAILED=1
+fi
+
+# Abandoned test runners only. The skip list is not an optimisation — it is a
+# safety boundary:
+#   vscode-server  the operator's IDE, and HOW THEY SIGN IN. Killing it ends
+#                  their session. It grows over hours; the remedy is for them to
+#                  log out and back in, never `kill`.
+#   claude         the Claude Code extension host — that is this session.
+# Anything matched below is a vitest/tsx/postgres leftover with no live parent.
+STRAY=$(ps -eo pid,etime,rss,args --sort=-rss 2>/dev/null \
+  | grep -E "vitest|tsx@|embedded-postgres|paperclip-company-cli-e2e" \
+  | grep -vE "vscode-server|anthropic\.claude-code|[Cc]laude|verify-fork|grep" \
+  | awk '$2 ~ /:/ && ($2 ~ /-/ || $2 ~ /^[0-9]+:[0-9]+:/) {print}')
+if [ -z "$STRAY" ]; then
+  grn "  PASS  no abandoned test processes"; note PASS "abandoned test processes" 0
+else
+  N=$(printf '%s\n' "$STRAY" | grep -c .)
+  ylw "  WARN  $N test process(es) older than an hour are still holding memory:"
+  printf '%s\n' "$STRAY" | cut -c1-110 | sed 's/^/        /'
+  ylw "        They ignore SIGTERM (trap 5). Clear with:"
+  ylw "          kill -9 $(printf '%s\n' "$STRAY" | awk '{printf "%s ", $1}')"
+  ylw "        Do NOT kill vscode-server — that is the operator's sign-in."
+  note WARN "abandoned test processes" "$N"
+fi
+
 hdr "0. Toolchain — §3.1 and §3.3"
 # §3.3: `pnpm` on PATH is 9.15.9 and is NOT the pin. Only `corepack pnpm` is.
 PNPM_V=$(corepack pnpm -v 2>/dev/null | tail -1)
@@ -280,7 +330,12 @@ suite "cs3+4 credential vaults" 83 server/src/__tests__/codex-vault-login-servic
   packages/adapters/codex-local/src/server/codex-vault.test.ts \
   packages/adapters/claude-local/src/server/claude-vault.test.ts
 suite "cs3/4 sidebar parity (UI reachability)" 4 ui/src/components/CompanySettingsSidebar.fork-parity.test.ts
-suite "cs5 vault preset" 48 ui/src/lib/new-agent-preset.test.ts ui/src/pages/NewAgent.test.tsx
+# 59 since 2026-09-09: the vault directory now binds as an ORGANIZATION SECRET
+# (secret_ref) instead of a plain env value, because a plain one reads back as
+# ***REDACTED*** and an edit round trip persists the marker as the directory.
+# +2 rewritten preset cases, +9 for home-directory-secret.test.ts.
+suite "cs5 vault preset" 60 ui/src/lib/new-agent-preset.test.ts ui/src/pages/NewAgent.test.tsx \
+  ui/src/lib/home-directory-secret.test.ts
 suite "cs6 invite guard" 19 ui/src/pages/InviteLanding.test.tsx
 suite "cs10 duplicate payload" 5 ui/src/lib/duplicate-agent-payload.test.ts
 suite "cs10 agent permissions" 69 server/src/__tests__/agent-permissions-routes.test.ts

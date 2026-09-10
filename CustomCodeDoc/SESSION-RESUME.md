@@ -91,6 +91,22 @@ New to this build:
 
 Adopted 2026-09-04 because sessions have been dropping mid-work.
 
+### Before any long activity — check the machine (added 2026-09-09)
+
+```bash
+./scripts/verify-fork.sh guards     # runs the §7.0-pre preflight in ~10 seconds
+free -g                             # or just this, if you only want the number
+```
+
+Do it before a compile, a build, `pnpm install`, a test run, or a deployment
+test. Host state has now been mistaken for a code defect three times: an
+OOM-killed typecheck reporting `exit 137` with zero `error TS`, and embedded-
+Postgres collisions from abandoned runners. Both look like the code.
+
+**Never kill `vscode-server`** — it is the operator's IDE *and their sign-in*.
+It grows over hours; the fix is to log out and back in, not `kill`. The preflight
+excludes it, and the Claude Code extension host, by design.
+
 ### On resume — before touching anything
 
 1. **Read this file.** It is the only place that claims to be current.

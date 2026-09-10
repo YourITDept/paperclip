@@ -398,18 +398,70 @@ describe("New agent setup", () => {
   it.each([
     ["claude_local", "CLAUDE_CONFIG_DIR", "/sysops/llm/claude/team"],
     ["codex_local", "CODEX_HOME", "/sysops/llm/codex/team"],
-  ])("uses the %s login preset without an extra connection step", async (adapter, envName, envValue) => {
+  ])("binds the %s login preset as an organization secret, not a plain value", async (adapter, envName, envValue) => {
+    // The vault directory must reach the agent as a `secret_ref`. A plain value
+    // reads back as `***REDACTED***` (server/src/redaction.ts:946), so an agent
+    // created from one and edited later persists the marker as its directory.
+    secrets.list.mockResolvedValue([]);
+    secrets.create.mockResolvedValue({ id: "sec-vault-1", name: `${envName}_team` });
     await render(adapter, "codex", [envName, envValue]);
     expect(container.textContent).not.toContain("Connect a model");
     await click("Run test");
     await click("Finish setup");
-    expect(api.testEnvironment.mock.calls[0][2].adapterConfig.env[envName]).toEqual({
-      type: "plain",
+
+    // Created once, in the organization, holding the directory as its value.
+    expect(secrets.create).toHaveBeenCalledTimes(1);
+    expect(secrets.create.mock.calls[0][1]).toMatchObject({
+      name: `${envName}_team`,
       value: envValue,
     });
+
+    const binding = { type: "secret_ref", secretId: "sec-vault-1", version: "latest" };
+    expect(api.testEnvironment.mock.calls[0][2].adapterConfig.env[envName]).toEqual(binding);
+    expect(api.hire.mock.calls[0][1].adapterConfig.env[envName]).toEqual(binding);
+  });
+
+  it("binds the vault directory even when a render lands mid-request", async () => {
+    // REGRESSION (2026-09-10). The first version depended on `envPreset`, a new
+    // object each render, and cancelled itself from the effect cleanup. Any
+    // render between starting the request and its response — one of six
+    // useQuery calls resolving, so: always — set `cancelled`, and the retry was
+    // blocked by the once-only guard. The secret got created and the binding was
+    // silently dropped, leaving the plain path. Deferring the response here
+    // guarantees renders land while it is in flight.
+    let release!: (rows: unknown[]) => void;
+    secrets.list.mockReturnValue(new Promise((resolve) => { release = resolve; }));
+    secrets.create.mockResolvedValue({ id: "sec-late", name: "CODEX_HOME_team" });
+
+    await render("codex_local", "codex", ["CODEX_HOME", "/sysops/llm/codex/team"]);
+    await act(async () => { release([]); });
+    await settle();
+
+    await click("Run test");
+    await click("Finish setup");
+    expect(api.hire.mock.calls[0][1].adapterConfig.env.CODEX_HOME).toEqual({
+      type: "secret_ref",
+      secretId: "sec-late",
+      version: "latest",
+    });
+  });
+
+  it.each([
+    ["claude_local", "CLAUDE_CONFIG_DIR", "/sysops/llm/claude/team"],
+    ["codex_local", "CODEX_HOME", "/sysops/llm/codex/team"],
+  ])("reuses an existing %s vault secret instead of creating a second", async (adapter, envName, envValue) => {
+    // One secret per vault per organization is the point: rotating the path in
+    // one place moves every agent bound to it.
+    secrets.list.mockResolvedValue([{ id: "sec-existing", name: `${envName}_team` }]);
+    await render(adapter, "codex", [envName, envValue]);
+    await click("Run test");
+    await click("Finish setup");
+
+    expect(secrets.create).not.toHaveBeenCalled();
     expect(api.hire.mock.calls[0][1].adapterConfig.env[envName]).toEqual({
-      type: "plain",
-      value: envValue,
+      type: "secret_ref",
+      secretId: "sec-existing",
+      version: "latest",
     });
   });
   it.each([

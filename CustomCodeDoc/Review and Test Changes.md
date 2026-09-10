@@ -691,6 +691,48 @@ you want is "nothing fork-carried is in those files any more."
 
 ## 7. The test procedure
 
+### 7.0-pre Preflight — check the machine before you trust a long run
+
+**Added 2026-09-09 (Session 22) at the operator's request, after the third time
+host state was mistaken for a code defect.** `verify-fork.sh` now runs this
+first, in every mode, so it cannot be skipped:
+
+```bash
+./scripts/verify-fork.sh guards     # the preflight runs here too, ~10 seconds in
+```
+
+**Why it exists.** Both conditions it catches present as defects, not as
+environment problems:
+
+| Condition | How it lies to you |
+| --- | --- |
+| Low memory | The OOM killer returns **exit 137 with zero `error TS` lines** — reads as a broken typecheck (§7.5 #5). |
+| Abandoned test processes | They hold heap and their embedded-Postgres, and cause `companies_issue_prefix_idx` collisions that look like fork defects. They also **ignore SIGTERM** (§7.5 trap 5). |
+
+Session 22 lost a full targeted run to the first one while three abandoned `tsx`
+processes aged **four to nine hours** held ~2.1 GB between them. They exited on
+their own before anyone intervened, which is precisely why they are easy to blame
+on the code: by the time you investigate, the evidence is gone.
+
+Thresholds: **≥6 G available** passes, 3–6 G warns, **<3 G fails** — because below
+that the typecheck will be killed and every number after it is meaningless.
+
+#### It reports and never kills, and one exclusion is a safety boundary
+
+| Process | Treatment |
+| --- | --- |
+| `vscode-server` | **NEVER KILL.** This is the operator's IDE *and how they sign in* — killing it ends their session. It does grow over hours; the remedy is for the operator to log out and back in, never `kill`. |
+| `anthropic.claude-code` | Excluded — that is the assistant's own session. |
+| `vitest`, `tsx@`, `embedded-postgres`, `paperclip-company-cli-e2e` | Reported with a ready-to-paste `kill -9`, older than an hour only. |
+
+The script prints the command rather than running it: these are not always its own
+processes, and one class of them must never be touched.
+
+> **Do this before any long activity, not just this script** — a build, a
+> `pnpm install`, a compile, a deployment test. The cost is ten seconds; the cost
+> of not doing it has now been a wasted 90-minute run, a misclassified typecheck,
+> and a flake investigated as a fork defect.
+
 ### 7.0 The short version — `scripts/verify-fork.sh`
 
 **Added Session 19.** Everything in §6.5, §7.1, §7.2 and §7.3 is executable:
@@ -1388,6 +1430,9 @@ record. Anything else in that diff deserves a second look.
 
 #### 4. Some failures are the machine, not the merge
 
+> **Preflight catches the common cause.** §7.0-pre lists abandoned test
+> processes, which are what usually make "the machine" the answer.
+
 `workspace-runtime*` and `local-service-supervisor` bind real ports, spawn
 process trees and negotiate HTTPS exposure. `workspace-runtime.test.ts` alone has
 a 123 s baseline in `general-server-shard-durations.json`; under load it takes
@@ -1396,6 +1441,10 @@ a 123 s baseline in `general-server-shard-durations.json`; under load it takes
 files. Re-run a suspect suite alone before classifying it.
 
 #### 5. Exit 137 is memory, not a type error — do not run typecheck beside the suite
+
+> **Preflight catches this now.** §7.0-pre checks available memory and names
+> abandoned processes before the first suite runs. If you are reading this after
+> an exit 137, check whether the preflight warned and was ignored.
 
 **Added Session 15.** `pnpm run typecheck` died three times running with:
 
