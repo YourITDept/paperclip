@@ -20,6 +20,48 @@ they are the thing most likely to undo a fork change, but the detail lives in th
 
 ---
 
+## 2026-09-11 — Change set 11: claim provisioning jobs in `sequence` order
+
+**Status:** `AWAITING REVIEW` — uncommitted on `W8-20260909e` @ `246e27798`
+**Document:** [`Outseta provisioning worker.md`](CustomCodeDoc/Outseta%20provisioning%20worker.md)
+§ "Claim order: `sequence`"
+
+**The report (onboarding side):** memberships were claimed before the company
+they name, and parked for 5 minutes. `created_at` cannot carry insertion order:
+its default `now()` is the transaction's start time, so every row one insert
+writes ties. The tooling worked around it with `now() + index seconds`, which
+spread a 28-job plan 27 seconds into the future, and a separate per-user command
+a second later sorted into the middle of it. Seen three times on `db_dev071`
+today (`TES`/`TESA`, `PRO`, `PROJ`).
+
+**What changed.** One line in `server/src/provisioning/store.ts` `claimOne`:
+`ORDER BY created_at` → `ORDER BY sequence`. `created_at` stays as the time a
+job was queued.
+
+**No schema change on this side, and none needed.** The request asked for the
+column in the fork's drizzle schema with a migration. The fork has neither for
+this table: `packages/db` defines no `provisioning_jobs`, no migration touches it,
+and nothing in `server/src/provisioning/` creates it. `database.js` owns the DDL
+and adds `sequence bigint GENERATED ALWAYS AS IDENTITY` plus
+`provisioning_jobs_sequence_idx`. This side only ever `UPDATE`s the table, so
+`GENERATED ALWAYS` refusing writes cannot affect it.
+
+**Consequence of not owning the column:** a queue created before `database.js`
+added it now fails the claim with `42703 column "sequence" does not exist`.
+`guard()` passes only missing-table and missing-schema errors through as "idle",
+so this surfaces as an error rather than a silent stall.
+
+**Verified** on `db_dev071`: the exact claim statement, run inside a transaction
+and rolled back, parses and returns `sequence` 1. **No automated test covers the
+claim SQL**; the provisioning suites call the handlers directly.
+
+**Rollout step 3** (onboarding side drops the `+ index seconds` offset) is safe
+only once a server running this build is draining the queue.
+
+**Not `LIVE-VERIFIED`.**
+
+---
+
 ## 2026-09-11 — Change set 12: agents missing from the `paperclip` skill page
 
 **Status:** `AWAITING REVIEW` — uncommitted on `W8-20260909e` @ `6333848f6`

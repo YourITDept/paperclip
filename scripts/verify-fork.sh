@@ -263,6 +263,9 @@ g     "cs10 restoreDuplicateSourceEnv (def + 2 call sites)" 3 "restoreDuplicateS
 # construct the handlers directly and never import index.ts.
 g     "cs11 provisioning wired into index.ts" 3 "startProvisioningWorker\|provisioningWorker.stop" server/src/index.ts
 check "cs11 module present" "5" "$(ls server/src/provisioning/*.ts 2>/dev/null | wc -l | tr -d ' ')"
+# change set 11 — claim order. No test runs the claim SQL, so a merge that puts
+# back `ORDER BY created_at` stays green while memberships park behind companies.
+g     "cs11 claim in sequence order" 1 "ORDER BY sequence" server/src/provisioning/store.ts
 # change set 12 — the non-CEO branch lives inside upstream's own function. Lose
 # it and agents still get the skill at run time; the skill page lists no one.
 g     "cs12 non-CEO paperclip skill default (routes)" 1 "PAPERCLIP_OPERATIONAL_SKILL_KEY, versionId: null" server/src/routes/agents.ts

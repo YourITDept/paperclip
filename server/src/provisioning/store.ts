@@ -187,7 +187,10 @@ export function provisioningStore(run: SqlRunner) {
         WHERE id = (
           SELECT id FROM provisioning.provisioning_jobs
           WHERE status = 'pending' AND run_after <= now()
-          ORDER BY created_at
+          -- Insertion order. created_at cannot carry it: now() is the
+          -- transaction's start time, so every row one insert writes ties.
+          -- The onboarding tooling adds this identity column; never written here.
+          ORDER BY sequence
           FOR UPDATE SKIP LOCKED
           LIMIT 1
         )

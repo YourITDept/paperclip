@@ -113,6 +113,35 @@ never re-queued, and a type we simply had not built yet would be dead for good.
 **Adding a name to `JOB_TYPES` is therefore always the first step**, and it is
 safe on its own.
 
+## Claim order: `sequence` (added 2026-09-11)
+
+`claimOne` in `store.ts` takes the lowest `sequence` among pending jobs whose
+`run_after` has passed. It used to take the oldest `created_at`, which cannot
+carry insertion order: `now()` is the transaction's start time, so every row one
+insert writes ties, and the tooling's `now() + index seconds` workaround let one
+command's rows sort into the middle of another's. That is how memberships were
+claimed before their company and parked for 5 minutes.
+
+**The column belongs to the onboarding tooling, not to this fork.** `database.js`
+creates `sequence bigint GENERATED ALWAYS AS IDENTITY` and the unique index
+`provisioning_jobs_sequence_idx`. The fork has no schema or migration for this
+table and must never write `sequence`; it only `UPDATE`s rows.
+
+What `sequence` does and does not promise, per the tooling:
+
+- unique and increasing, assigned at insert; consecutive within one transaction;
+- gaps are normal (`ON CONFLICT DO NOTHING` still consumes a number);
+- visible at commit, so two concurrent writers can briefly appear out of order;
+  a job whose prerequisite has not landed parks, so nothing regresses;
+- rows that predate the column were numbered in physical storage order, which is
+  not insertion order. They are nearly all terminal, so claiming is unaffected.
+
+**If the column is missing**, the claim fails with `42703`. `guard()` only treats
+a missing table or schema as "idle", so this is an error, not a silent stall.
+
+**Covered by:** nothing automated. The provisioning suites call handlers directly
+and never run the claim SQL. Verified by a rolled-back dry run on `db_dev071`.
+
 ## Default instructions on `agent.create` (added 2026-09-09)
 
 **The defect, reported by the operator:** every agent provisioned from the queue
