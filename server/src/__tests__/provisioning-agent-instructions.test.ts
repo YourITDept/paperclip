@@ -133,4 +133,93 @@ describeEmbeddedPostgres("provisioning agent.create — default instructions", (
     expect(config.instructionsBundleMode).toBeUndefined();
     expect(config.instructionsFilePath).toBeUndefined();
   });
+
+  // Added 2026-09-11: `payload.instructions`. Everything above is the
+  // no-instructions path and must keep passing unchanged.
+  describe("instructions supplied in the payload", () => {
+    async function readEntry(agentId: string) {
+      return readFile((await entryFilePath(agentId))!, "utf8");
+    }
+
+    it("appends to the default bundle by default, keeping the Execution Contract", async () => {
+      const companyId = await seedCompany();
+      const result = await handlers().run("agent.create", payload(companyId, {
+        instructions: { files: { "AGENTS.md": "## Your role\nYou keep the books.\n" } },
+      })) as { agentId: string };
+
+      const contents = await readEntry(result.agentId);
+      expect(contents).toContain("Execution Contract");
+      expect(contents.endsWith("## Your role\nYou keep the books.\n")).toBe(true);
+      expect((await readConfig(result.agentId)).instructionsEntryFile).toBe("AGENTS.md");
+    });
+
+    it("treats a plain string as text appended to AGENTS.md", async () => {
+      const companyId = await seedCompany();
+      const result = await handlers().run("agent.create", payload(companyId, {
+        instructions: "Answer in French.\n",
+      })) as { agentId: string };
+
+      const contents = await readEntry(result.agentId);
+      expect(contents).toContain("Execution Contract");
+      expect(contents.endsWith("Answer in French.\n")).toBe(true);
+    });
+
+    it("uses only the payload's files when mode is replace", async () => {
+      const companyId = await seedCompany();
+      const result = await handlers().run("agent.create", payload(companyId, {
+        instructions: { mode: "replace", files: { "AGENTS.md": "Only this.\n", "SOUL.md": "Be brief.\n" } },
+      })) as { agentId: string };
+
+      expect(await readEntry(result.agentId)).toBe("Only this.\n");
+      const root = (await readConfig(result.agentId)).instructionsRootPath as string;
+      expect(await readFile(path.join(root, "SOUL.md"), "utf8")).toBe("Be brief.\n");
+    });
+
+    it("honours a custom entry file in replace mode", async () => {
+      const companyId = await seedCompany();
+      const result = await handlers().run("agent.create", payload(companyId, {
+        instructions: { mode: "replace", entryFile: "instructions.md", files: { "instructions.md": "Read me first.\n" } },
+      })) as { agentId: string };
+
+      expect((await readConfig(result.agentId)).instructionsEntryFile).toBe("instructions.md");
+      expect(await readEntry(result.agentId)).toBe("Read me first.\n");
+    });
+
+    it.each([
+      ["a path outside the bundle", { files: { "../escape.md": "x" } }],
+      ["an absolute path", { files: { "/etc/passwd": "x" } }],
+      ["an empty file list", { files: {} }],
+      ["an empty string", "   "],
+      ["an unknown mode", { mode: "merge", files: { "AGENTS.md": "x" } }],
+      ["a replace without its entry file", { mode: "replace", files: { "SOUL.md": "x" } }],
+      ["a custom entry file in append mode", { entryFile: "instructions.md", files: { "instructions.md": "x" } }],
+      ["non-string file content", { files: { "AGENTS.md": 42 } }],
+    ])("fails permanently, before creating the agent, for %s", async (_label, instructions) => {
+      const companyId = await seedCompany();
+      await expect(handlers().run("agent.create", payload(companyId, { instructions })))
+        .rejects.toMatchObject({ name: "PermanentJobError", code: "invalid_instructions" });
+      expect(await agentService(db).list(companyId)).toHaveLength(0);
+    });
+
+    it("fails permanently for an adapter that takes no instruction files", async () => {
+      const companyId = await seedCompany();
+      await expect(handlers().run("agent.create", payload(companyId, {
+        name: "Webhook Agent", adapterType: "http", instructions: "Be careful.",
+      }))).rejects.toMatchObject({ name: "PermanentJobError", code: "instructions_not_supported" });
+      expect(await agentService(db).list(companyId)).toHaveLength(0);
+    });
+
+    it("does not touch an existing agent's instructions on replay", async () => {
+      const companyId = await seedCompany();
+      const first = await handlers().run("agent.create", payload(companyId)) as { agentId: string };
+      const filePath = (await entryFilePath(first.agentId))!;
+      await writeFile(filePath, "Hand-edited by the operator.\n", "utf8");
+
+      const second = await handlers().run("agent.create", payload(companyId, {
+        instructions: { mode: "replace", files: { "AGENTS.md": "From a later queue row.\n" } },
+      })) as { agentId: string };
+      expect(second.agentId).toBe(first.agentId);
+      expect(await readFile(filePath, "utf8")).toBe("Hand-edited by the operator.\n");
+    });
+  });
 });

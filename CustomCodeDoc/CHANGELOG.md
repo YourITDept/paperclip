@@ -20,9 +20,41 @@ they are the thing most likely to undo a fork change, but the detail lives in th
 
 ---
 
+## 2026-09-11 — Change set 11: agent instructions in the `agent.create` payload
+
+**Status:** `AWAITING REVIEW` — uncommitted on `W8-20260909e` @ `ec65a3a4e`
+**Document:** [`Provisioning agent instructions.md`](CustomCodeDoc/Provisioning%20agent%20instructions.md)
+
+**The ask (operator):** let the onboarding tooling send an agent's instructions,
+to add to or replace the default bundle. **Constraint:** with no instructions
+sent, behave exactly as before.
+
+**What changed.** `agent.create` accepts an optional `instructions`:
+
+- a string, appended to `AGENTS.md`;
+- `{ files, mode: "append" }` (the default), which adds each file after the
+  default file of the same name;
+- `{ files, mode: "replace", entryFile? }`, which uses only the given files.
+
+**It is validated before the agent is created**, so bad input fails
+permanently (`invalid_instructions`, `instructions_not_supported`) with no agent
+left behind. Instructions are written on **create only**; an existing agent is
+logged and left alone.
+
+**The no-instructions path is unchanged:** same code path, same log line, and the
+three original tests pass unmodified.
+
+**Tests:** `provisioning-agent-instructions.test.ts` 17/17 (3 original + 14
+new); all provisioning suites 48/48; server `tsc` clean. `verify-fork.sh`
+"cs11 provisioning" baseline 30 → 44.
+
+**Not `LIVE-VERIFIED`.**
+
+---
+
 ## 2026-09-11 — Change set 11: claim provisioning jobs in `sequence` order
 
-**Status:** `AWAITING REVIEW` — uncommitted on `W8-20260909e` @ `246e27798`
+**Status:** `COMMITTED` — `ec65a3a4e` on `W8-20260909e` (operator, 2026-09-11 21:25: "All seems to be working with the creation of the sequence number")
 **Document:** [`Outseta provisioning worker.md`](CustomCodeDoc/Outseta%20provisioning%20worker.md)
 § "Claim order: `sequence`"
 

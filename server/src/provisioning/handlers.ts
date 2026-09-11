@@ -268,10 +268,117 @@ export function provisioningHandlers(
    * present, takes the reconcile path, and therefore never seeds at all — the
    * failure would make the gap permanent instead of transient.
    */
+  const DEFAULT_INSTRUCTIONS_ENTRY_FILE = "AGENTS.md";
+
+  /** Instructions an `agent.create` payload supplied, already validated. */
+  type ProvisionedInstructions = {
+    mode: "append" | "replace";
+    entryFile: string;
+    files: Record<string, string>;
+  };
+
+  /**
+   * A bundle-relative file path, or null.
+   *
+   * Stricter than `normalizeRelativeFilePath` in agent-instructions.ts on
+   * purpose: that one runs AFTER the agent exists, and a throw there leaves an
+   * agent with an empty bundle. Checked here, a bad path fails the job before
+   * anything is created.
+   */
+  function readInstructionsPath(raw: string): string | null {
+    const candidate = raw.trim().replaceAll("\\", "/");
+    if (!candidate || candidate.startsWith("/") || candidate.startsWith("~") || /^[A-Za-z]:/.test(candidate)) {
+      return null;
+    }
+    const parts = candidate.split("/");
+    if (parts.some((part) => part === "" || part === "." || part === "..")) return null;
+    return parts.join("/");
+  }
+
+  /**
+   * Read `payload.instructions`. Absent means "the default bundle", exactly as
+   * before this field existed. Anything malformed fails PERMANENTLY: a retry
+   * would read the same payload.
+   *
+   *   "some markdown"                       append to AGENTS.md
+   *   { files, mode?: "append" }            append each file to the default of
+   *                                         the same name, or add it
+   *   { files, mode: "replace", entryFile? } use only these files
+   *
+   * Content is never trimmed: it is written byte for byte.
+   */
+  function readInstructions(value: unknown): ProvisionedInstructions | null {
+    if (value === undefined || value === null) return null;
+    const invalid = (message: string) => new PermanentJobError(message, "invalid_instructions");
+
+    if (typeof value === "string") {
+      if (!value.trim()) throw invalid("instructions must not be empty");
+      return {
+        mode: "append",
+        entryFile: DEFAULT_INSTRUCTIONS_ENTRY_FILE,
+        files: { [DEFAULT_INSTRUCTIONS_ENTRY_FILE]: value },
+      };
+    }
+    if (typeof value !== "object" || Array.isArray(value)) {
+      throw invalid("instructions must be a string, or an object with files");
+    }
+
+    const input = value as Record<string, unknown>;
+    const mode = input.mode ?? "append";
+    if (mode !== "append" && mode !== "replace") {
+      throw invalid(`instructions.mode must be "append" or "replace" (got ${JSON.stringify(mode)})`);
+    }
+
+    const rawEntryFile = input.entryFile ?? DEFAULT_INSTRUCTIONS_ENTRY_FILE;
+    const entryFile = typeof rawEntryFile === "string" ? readInstructionsPath(rawEntryFile) : null;
+    if (!entryFile) throw invalid("instructions.entryFile must be a relative path inside the bundle");
+    // Append keeps the default AGENTS.md, which carries the Execution Contract.
+    // Pointing the agent at a different entry file would quietly stop it
+    // reading that contract, so a new entry file needs an explicit replace.
+    if (mode === "append" && entryFile !== DEFAULT_INSTRUCTIONS_ENTRY_FILE) {
+      throw invalid(
+        `instructions.entryFile can only be changed with mode "replace"; append adds to the default ${DEFAULT_INSTRUCTIONS_ENTRY_FILE}`,
+      );
+    }
+
+    const rawFiles = input.files;
+    if (!rawFiles || typeof rawFiles !== "object" || Array.isArray(rawFiles) || Object.keys(rawFiles).length === 0) {
+      throw invalid("instructions.files must be an object with at least one file");
+    }
+    const files: Record<string, string> = {};
+    for (const [rawPath, content] of Object.entries(rawFiles as Record<string, unknown>)) {
+      const filePath = readInstructionsPath(rawPath);
+      if (!filePath) throw invalid(`instructions file ${JSON.stringify(rawPath)} must be a relative path inside the bundle`);
+      if (typeof content !== "string") throw invalid(`instructions file ${JSON.stringify(rawPath)} must be a string`);
+      if (Object.prototype.hasOwnProperty.call(files, filePath)) {
+        throw invalid(`instructions file ${JSON.stringify(filePath)} is given more than once`);
+      }
+      files[filePath] = content;
+    }
+
+    // A replace without its entry file would write an EMPTY entry file, which
+    // is the empty-bundle defect this module already fixed once.
+    if (mode === "replace" && !files[entryFile]?.trim()) {
+      throw invalid(`instructions.files must include a non-empty ${entryFile} when mode is "replace"`);
+    }
+    return { mode, entryFile, files };
+  }
+
+  /** The files and entry file to write, from the role default plus the payload. */
+  function combineInstructions(defaults: Record<string, string>, custom: ProvisionedInstructions) {
+    if (custom.mode === "replace") return { files: custom.files, entryFile: custom.entryFile };
+    const files = { ...defaults };
+    for (const [filePath, content] of Object.entries(custom.files)) {
+      const base = files[filePath];
+      files[filePath] = base ? `${base.replace(/\s+$/, "")}\n\n${content}` : content;
+    }
+    return { files, entryFile: DEFAULT_INSTRUCTIONS_ENTRY_FILE };
+  }
+
   async function seedDefaultInstructions(agent: {
     id: string; companyId: string; name: string; role: string;
     adapterType: string; adapterConfig: unknown;
-  }): Promise<void> {
+  }, custom: ProvisionedInstructions | null = null): Promise<void> {
     try {
       if (findActiveServerAdapter(agent.adapterType)?.supportsInstructionsBundle !== true) return;
       const config = (agent.adapterConfig ?? {}) as Record<string, unknown>;
@@ -281,17 +388,26 @@ export function provisioningHandlers(
       ].some((key) => typeof config[key] === "string" && config[key] !== "");
       if (alreadyConfigured) return;
 
-      const files = await loadDefaultAgentInstructionsBundle(
+      const defaults = await loadDefaultAgentInstructionsBundle(
         resolveDefaultAgentInstructionsBundleRole(agent.role),
       );
+      // No `instructions` in the payload: the role default and AGENTS.md,
+      // exactly what this did before the field existed.
+      const { files, entryFile } = custom
+        ? combineInstructions(defaults, custom)
+        : { files: defaults, entryFile: DEFAULT_INSTRUCTIONS_ENTRY_FILE };
       const materialized = await instructionsSvc.materializeManagedBundle(agent, files, {
-        entryFile: "AGENTS.md",
+        entryFile,
         replaceExisting: false,
       });
       await agentsSvc.update(agent.id, { adapterConfig: materialized.adapterConfig });
       logger.info(
-        { agentId: agent.id, companyId: agent.companyId, role: agent.role, files: Object.keys(files) },
-        "provisioning: seeded default agent instructions",
+        custom
+          ? { agentId: agent.id, companyId: agent.companyId, role: agent.role, files: Object.keys(files), mode: custom.mode, entryFile }
+          : { agentId: agent.id, companyId: agent.companyId, role: agent.role, files: Object.keys(files) },
+        custom
+          ? "provisioning: seeded agent instructions from the payload"
+          : "provisioning: seeded default agent instructions",
       );
     } catch (err) {
       logger.error(
@@ -1112,14 +1228,35 @@ export function provisioningHandlers(
     // vault relies on, which is not the same as leaving it unset.
     if (model) adapterConfig.model = model;
 
+    // Validated before the create/update split, so a malformed `instructions`
+    // fails the job the same way whichever path it would have taken. Absent,
+    // this is null and everything below behaves exactly as it did before.
+    const instructions = readInstructions(payload.instructions);
+
     const existing = await agentsSvc
       .list(companyId)
       .then((rows) => rows.find((row) => row.name === name) ?? null);
     if (existing) {
+      if (instructions) {
+        // Create only, like the default bundle: a later queue row must not
+        // overwrite instructions someone may have edited by hand.
+        logger.info(
+          { agentId: existing.id, name, companyId, mode: instructions.mode },
+          "provisioning: agent already exists; payload instructions apply on create only and were not written",
+        );
+      }
       return reconcileAgent(existing, { name, companyId, env, model, secretKey, secretEnv, codexHomeKey, codexHomeSecretId, secretId });
     }
 
     const adapterType = readString(payload.adapterType) ?? "codex_local";
+    // Refused BEFORE the create. After it, the only way to fail would leave an
+    // agent behind whose instructions were silently never written.
+    if (instructions && findActiveServerAdapter(adapterType)?.supportsInstructionsBundle !== true) {
+      throw new PermanentJobError(
+        `adapter ${adapterType} takes no instruction files; remove instructions from the payload or use an adapter that does`,
+        "instructions_not_supported",
+      );
+    }
     const agent = await agentsSvc.create(companyId, {
       name,
       adapterType,
@@ -1128,7 +1265,7 @@ export function provisioningHandlers(
       ...(payload.canCreateAgents === true ? { permissions: { canCreateAgents: true } } : {}),
     });
 
-    await seedDefaultInstructions(agent);
+    await seedDefaultInstructions(agent, instructions);
 
     logger.info(
       {

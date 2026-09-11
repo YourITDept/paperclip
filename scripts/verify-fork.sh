@@ -361,7 +361,10 @@ suite "cs3/4 openapi contract" 6 server/src/__tests__/openapi-routes.test.ts
 # 30 since 2026-09-09: +3 for provisioning-agent-instructions.test.ts. Provisioned
 # agents were born with an EMPTY instruction bundle because this module calls
 # agentService.create directly and only agentRoutes seeds defaults.
-suite "cs11 provisioning" 30 server/src/__tests__/provisioning-agent-codex-home.test.ts \
+# 44 since 2026-09-11: +14 for payload `instructions` on agent.create. The 3
+# original no-instructions tests are unchanged; a count below 44 means a merge
+# dropped either the new field or the default-bundle path.
+suite "cs11 provisioning" 44 server/src/__tests__/provisioning-agent-codex-home.test.ts \
   server/src/__tests__/provisioning-agent-task.test.ts \
   server/src/__tests__/provisioning-membership-remove.test.ts \
   server/src/__tests__/provisioning-agent-instructions.test.ts

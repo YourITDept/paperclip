@@ -193,6 +193,12 @@ point, and failing the job would push it into a retry that finds the agent
 present, takes the reconcile path, and therefore never seeds — the failure would
 make the gap *permanent* rather than transient.
 
+**Payload instructions (added 2026-09-11).** `agent.create` may carry an
+`instructions` field that appends to or replaces this default. Without it,
+everything in this section applies unchanged. The contract, validation and
+examples are in
+[`Provisioning agent instructions.md`](CustomCodeDoc/Provisioning%20agent%20instructions.md).
+
 ### Where it is written, and the trap that comes with it
 
 `materializeManagedBundle` writes under `resolvePaperclipInstanceRoot()`, which is
