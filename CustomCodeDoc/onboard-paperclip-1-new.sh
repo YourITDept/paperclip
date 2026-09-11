@@ -524,14 +524,104 @@ case "$MODE" in
     apply_config_patches; exit 0 ;;
 esac
 
-check_gates
-
 if ! db_url_valid; then
   echo "FATAL: the database URL from $DATABASE_URL_SOURCE is not a postgres:// URL." >&2
   echo "       got: ${DATABASE_URL%%\?*}" >&2
   echo "       Pass a valid one with --db-url, or set POSTGRES_URL." >&2
   exit 1
 fi
+
+# ------------------------------------------------ database reachability -----
+# The first thing onboard does, before the gates, the config guard, the port
+# preflight or any write. Without it an unreachable database shows up minutes
+# later as a server that never turns healthy, with the reason buried in the
+# onboard log and config.json already written, and an existing config.json
+# turns every re-run into a no-op until someone moves it aside.
+#
+# With psql this is a real login, so SELECT 1 proves host, port, TLS,
+# credentials and database name together. -w stops psql from prompting for a
+# password when the URL has none, which would otherwise hang the script. Without
+# psql only the TCP connection can be checked, and the output says so.
+db_url_redacted() {
+  node -e '
+    const u = new URL(process.env.DATABASE_URL);
+    if (u.password) u.password = "****";
+    u.search = "";
+    process.stdout.write(u.toString());
+  ' 2>/dev/null || printf '(unparseable)'
+}
+
+db_tcp_connect() {
+  node -e '
+    const net = require("net");
+    const u = new URL(process.env.DATABASE_URL);
+    const host = u.hostname.replace(/^\[|\]$/g, "");
+    const port = Number(u.port || 5432);
+    const s = net.connect({ host, port });
+    s.setTimeout(5000);
+    s.on("connect", () => { s.destroy(); process.exit(0); });
+    s.on("timeout", () => { console.error(`timed out after 5s connecting to ${host}:${port}`); process.exit(1); });
+    s.on("error", (e) => { console.error(`${e.code || "error"}: ${e.message}`); process.exit(1); });
+  '
+}
+
+# Turns the driver error into the likely cause. Order matters: a TLS-negotiated
+# attempt can mention SSL on its way to a password failure.
+db_error_hint() {
+  case "$1" in
+    *"password authentication failed"*)
+      echo "The server answered but rejected the username or password in the URL." ;;
+    *"does not exist"*)
+      echo "The server answered but the database or role named in the URL does not exist on it." ;;
+    *"no pg_hba.conf entry"*)
+      echo "The server is up but is configured to refuse connections from this host (pg_hba.conf)." ;;
+    *"Connection refused"*|*ECONNREFUSED*)
+      echo "Nothing is listening at that host and port. Is PostgreSQL running, and is the port right?" ;;
+    *"timeout expired"*|*"timed out"*|*ETIMEDOUT*)
+      echo "No answer within 5s. The host is down, or a firewall or security group is dropping the connection." ;;
+    *"could not translate host name"*|*ENOTFOUND*|*EAI_AGAIN*)
+      echo "The hostname does not resolve. Check it for typos, and check DNS on this host." ;;
+    *SSL*|*ssl*)
+      echo "TLS negotiation failed. Check sslmode in the URL against what the server requires." ;;
+  esac
+}
+
+db_unreachable() {
+  local how="$1" err="$2" hint
+  hint="$(db_error_hint "$err")"
+  echo >&2
+  echo "FATAL: cannot connect to the database. Onboarding stopped before doing anything." >&2
+  echo "       Nothing was written: no config, no .env, no server started." >&2
+  echo >&2
+  echo "       database: $(db_url_redacted)" >&2
+  echo "       from:     $DATABASE_URL_SOURCE" >&2
+  echo "       checked:  $how" >&2
+  if [ -n "$err" ]; then
+    echo "       error:" >&2
+    printf '%s\n' "$err" | sed 's/^/         /' >&2
+  fi
+  [ -z "$hint" ] || echo "       likely:   $hint" >&2
+  echo >&2
+  echo "       Fix the database or the URL (--db-url, or POSTGRES_URL), then re-run." >&2
+  exit 1
+}
+
+echo "Checking database connection: $(db_url_redacted)"
+if command -v psql > /dev/null 2>&1; then
+  if ! db_err="$(psql_db -w -A -t -c 'SELECT 1' 2>&1 > /dev/null)"; then
+    db_unreachable "psql login + SELECT 1" "$db_err"
+  fi
+  echo "  database OK (logged in and ran SELECT 1)"
+else
+  if ! db_err="$(db_tcp_connect 2>&1)"; then
+    db_unreachable "TCP connect only (psql not installed)" "$db_err"
+  fi
+  echo "  database port is reachable. psql is not installed, so the credentials and"
+  echo "  database name were NOT verified. Onboard will surface those if they are wrong."
+fi
+echo
+
+check_gates
 
 # ---------------------------------------------------------------- guard -----
 # onboard preserves an existing config and applies none of the above.
