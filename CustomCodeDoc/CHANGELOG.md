@@ -20,6 +20,67 @@ they are the thing most likely to undo a fork change, but the detail lives in th
 
 ---
 
+## 2026-09-11 — Change set 12: agents missing from the `paperclip` skill page
+
+**Status:** `AWAITING REVIEW` — uncommitted on `W8-20260909e` @ `6333848f6`
+**Documents:** this entry; the provisioning half is in
+[`Outseta provisioning worker.md`](CustomCodeDoc/Outseta%20provisioning%20worker.md)
+§ "Default `paperclip` skill on `agent.create`"
+
+**The report (operator):** `paperclip` is the standard skill for every agent, but
+its skill page lists no agents.
+
+**Why.** The skill page lists an agent only when the skill is in that agent's
+*saved* skill list (`adapterConfig.paperclipSkillSync`, read by `usage()` in
+`company-skills.ts`). Claude and Codex agents get `paperclip` mounted at run time
+without it ever being saved (`resolveLegacyPaperclipDesiredSkillNames`), so the
+agents had the skill and the page could not see them. Neither creation path
+saved it:
+
+| Path | Saved skills before |
+| --- | --- |
+| `agentRoutes` create / hire — New Agent page, Create-from-login, hire approvals | CEO only: `defaultRoleSkillSelections` returned nothing for any other role |
+| `server/src/provisioning/handlers.ts` `agent.create` | None: `adapterConfig` is built from `env` and `model` only |
+
+**What changed.**
+
+- `routes/agents.ts` `defaultRoleSkillSelections`: non-CEO roles on
+  skills-capable adapters now get `paperclipai/paperclip/paperclip`. CEOs still
+  get the five core skills; `paperclip_runner` gets nothing, since it rejects the
+  legacy skill. Requested skills still union with the default.
+- `provisioning/handlers.ts`: `withDefaultPaperclipSkill` saves the same key on
+  create. Adapters without skill sync (`http`, `process`) are left alone.
+
+**Operator decisions (2026-09-11):** `paperclip` only for non-CEO agents, not the
+five core skills. **New agents only**: `reconcileAgent` does not add it and no
+backfill was run, so agents created before this still show nothing on the skill
+page until the skill is ticked on their Skills tab.
+
+**Tests.**
+
+- New `provisioning-agent-skills.test.ts`: 4/4 (Codex, Claude, `http` untouched,
+  existing agent untouched).
+- `agent-skills-routes.test.ts`: upstream's "does not add default skills to
+  non-CEO hires" now asserts the opposite, plus a direct-create test. 36/37; the
+  one failure (`paperclip_runner` CEO defaults, 500) failed the same way before
+  the change.
+- `agent-adapter-validation-routes.test.ts` and `agent-permissions-routes.test.ts`:
+  their `companySkillService` mocks gained `resolveRequestedSkillEntries`. Without
+  it a non-CEO `claude_local`/`codex_local` create reaches an undefined mock and
+  500s. Adapter-validation 32/32.
+- Server `tsc --noEmit` clean.
+
+**Not clean on this host, and not this change:** 18 permissions tests and all 5
+hire-idempotency tests fail with `Adapter "process" is not available on this
+instance`. This host's adapter allowlist admits only `claude_local` and
+`codex_local` and survives `env -u PAPERCLIP_ADAPTERS`. The refusal comes from
+`assertSelectableAdapterType`, which runs before skill defaults are chosen.
+
+**Not `LIVE-VERIFIED`.** No agent has been created on a running instance and
+watched to appear on the skill page.
+
+---
+
 ## 2026-09-08 — Change set 11: Outseta provisioning worker (registered)
 
 **Status:** `COMMITTED` — on `W8-20260908a`. Registration itself is

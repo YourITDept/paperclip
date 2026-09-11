@@ -178,6 +178,54 @@ cs11 §7.2 suite (baseline 27 → **30**). One asserts the file's **contents**, 
 just its existence: an empty `AGENTS.md` satisfies every structural check and is
 exactly the bug.
 
+## Default `paperclip` skill on `agent.create` (added 2026-09-11)
+
+**The defect, reported by the operator:** the `paperclip` skill's page listed no
+agents, although it is the standard skill every agent runs with.
+
+**Same shape as the instructions gap above.** The skill page counts an agent only
+when the skill is in its *saved* skill list (`adapterConfig.paperclipSkillSync`).
+Claude and Codex agents get `paperclip` mounted at run time without it being
+saved, so the agents had the skill and the page could not see them. `agentRoutes`
+saved defaults only for a CEO, and this module calls `agentService.create`
+directly, so it saved nothing at all.
+
+### What it does now
+
+`withDefaultPaperclipSkill()` runs on the create path, before `agentsSvc.create`:
+
+- writes `paperclipai/paperclip/paperclip` with `writePaperclipSkillSyncPreference`,
+  mirroring what `onboarding-seed.ts` does for a seeded CEO;
+- skips adapters with neither `listSkills` nor `syncSkills` (`http`, `process`);
+- skips `paperclip_runner`, which rejects the legacy operational skill;
+- does not resolve the key against the company library. A key that does not
+  resolve stays saved and never reaches the runtime, the same rule the route
+  applies to stale keys.
+
+Provisioning sets no role, so this is the non-CEO default. A queue row cannot ask
+for more skills: the payload has no `desiredSkills` field.
+
+**Create only. `reconcileAgent` does not call it.** The operator chose new agents
+only (2026-09-11), so a replayed or updated row does not give the skill to an
+agent that already exists.
+
+The route half (`defaultRoleSkillSelections` in `routes/agents.ts`) is change set
+12; see [`CHANGELOG.md`](CustomCodeDoc/CHANGELOG.md), 2026-09-11.
+
+### Covered by
+
+`server/src/__tests__/provisioning-agent-skills.test.ts`, 4 tests: Codex and
+Claude agents get the key; an `http` agent gets no skill list; an existing agent
+reconciled with a new model is not given it.
+
+### What it depends on
+
+`writePaperclipSkillSyncPreference` and `PAPERCLIP_OPERATIONAL_SKILL_KEY` from
+`@paperclipai/adapter-utils/server-utils`, and `listSkills`/`syncSkills` on the
+server adapter. If upstream renames the key or moves the preference out of
+`adapterConfig.paperclipSkillSync`, the suite above goes red. If upstream starts
+saving the operational skill itself, this becomes a harmless duplicate.
+
 ## What it depends on in upstream — the list to re-check after every merge
 
 This is the register entry that actually matters. After a merge, confirm each

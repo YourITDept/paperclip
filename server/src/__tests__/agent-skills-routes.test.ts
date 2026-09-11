@@ -1327,7 +1327,9 @@ describe.sequential("agent skill routes", () => {
     expect(desired).toContain("paperclipai/paperclip/paperclip");
   });
 
-  it("does not add default skills to non-CEO hires", async () => {
+  // FORK: non-CEO agents get the paperclip skill saved, so the company skill
+  // page lists them. See CustomCodeDoc/CHANGELOG.md, 2026-09-11.
+  it("gives non-CEO hires only the paperclip skill when none are requested", async () => {
     const res = await request(await createApp(createDb(true)))
       .post("/api/companies/company-1/agent-hires")
       .send({
@@ -1339,9 +1341,32 @@ describe.sequential("agent skill routes", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     const createInput = mockAgentService.create.mock.calls[0]?.[1] as {
-      adapterConfig: Record<string, unknown>;
+      adapterConfig: { paperclipSkillSync: { desiredSkills: string[] } };
     };
-    expect(createInput.adapterConfig.paperclipSkillSync).toBeUndefined();
+    expect(createInput.adapterConfig.paperclipSkillSync.desiredSkills).toEqual([
+      "paperclipai/paperclip/paperclip",
+    ]);
+  });
+
+  it("gives a direct non-CEO create the paperclip skill when none are requested", async () => {
+    // createApp() without createDb(true): that db requires board approval, and
+    // this path is the direct create, not a hire.
+    const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
+      .post("/api/companies/company-1/agents")
+      .send({
+        name: "Codex Worker",
+        role: "general",
+        adapterType: "codex_local",
+        adapterConfig: {},
+      }));
+
+    expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
+    const createInput = mockAgentService.create.mock.calls[0]?.[1] as {
+      adapterConfig: { paperclipSkillSync: { desiredSkills: string[] } };
+    };
+    expect(createInput.adapterConfig.paperclipSkillSync.desiredSkills).toEqual([
+      "paperclipai/paperclip/paperclip",
+    ]);
   });
 
   it("rejects version pins in agent hires while beta skills are disabled", async () => {

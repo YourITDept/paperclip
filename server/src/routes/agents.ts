@@ -2700,13 +2700,23 @@ export function agentRoutes(
   // desired-skill set that contradicts its own instructions. Optional role
   // skills remain removable afterwards. Legacy adapters separately guarantee
   // the Paperclip operational skill as a runtime invariant.
+  //
+  // FORK: change set 12 — CustomCodeDoc/CHANGELOG.md, 2026-09-11. Every other
+  // role gets the operational skill SAVED as well. Legacy adapters already mount
+  // it at run time, so agents behave the same, but the company skill page lists
+  // only agents whose saved set names a skill, so no non-CEO agent ever appeared
+  // under `paperclip`. Native runners reject that skill and get nothing.
   function defaultRoleSkillSelections(
     role: string | null | undefined,
     adapterType: string,
   ): AgentDesiredSkillEntry[] | undefined {
-    if (role !== "ceo") return undefined;
     const adapter = findActiveServerAdapter(adapterType);
     if (!adapter?.listSkills && !adapter?.syncSkills) return undefined;
+    if (role !== "ceo") {
+      return adapterType === "paperclip_runner"
+        ? undefined
+        : [{ key: PAPERCLIP_OPERATIONAL_SKILL_KEY, versionId: null }];
+    }
     return PAPERCLIP_CORE_SKILL_KEYS
       .filter((key) => adapterType !== "paperclip_runner" || key !== PAPERCLIP_OPERATIONAL_SKILL_KEY)
       .map((key) => ({ key, versionId: null }));

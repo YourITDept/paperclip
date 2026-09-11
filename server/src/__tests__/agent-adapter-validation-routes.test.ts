@@ -28,6 +28,15 @@ const mockAccessService = vi.hoisted(() => ({
 const mockCompanySkillService = vi.hoisted(() => ({
   listRuntimeSkillEntries: vi.fn(),
   resolveRequestedSkillKeys: vi.fn(),
+  // FORK: change set 12 — every skills-capable create now resolves the default
+  // paperclip skill, so a create reaches this even when it requests no skills.
+  resolveRequestedSkillEntries: vi.fn(
+    async (_companyId: string, requested: Array<string | { key: string; versionId?: string | null }>) => ({
+      resolved: requested.map((entry) =>
+        typeof entry === "string" ? { key: entry, versionId: null } : { key: entry.key, versionId: entry.versionId ?? null }),
+      unresolved: [] as string[],
+    }),
+  ),
 }));
 
 const mockSecretService = vi.hoisted(() => ({

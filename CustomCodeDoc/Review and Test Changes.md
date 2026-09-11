@@ -313,11 +313,26 @@ RETIRED, so the numbered references throughout §8 still resolve. Do not
 | 9 | ~~**`OPENROUTER_API_KEY` in the ACPX `codex` host-env allowlist**~~ **RETIRED in v6 — see §4.2.** The key is now bound per-agent instead of inherited from the host | §8 Session 12, Finding 2 (historical) | none — entry removed from `ACPX_INHERITED_PROVIDER_ENV_KEYS` in `packages/adapter-utils/src/acpx-engine/execute.ts`; guard removed from `execute-identity.test.ts` |
 | 10 | **Duplicate agent — retired-key drop and redacted-env restore** — a duplicate drops `runtimeConfig.modelProfiles` (rejected since upstream #12683) and names its source via a new optional `duplicateFromAgentId` so the server can restore `adapterConfig.env` values the client only ever held redacted | [`Duplicate agent fix.md`](CustomCodeDoc/Duplicate%20agent%20fix.md) | `ui/src/lib/duplicate-agent-payload.ts`, `packages/shared/src/validators/agent.ts` (`createAgentSchema`), `server/src/routes/agents.ts` (`restoreDuplicateSourceEnv`, wired into the create **and** hire paths) |
 | 11 | **Outseta provisioning worker** — an in-process worker that drains `provisioning.provisioning_jobs` into companies, users, memberships, secrets, agents and agent tasks, so an Outseta signup provisions an instance **without opening an inbound port**. Off unless `PAPERCLIP_PROVISIONING_WORKER_ENABLED=true` | [`Outseta provisioning worker.md`](CustomCodeDoc/Outseta%20provisioning%20worker.md) | `server/src/provisioning/{store,handlers,worker,index,run-once}.ts` (net-new), `server/src/index.ts` (two lines) |
+| 12 | **Default `paperclip` skill saved on new agents** — non-CEO agents on skills-capable adapters get `paperclipai/paperclip/paperclip` in their saved skill list, so the company skill page lists them. Runtime behaviour is unchanged: legacy adapters already mounted it | [`CHANGELOG.md`](CustomCodeDoc/CHANGELOG.md) 2026-09-11; provisioning half in [`Outseta provisioning worker.md`](CustomCodeDoc/Outseta%20provisioning%20worker.md) | `server/src/routes/agents.ts` (`defaultRoleSkillSelections`), `server/src/provisioning/handlers.ts` (`withDefaultPaperclipSkill`), the skill-service mocks in `server/src/__tests__/agent-{adapter-validation,permissions}-routes.test.ts` |
 
 ### 4.1 The files where fork and upstream both edit
 
 These are the collision points. A merge conflict here is normal and both sides
 are almost always kept:
+
+- `server/src/routes/agents.ts` `defaultRoleSkillSelections` — change set 12's
+  non-CEO branch. Added 2026-09-11. Upstream owns the function and its CEO
+  branch; a resolution that keeps upstream's `if (role !== "ceo") return undefined;`
+  silently drops the fork's half. **Nothing breaks**: agents still get the skill
+  at run time, and the skill page quietly goes back to listing no one. The canary
+  is `agent-skills-routes.test.ts` "gives non-CEO hires only the paperclip skill
+  when none are requested". Upstream's copy of that test asserts the *opposite*,
+  so taking upstream's test file whole removes the canary along with the fix.
+- `server/src/__tests__/agent-adapter-validation-routes.test.ts` and
+  `agent-permissions-routes.test.ts` — change set 12's
+  `resolveRequestedSkillEntries` mock entry. Lose it and the non-CEO
+  `claude_local`/`codex_local` creates in those suites fail with a bare
+  `Internal server error`, which names neither the mock nor the fork.
 
 - `server/src/app.ts` — the fork's vault route imports and `api.use(...)` mounts.
 - `server/src/__tests__/openapi-routes.test.ts` — the fork's `codex-vaults.ts`
@@ -929,6 +944,15 @@ corepack pnpm exec vitest run \
 corepack pnpm exec vitest run ui/src/lib/duplicate-agent-payload.test.ts
 corepack pnpm exec vitest run \
   server/src/__tests__/agent-permissions-routes.test.ts
+
+# change set 12 — default paperclip skill saved on new agents (added 2026-09-11)
+# 40 passed expected: 4 provisioning + 36 route. The route file has 37; the one
+# failure, "omits the legacy operational skill from paperclip_runner CEO
+# defaults" (500), predates change set 12. The route suite's "gives non-CEO hires
+# only the paperclip skill" is the §4.1 canary for the fork's branch inside
+# upstream's defaultRoleSkillSelections.
+corepack pnpm exec vitest run server/src/__tests__/provisioning-agent-skills.test.ts \
+  server/src/__tests__/agent-skills-routes.test.ts
 
 # the fork's provisioning module (O-6 — not yet a registered change set).
 # 27/27 expected. This is the only coverage of `server/src/provisioning/` and

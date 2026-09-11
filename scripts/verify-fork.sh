@@ -263,6 +263,13 @@ g     "cs10 restoreDuplicateSourceEnv (def + 2 call sites)" 3 "restoreDuplicateS
 # construct the handlers directly and never import index.ts.
 g     "cs11 provisioning wired into index.ts" 3 "startProvisioningWorker\|provisioningWorker.stop" server/src/index.ts
 check "cs11 module present" "5" "$(ls server/src/provisioning/*.ts 2>/dev/null | wc -l | tr -d ' ')"
+# change set 12 — the non-CEO branch lives inside upstream's own function. Lose
+# it and agents still get the skill at run time; the skill page lists no one.
+g     "cs12 non-CEO paperclip skill default (routes)" 1 "PAPERCLIP_OPERATIONAL_SKILL_KEY, versionId: null" server/src/routes/agents.ts
+g     "cs12 provisioning saves paperclip skill (def + call)" 2 "withDefaultPaperclipSkill" server/src/provisioning/handlers.ts
+g     "cs12 skill-service mocks" 2 "resolveRequestedSkillEntries: vi.fn" \
+  server/src/__tests__/agent-adapter-validation-routes.test.ts \
+  server/src/__tests__/agent-permissions-routes.test.ts
 
 # ---------------------------------------------------------------------------
 # ReverseProxyCustomChanges.md §0.1 #3 and #4 — the fork's experimental-flag
@@ -360,6 +367,11 @@ suite "cs11 provisioning" 30 server/src/__tests__/provisioning-agent-codex-home.
 # in `full` before, so #13063 widening the graph (`companyLogos`) went unseen by
 # every targeted run. 18/18 expected.
 suite "cs11 startup wiring (db mock)" 18 server/src/__tests__/server-startup-feedback-export.test.ts
+# 40 since 2026-09-11: 4 provisioning + 36 route. The route file has 37; the
+# 37th ("omits the legacy operational skill from paperclip_runner CEO defaults")
+# already failed with a 500 before change set 12 and is not counted.
+suite "cs12 default paperclip skill" 40 server/src/__tests__/provisioning-agent-skills.test.ts \
+  server/src/__tests__/agent-skills-routes.test.ts
 
 if [ "$MODE" != "full" ]; then
   hdr "Summary"; column -t -s"$(printf '\t')" "$SUMMARY" 2>/dev/null || cat "$SUMMARY"

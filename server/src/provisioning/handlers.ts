@@ -42,6 +42,10 @@ import {
   loadDefaultAgentInstructionsBundle,
   resolveDefaultAgentInstructionsBundleRole,
 } from "../services/default-agent-instructions.js";
+import {
+  PAPERCLIP_OPERATIONAL_SKILL_KEY,
+  writePaperclipSkillSyncPreference,
+} from "@paperclipai/adapter-utils/server-utils";
 import { findActiveServerAdapter } from "../adapters/registry.js";
 import { secretService } from "../services/secrets.js";
 import { companyService } from "../services/companies.js";
@@ -892,6 +896,30 @@ export function provisioningHandlers(
   }
 
   /**
+   * Save the `paperclip` skill into a new agent's skill list.
+   *
+   * Claude and Codex agents already receive it at run time without it being
+   * saved (`resolveLegacyPaperclipDesiredSkillNames`), so this changes nothing
+   * about what the agent can do. It changes what the company skill page can
+   * see: that page lists only agents whose SAVED list names the skill, so every
+   * provisioned agent was missing from it. Mirrors `defaultRoleSkillSelections`
+   * in routes/agents.ts, which this module bypasses by calling the service.
+   *
+   * Create only. The operator chose new agents only (2026-09-11), so
+   * `reconcileAgent` does not add it to agents that already exist.
+   */
+  function withDefaultPaperclipSkill(adapterType: string, adapterConfig: Record<string, unknown>) {
+    // Native runners get the same authority through their protocol and reject
+    // the legacy skill; adapters without skill sync have nowhere to save it.
+    if (adapterType === "paperclip_runner") return adapterConfig;
+    const adapter = findActiveServerAdapter(adapterType);
+    if (!adapter?.listSkills && !adapter?.syncSkills) return adapterConfig;
+    return writePaperclipSkillSyncPreference(adapterConfig, [
+      { key: PAPERCLIP_OPERATIONAL_SKILL_KEY, versionId: null },
+    ]);
+  }
+
+  /**
    * Apply an `agent.create` payload to the agent that already carries its name.
    *
    * Merges rather than replaces: entries the payload does not mention are left
@@ -1091,10 +1119,11 @@ export function provisioningHandlers(
       return reconcileAgent(existing, { name, companyId, env, model, secretKey, secretEnv, codexHomeKey, codexHomeSecretId, secretId });
     }
 
+    const adapterType = readString(payload.adapterType) ?? "codex_local";
     const agent = await agentsSvc.create(companyId, {
       name,
-      adapterType: readString(payload.adapterType) ?? "codex_local",
-      adapterConfig,
+      adapterType,
+      adapterConfig: withDefaultPaperclipSkill(adapterType, adapterConfig),
       // Only sent when it actually changes a default.
       ...(payload.canCreateAgents === true ? { permissions: { canCreateAgents: true } } : {}),
     });
